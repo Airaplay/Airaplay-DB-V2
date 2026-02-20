@@ -1,0 +1,18 @@
+{
+  "buildCommand": "npm run build:web",
+  "outputDirectory": "dist",
+  "routes": [
+    {
+      "handle": "filesystem"
+    },
+    {
+      "src": "/(.*)",
+      "dest": "/index.html"
+    }
+  ],
+  "env": {
+    "VITE_APP_TARGET": "web"
+  }
+}
+
+

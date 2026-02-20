@@ -1,0 +1,46 @@
+================================================================================
+                       DEPLOYMENT SEPARATION ACTIVE
+================================================================================
+
+This project builds to TWO DIFFERENT TARGETS:
+
+1. WEB (Vercel - Admin Dashboard)
+   Command: npm run build:web
+   Deploy to: Vercel
+   Package: Web version of admin dashboard
+
+2. APP (Play Store - Mobile Capacitor)
+   Command: npm run build:app
+   Deploy to: Google Play Store
+   Package: Android/iOS mobile app
+
+================================================================================
+                              DO NOT MIX!
+================================================================================
+
+WRONG: npm run build -> npm run build:web (must specify web for Vercel)
+RIGHT: npm run build:web -> Deploy to Vercel
+
+WRONG: npm run build:app -> Deploy to Vercel (wrong target!)
+RIGHT: npm run build:app -> Use with Android Studio -> Deploy to Play Store
+
+================================================================================
+                         BEFORE ANY DEPLOYMENT:
+================================================================================
+
+1. VERCEL DEPLOYMENT:
+   npm run clean-build:web
+   npm run lint
+   # Verify: dist/ folder created
+   # Deploy via Vercel
+
+2. PLAY STORE DEPLOYMENT:
+   npm run clean-build:app
+   npm run lint
+   npx cap copy android
+   # Build in Android Studio
+   # Upload to Play Store
+
+================================================================================
+                    Read DEPLOYMENT_SEPARATION.md for details
+================================================================================

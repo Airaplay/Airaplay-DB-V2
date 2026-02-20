@@ -1,0 +1,35 @@
+{
+	"appId": "com.airaplay.app",
+	"appName": "Airaplay",
+	"webDir": "dist",
+	"android": {
+		"allowMixedContent": true
+	},
+	"server": {
+		"androidScheme": "https"
+	},
+	"plugins": {
+		"AdMob": {},
+		"SplashScreen": {
+			"launchShowDuration": 0,
+			"launchAutoHide": false,
+			"backgroundColor": "#0d0d0d",
+			"androidScaleType": "CENTER_CROP",
+			"showSpinner": false,
+			"androidSpinnerStyle": "large",
+			"iosSpinnerStyle": "small",
+			"spinnerColor": "#00ad74",
+			"splashFullScreen": true,
+			"splashImmersive": true
+		},
+		"StatusBar": {
+			"style": "dark",
+			"backgroundColor": "#0a0a0a",
+			"overlaysWebView": true
+		},
+		"Keyboard": {
+			"resize": "native",
+			"resizeOnFullScreen": true
+		}
+	}
+}
