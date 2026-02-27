@@ -171,11 +171,16 @@ export const BlogManagementSection = (): JSX.Element => {
     if (!fileExt) throw new Error('Allowed: jpg, jpeg, png, webp, gif');
     const base = sanitizeFileName(file.name).replace(/\.[^.]+$/, '') || 'image';
     const fileName = `blog-${Date.now()}-${base}.${fileExt}`;
-    const filePath = `blog/${fileName}`;
+    const filePath = `${user.id}/blog/${fileName}`;
     const { error: uploadError } = await supabase.storage
       .from('thumbnails')
       .upload(filePath, file, { cacheControl: '3600', upsert: false });
-    if (uploadError) throw uploadError;
+    if (uploadError) {
+      const msg = typeof uploadError === 'object' && uploadError !== null && 'message' in uploadError
+        ? (uploadError as { message?: string }).message
+        : String(uploadError);
+      throw new Error(msg || 'Storage upload failed');
+    }
     const { data: { publicUrl } } = supabase.storage.from('thumbnails').getPublicUrl(filePath);
     return publicUrl;
   };
@@ -190,7 +195,8 @@ export const BlogManagementSection = (): JSX.Element => {
       const url = await uploadFeatureImage(file);
       setFormData((prev) => ({ ...prev, cover_image_url: url }));
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'Upload failed');
+      const message = err instanceof Error ? err.message : typeof err === 'object' && err !== null && 'message' in err ? String((err as { message: unknown }).message) : 'Upload failed';
+      setError(message);
     } finally {
       setIsUploadingFeatureImage(false);
     }
