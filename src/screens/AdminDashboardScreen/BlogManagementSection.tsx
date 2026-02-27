@@ -32,6 +32,39 @@ const defaultForm = {
   faqJson: '[]'
 };
 
+/** Converts simple Markdown-style formatting to HTML. No HTML knowledge required. */
+function simpleMarkdownToHtml(text: string): string {
+  if (!text.trim()) return '';
+  const escape = (s: string) =>
+    s
+      .replace(/&/g, '&amp;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;');
+  let out = escape(text);
+  // Links: [text](url)
+  out = out.replace(/\[([^\]]+)\]\(([^)]+)\)/g, '<a href="$2" target="_blank" rel="noopener noreferrer">$1</a>');
+  // Bold **text**
+  out = out.replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>');
+  // Italic *text*
+  out = out.replace(/\*([^*]+)\*/g, '<em>$1</em>');
+  // Headings (at start of line)
+  out = out.replace(/^### (.+)$/gm, '<h3>$1</h3>');
+  out = out.replace(/^## (.+)$/gm, '<h2>$1</h2>');
+  // Paragraphs: wrap double newlines in <p>
+  const paragraphs = out.split(/\n\n+/).filter((p) => p.trim());
+  return paragraphs.map((p) => {
+    const trimmed = p.trim();
+    if (/^<h[23]>/.test(trimmed)) return trimmed;
+    return `<p>${trimmed.replace(/\n/g, '<br />')}</p>`;
+  }).join('\n');
+}
+
+/** True if string looks like raw HTML (so we don’t run Markdown on it). */
+function looksLikeHtml(s: string): boolean {
+  const t = s.trim();
+  return t.startsWith('<') && (t.includes('</') || t.includes('/>'));
+}
+
 export const BlogManagementSection = (): JSX.Element => {
   const [posts, setPosts] = useState<BlogPost[]>([]);
   const [isLoading, setIsLoading] = useState(true);
@@ -126,11 +159,14 @@ export const BlogManagementSection = (): JSX.Element => {
     }
     setIsSubmitting(true);
     try {
+      const rawContent = formData.content.trim();
+      const content = looksLikeHtml(rawContent) ? rawContent : simpleMarkdownToHtml(rawContent);
+
       const payload = {
         title: formData.title.trim(),
         slug: formData.slug.trim().toLowerCase(),
         excerpt: formData.excerpt.trim() || null,
-        content: formData.content.trim() || '',
+        content: content || '',
         cover_image_url: formData.cover_image_url.trim() || null,
         category: formData.category.trim() || null,
         tags: formData.tags
@@ -247,14 +283,20 @@ export const BlogManagementSection = (): JSX.Element => {
             />
           </div>
           <div>
-            <label className="block text-sm font-medium text-gray-700 mb-1">Content (HTML)</label>
+            <label className="block text-sm font-medium text-gray-700 mb-1">Content (plain text — use **bold**, *italic*, ## headings)</label>
+            <p className="text-xs text-gray-500 mb-1">
+              Write in plain text. Use <strong>**bold**</strong>, <em>*italic*</em>, <code>## Heading 2</code>, <code>### Heading 3</code>, and <code>[link text](https://url)</code>. New lines become paragraphs. No HTML needed.
+              {formData.content && looksLikeHtml(formData.content) && (
+                <span className="block mt-1 text-amber-600">Showing saved HTML. Edit as-is or replace with simple formatting above.</span>
+              )}
+            </p>
             <textarea
               name="content"
               value={formData.content}
               onChange={handleChange}
               rows={10}
-              className="w-full px-3 py-2 border border-gray-300 rounded-lg font-mono text-sm"
-              placeholder="<p>...</p> Use &lt;h2&gt; and &lt;h3&gt; for TOC. Internal links: &lt;a href=&quot;artist:USER_ID&quot;&gt;Artist&lt;/a&gt; or &lt;a href=&quot;song:SONG_ID&quot;&gt;Song&lt;/a&gt;"
+              className="w-full px-3 py-2 border border-gray-300 rounded-lg"
+              placeholder="Write your post here. Example:&#10;&#10;## Introduction&#10;&#10;This is **bold** and *italic*. [Learn more](https://example.com)."
             />
           </div>
           <div>
