@@ -77,6 +77,7 @@ export const BlogManagementSection = (): JSX.Element => {
   /** FAQ items: simple Q&A pairs (optional). Used on the post and for search/schema. */
   const [faqItems, setFaqItems] = useState<Array<{ question: string; answer: string }>>([{ question: '', answer: '' }]);
   const [isUploadingFeatureImage, setIsUploadingFeatureImage] = useState(false);
+  const [publishingId, setPublishingId] = useState<string | null>(null);
   const featureImageInputRef = useRef<HTMLInputElement>(null);
 
   const fetchPosts = async () => {
@@ -130,19 +131,18 @@ export const BlogManagementSection = (): JSX.Element => {
   const handleChange = (e: React.ChangeEvent<HTMLInputElement | HTMLTextAreaElement | HTMLSelectElement>) => {
     const { name, value, type } = e.target;
     const checked = (e.target as HTMLInputElement).checked;
-    setFormData((prev) => ({
-      ...prev,
-      [name]: type === 'checkbox' ? checked : value
-    }));
-    if (name === 'title' && !editingPost) {
-      const slug = value
-        .toLowerCase()
-        .replace(/[^a-z0-9\s-]/g, '')
-        .replace(/\s+/g, '-')
-        .replace(/-+/g, '-')
-        .replace(/^-|-$/g, '');
-      setFormData((prev) => ({ ...prev, slug }));
-    }
+    setFormData((prev) => {
+      const next = { ...prev, [name]: type === 'checkbox' ? checked : value };
+      if (name === 'title' && !editingPost && typeof value === 'string') {
+        next.slug = value
+          .toLowerCase()
+          .replace(/[^a-z0-9\s-]/g, '')
+          .replace(/\s+/g, '-')
+          .replace(/-+/g, '-')
+          .replace(/^-|-$/g, '');
+      }
+      return next;
+    });
   };
 
   const getFaqForSave = (): Array<{ question: string; answer: string }> =>
@@ -206,6 +206,7 @@ export const BlogManagementSection = (): JSX.Element => {
 
   const handlePublish = async (postId: string) => {
     setError(null);
+    setPublishingId(postId);
     try {
       const { error: updateError } = await supabase
         .from('blog_posts')
@@ -221,6 +222,8 @@ export const BlogManagementSection = (): JSX.Element => {
       setTimeout(() => setSuccess(null), 3000);
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to publish');
+    } finally {
+      setPublishingId(null);
     }
   };
 
@@ -265,7 +268,13 @@ export const BlogManagementSection = (): JSX.Element => {
         if (updateError) throw updateError;
         setSuccess('Post updated successfully');
       } else {
-        const { error: insertError } = await supabase.from('blog_posts').insert({ ...payload, created_at: new Date().toISOString() });
+        const { data: { user } } = await supabase.auth.getUser();
+        const insertPayload = {
+          ...payload,
+          created_at: new Date().toISOString(),
+          ...(user?.id && { author_id: user.id })
+        };
+        const { error: insertError } = await supabase.from('blog_posts').insert(insertPayload);
         if (insertError) throw insertError;
         setSuccess('Post created successfully');
       }
@@ -586,9 +595,14 @@ export const BlogManagementSection = (): JSX.Element => {
                         <button
                           type="button"
                           onClick={() => handlePublish(post.id)}
-                          className="px-2 py-1.5 text-sm font-medium text-white bg-[#309605] hover:bg-[#3ba208] rounded-lg"
+                          disabled={publishingId === post.id}
+                          className="px-2 py-1.5 text-sm font-medium text-white bg-[#309605] hover:bg-[#3ba208] rounded-lg disabled:opacity-60"
                         >
-                          Publish
+                          {publishingId === post.id ? (
+                            <span className="inline-flex items-center gap-1"><Loader2 className="w-3.5 h-3.5 animate-spin" /> Publishing…</span>
+                          ) : (
+                            'Publish'
+                          )}
                         </button>
                       )}
                       <button
