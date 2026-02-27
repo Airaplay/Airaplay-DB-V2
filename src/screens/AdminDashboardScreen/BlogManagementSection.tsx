@@ -1,7 +1,8 @@
-import { useState, useEffect } from 'react';
-import { Plus, Pencil, Trash2, Loader2 } from 'lucide-react';
+import { useState, useEffect, useRef } from 'react';
+import { Plus, Pencil, Trash2, Loader2, Upload, ImageIcon } from 'lucide-react';
 import { supabase } from '../../lib/supabase';
 import { LoadingLogo } from '../../components/LoadingLogo';
+import { validateImageFile, getValidatedExtension, sanitizeFileName, ALLOWED_IMAGE_EXTENSIONS } from '../../lib/fileSecurity';
 
 interface BlogPost {
   id: string;
@@ -75,6 +76,8 @@ export const BlogManagementSection = (): JSX.Element => {
   const [showForm, setShowForm] = useState(false);
   /** FAQ items: simple Q&A pairs (optional). Used on the post and for search/schema. */
   const [faqItems, setFaqItems] = useState<Array<{ question: string; answer: string }>>([{ question: '', answer: '' }]);
+  const [isUploadingFeatureImage, setIsUploadingFeatureImage] = useState(false);
+  const featureImageInputRef = useRef<HTMLInputElement>(null);
 
   const fetchPosts = async () => {
     setIsLoading(true);
@@ -158,6 +161,42 @@ export const BlogManagementSection = (): JSX.Element => {
   const addFaqItem = () => setFaqItems((prev) => [...prev, { question: '', answer: '' }]);
   const removeFaqItem = (index: number) =>
     setFaqItems((prev) => (prev.length <= 1 ? [{ question: '', answer: '' }] : prev.filter((_, i) => i !== index)));
+
+  const uploadFeatureImage = async (file: File): Promise<string> => {
+    const { data: { user } } = await supabase.auth.getUser();
+    if (!user) throw new Error('You must be signed in to upload images.');
+    const validation = validateImageFile(file);
+    if (!validation.valid) throw new Error(validation.error || 'Invalid image');
+    const fileExt = getValidatedExtension(file.name, ALLOWED_IMAGE_EXTENSIONS);
+    if (!fileExt) throw new Error('Allowed: jpg, jpeg, png, webp, gif');
+    const base = sanitizeFileName(file.name).replace(/\.[^.]+$/, '') || 'image';
+    const fileName = `blog-${Date.now()}-${base}.${fileExt}`;
+    const filePath = `blog/${fileName}`;
+    const { error: uploadError } = await supabase.storage
+      .from('thumbnails')
+      .upload(filePath, file, { cacheControl: '3600', upsert: false });
+    if (uploadError) throw uploadError;
+    const { data: { publicUrl } } = supabase.storage.from('thumbnails').getPublicUrl(filePath);
+    return publicUrl;
+  };
+
+  const handleFeatureImageSelect = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    e.target.value = '';
+    setError(null);
+    try {
+      setIsUploadingFeatureImage(true);
+      const url = await uploadFeatureImage(file);
+      setFormData((prev) => ({ ...prev, cover_image_url: url }));
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Upload failed');
+    } finally {
+      setIsUploadingFeatureImage(false);
+    }
+  };
+
+  const clearFeatureImage = () => setFormData((prev) => ({ ...prev, cover_image_url: '' }));
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -315,18 +354,67 @@ export const BlogManagementSection = (): JSX.Element => {
             />
           </div>
           <div>
-            <label className="block text-sm font-medium text-gray-700 mb-1">Feature image URL *</label>
-            <p className="text-xs text-gray-500 mb-1">
-              Every post must have a feature image. It appears on blog cards and at the top of the post. Paste an image URL (e.g. from your CDN or Supabase Storage).
+            <label className="block text-sm font-medium text-gray-700 mb-1">Feature image *</label>
+            <p className="text-xs text-gray-500 mb-2">
+              Every post must have a feature image (blog cards and top of post). Upload an image (JPG, PNG, WebP, GIF, max 5MB) or paste a URL below.
             </p>
+            <input
+              ref={featureImageInputRef}
+              type="file"
+              accept="image/jpeg,image/png,image/webp,image/gif"
+              onChange={handleFeatureImageSelect}
+              className="hidden"
+            />
+            {formData.cover_image_url ? (
+              <div className="space-y-2">
+                <div className="relative inline-block rounded-lg overflow-hidden border border-gray-200 max-w-xs">
+                  <img
+                    src={formData.cover_image_url}
+                    alt="Feature"
+                    className="h-40 w-auto object-cover"
+                  />
+                </div>
+                <div className="flex gap-2">
+                  <button
+                    type="button"
+                    onClick={() => featureImageInputRef.current?.click()}
+                    disabled={isUploadingFeatureImage}
+                    className="flex items-center gap-1.5 px-3 py-1.5 text-sm bg-gray-100 text-gray-700 rounded-lg hover:bg-gray-200 disabled:opacity-50"
+                  >
+                    {isUploadingFeatureImage ? <Loader2 className="w-4 h-4 animate-spin" /> : <Upload className="w-4 h-4" />}
+                    {isUploadingFeatureImage ? 'Uploading…' : 'Replace image'}
+                  </button>
+                  <button type="button" onClick={clearFeatureImage} className="text-sm text-red-600 hover:underline">
+                    Remove
+                  </button>
+                </div>
+              </div>
+            ) : (
+              <button
+                type="button"
+                onClick={() => featureImageInputRef.current?.click()}
+                disabled={isUploadingFeatureImage}
+                className="w-full flex flex-col items-center justify-center gap-2 p-6 border-2 border-dashed border-gray-300 rounded-lg hover:border-[#309605] hover:bg-gray-50/50 transition-colors disabled:opacity-50"
+              >
+                {isUploadingFeatureImage ? (
+                  <Loader2 className="w-10 h-10 text-[#309605] animate-spin" />
+                ) : (
+                  <ImageIcon className="w-10 h-10 text-gray-400" />
+                )}
+                <span className="text-sm font-medium text-gray-600">
+                  {isUploadingFeatureImage ? 'Uploading…' : 'Click to upload feature image'}
+                </span>
+                <span className="text-xs text-gray-400">JPG, PNG, WebP or GIF, max 5MB</span>
+              </button>
+            )}
+            <p className="text-xs text-gray-400 mt-2">Or paste image URL:</p>
             <input
               type="url"
               name="cover_image_url"
               value={formData.cover_image_url}
               onChange={handleChange}
-              className="w-full px-3 py-2 border border-gray-300 rounded-lg"
+              className="mt-1 w-full px-3 py-2 border border-gray-300 rounded-lg text-sm"
               placeholder="https://..."
-              required
             />
           </div>
           <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
