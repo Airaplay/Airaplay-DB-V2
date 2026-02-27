@@ -233,7 +233,9 @@ export const BlogManagementSection = (): JSX.Element => {
           .map((t) => t.trim())
           .filter(Boolean),
         is_published: formData.is_published,
-        published_at: formData.published_at ? new Date(formData.published_at).toISOString() : null,
+        published_at: formData.is_published
+          ? (formData.published_at ? new Date(formData.published_at).toISOString() : new Date().toISOString())
+          : null,
         faq: getFaqForSave(),
         updated_at: new Date().toISOString()
       };
@@ -458,6 +460,7 @@ export const BlogManagementSection = (): JSX.Element => {
               />
               <span className="text-sm text-gray-700">Published</span>
             </label>
+            <p className="text-xs text-gray-400">Published posts show on the home screen and /blog. If &quot;Published at&quot; is empty, we use current time when you save.</p>
             <div>
               <label className="block text-sm font-medium text-gray-700 mb-1">Published at (optional)</label>
               <input
