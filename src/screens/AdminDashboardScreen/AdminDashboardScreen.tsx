@@ -246,6 +246,10 @@ export const AdminDashboardScreen = (): JSX.Element => {
       return section !== 'admin_settings' && section !== 'treat_manager' && section !== 'payment_monitoring' && section !== 'financial_controls' && section !== 'promotional_credits' && section !== 'country_performance';
     }
     if (userRole === 'editor') {
+      // Editors can only access content, FAQs, and blog
+      return ['content', 'faqs', 'blog'].includes(section);
+    }
+    if (userRole === 'editor') {
       return ['content', 'faqs'].includes(section);
     }
     if (userRole === 'account') {
@@ -342,7 +346,28 @@ export const AdminDashboardScreen = (): JSX.Element => {
       </button>
     );
   };
-
+)}
+            {hasAccessToSection('blog') && (
+              <li>
+                <button
+                  onClick={() => {
+                    setActiveSection('blog');
+                    setSidebarOpen(false);
+                  }}
+                  className={`w-full flex items-center justify-between p-3 rounded-lg transition-colors ${
+                    activeSection === 'blog'
+                      ? 'bg-[#309605] text-white'
+                      : 'text-gray-600 hover:bg-gray-100 hover:text-gray-900'
+                  }`}
+                >
+                  <div className="flex items-center">
+                    <BookOpen className="w-5 h-5 mr-3" />
+                    <span>Blog</span>
+                  </div>
+                  <ChevronRight className="w-4 h-4" />
+                </button>
+              </li>
+            )}
   const NavGroup = ({ groupKey, label, children }: { groupKey: string; label: string; children: React.ReactNode }) => (
     <div className="mb-1">
       <button
