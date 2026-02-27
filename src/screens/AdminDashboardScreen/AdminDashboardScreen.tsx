@@ -1,6 +1,6 @@
 import { useState, useEffect, useCallback, useRef } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { Users, FileText, HelpCircle, BarChart, Settings, LogOut, Home, DollarSign, BarChart2, Bell, UserCog, Zap, Image, Coins, Wallet, Calendar, UserPlus, Megaphone, Flag, Star, Music, Tags, Sparkles, ListMusic, Shield, Award, Trophy, TrendingUp, Activity, Gift, Globe, Monitor, ChevronDown, ChevronRight, Menu, X } from 'lucide-react';
+import { Users, FileText, HelpCircle, BarChart, Settings, LogOut, Home, DollarSign, BarChart2, Bell, UserCog, Zap, Image, Coins, Wallet, Calendar, UserPlus, Megaphone, Flag, Star, Music, Tags, Sparkles, ListMusic, Shield, Award, Trophy, TrendingUp, Activity, Gift, Globe, Monitor, ChevronDown, ChevronRight, Menu, X, BookOpen } from 'lucide-react';
 import { supabase, getUserRole } from '../../lib/supabase';
 import { cacheInvalidation } from '../../lib/enhancedDataFetching';
 import { performCompleteLogout } from '../../lib/logoutService';
@@ -36,8 +36,9 @@ import { DailyMixManagerSection } from './DailyMixManagerSection';
 import { AdminNotificationBell } from '../../components/AdminNotificationBell';
 import { SupportTicketsSection } from './SupportTicketsSection';
 import { WebAdsSection } from './WebAdsSection';
+import { BlogManagementSection } from './BlogManagementSection';
 
-type SectionType = 'users' | 'content' | 'faqs' | 'analytics' | 'country_performance' | 'settings' | 'earnings' | 'analysis' | 'announcements' | 'admin_settings' | 'ad_management' | 'native_ads' | 'web_ads' | 'feature_banners' | 'treat_manager' | 'daily_checkin' | 'referral_management' | 'promotion_manager' | 'reports' | 'featured_artists' | 'mix_manager' | 'daily_mix_manager' | 'genre_manager' | 'payment_monitoring' | 'mood_analysis' | 'listener_curations' | 'contribution_rewards' | 'content_thresholds' | 'financial_controls' | 'promotional_credits' | 'support';
+type SectionType = 'users' | 'content' | 'faqs' | 'analytics' | 'country_performance' | 'settings' | 'earnings' | 'analysis' | 'announcements' | 'admin_settings' | 'ad_management' | 'native_ads' | 'web_ads' | 'feature_banners' | 'treat_manager' | 'daily_checkin' | 'referral_management' | 'promotion_manager' | 'reports' | 'featured_artists' | 'mix_manager' | 'daily_mix_manager' | 'genre_manager' | 'payment_monitoring' | 'mood_analysis' | 'listener_curations' | 'contribution_rewards' | 'content_thresholds' | 'financial_controls' | 'promotional_credits' | 'support' | 'blog';
 
 const ADMIN_ROLES = ['admin', 'manager', 'editor', 'account'];
 
@@ -80,6 +81,7 @@ const getSectionLabel = (section: SectionType): string => {
     ad_management: 'Ad Management',
     announcements: 'Announcements',
     faqs: 'FAQs',
+    blog: 'Blog',
     mood_analysis: 'Mood Analysis',
     promotional_credits: 'Promo Credits',
     settings: 'Settings',
@@ -245,7 +247,7 @@ export const AdminDashboardScreen = (): JSX.Element => {
       return section !== 'admin_settings' && section !== 'treat_manager' && section !== 'payment_monitoring' && section !== 'financial_controls' && section !== 'promotional_credits' && section !== 'country_performance';
     }
     if (userRole === 'editor') {
-      return ['content', 'faqs'].includes(section);
+      return ['content', 'faqs', 'blog'].includes(section);
     }
     if (userRole === 'account') {
       return ['analytics', 'earnings', 'support', 'payment_monitoring', 'financial_controls', 'promotional_credits', 'treat_manager', 'country_performance'].includes(section);
@@ -263,6 +265,7 @@ export const AdminDashboardScreen = (): JSX.Element => {
         case 'users': return <UserManagementSection />;
         case 'content': return <ContentManagementSection />;
         case 'faqs': return <FaqManagementSection />;
+        case 'blog': return <BlogManagementSection />;
         case 'analytics': return <AnalyticsOverviewSection />;
         case 'country_performance': return <CountryPerformanceSection />;
         case 'earnings': return <EarningsPayoutSettingsSection />;
@@ -474,6 +477,7 @@ export const AdminDashboardScreen = (): JSX.Element => {
             <NavItem section="genre_manager" icon={<Tags className="w-4 h-4" />} label="Genre Manager" />
             <NavItem section="mood_analysis" icon={<TrendingUp className="w-4 h-4" />} label="Mood Analysis" />
             <NavItem section="faqs" icon={<HelpCircle className="w-4 h-4" />} label="FAQs" />
+            <NavItem section="blog" icon={<BookOpen className="w-4 h-4" />} label="Blog" />
             <NavItem section="admin_settings" icon={<UserCog className="w-4 h-4" />} label="Admin Settings" />
           </NavGroup>
         </nav>
