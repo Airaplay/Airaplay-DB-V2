@@ -598,4 +598,3 @@ export const AdminDashboardScreen = (): JSX.Element => {
     </div>
   );
 };
- 
