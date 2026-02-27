@@ -1,2278 +1,620 @@
-import { Users, Music, Video, Zap, Globe } from 'lucide-react';
-import { useState, useEffect } from 'react';
-import {
-  AlertTriangle,
-  Plus,
-  Trash2,
-  Check,
-  X,
-  RefreshCw,
-  BarChart
-} from 'lucide-react';
+import { useState, useEffect, useRef } from 'react';
+import { Plus, Pencil, Trash2, Loader2, Upload, ImageIcon } from 'lucide-react';
 import { supabase } from '../../lib/supabase';
-import { AdRevenueSection } from './AdRevenueSection';
-import { AdSafetyCapsSection } from './AdSafetyCapsSection';
-import { WebAdsSection } from './WebAdsSection';
+import { LoadingLogo } from '../../components/LoadingLogo';
+import { validateImageFile, getValidatedExtension, sanitizeFileName, ALLOWED_IMAGE_EXTENSIONS } from '../../lib/fileSecurity';
 
-interface AdNetworkConfig {
+interface BlogPost {
   id: string;
-  network: string;
-  api_key: string;
-  app_id: string;
-  is_active: boolean;
-  is_mediation_primary?: boolean;
-  is_mediation_secondary?: boolean;
+  slug: string;
+  title: string;
+  excerpt: string | null;
+  content: string;
+  cover_image_url: string | null;
+  faq: Array<{ question: string; answer: string }> | null;
+  category: string | null;
+  tags: string[] | null;
+  is_published: boolean;
+  published_at: string | null;
   created_at: string;
+  updated_at: string | null;
 }
 
-interface AdUnitConfig {
-  id: string;
-  network_id: string;
-  unit_type: string;
-  unit_id: string;
-  placement: string;
-  is_active: boolean;
-  created_at: string;
+const defaultForm = {
+  title: '',
+  slug: '',
+  excerpt: '',
+  content: '',
+  cover_image_url: '',
+  category: '',
+  tags: '',
+  is_published: false,
+  published_at: '',
+};
+
+/** Converts simple Markdown-style formatting to HTML. No HTML knowledge required. */
+function simpleMarkdownToHtml(text: string): string {
+  if (!text.trim()) return '';
+  const escape = (s: string) =>
+    s
+      .replace(/&/g, '&amp;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;');
+  let out = escape(text);
+  // Links: [text](url)
+  out = out.replace(/\[([^\]]+)\]\(([^)]+)\)/g, '<a href="$2" target="_blank" rel="noopener noreferrer">$1</a>');
+  // Bold **text**
+  out = out.replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>');
+  // Italic *text*
+  out = out.replace(/\*([^*]+)\*/g, '<em>$1</em>');
+  // Headings (at start of line)
+  out = out.replace(/^### (.+)$/gm, '<h3>$1</h3>');
+  out = out.replace(/^## (.+)$/gm, '<h2>$1</h2>');
+  // Paragraphs: wrap double newlines in <p>
+  const paragraphs = out.split(/\n\n+/).filter((p) => p.trim());
+  return paragraphs.map((p) => {
+    const trimmed = p.trim();
+    if (/^<h[23]>/.test(trimmed)) return trimmed;
+    return `<p>${trimmed.replace(/\n/g, '<br />')}</p>`;
+  }).join('\n');
 }
 
-interface AdDisplayRule {
-  id: string;
-  rule_type: string; // 'role', 'content_type', 'country'
-  rule_value: string; // role name, content type, or country code
-  is_enabled: boolean;
-  created_at: string;
+/** True if string looks like raw HTML (so we don’t run Markdown on it). */
+function looksLikeHtml(s: string): boolean {
+  const t = s.trim();
+  return t.startsWith('<') && (t.includes('</') || t.includes('/>'));
 }
 
-export const AdManagementSection = (): JSX.Element => {
-  // Main tab state
-  const [mainTab, setMainTab] = useState<'management' | 'revenue' | 'safety'>('management');
-
-  // State for ad networks
-  const [adNetworks, setAdNetworks] = useState<AdNetworkConfig[]>([]);
-  const [isLoadingNetworks, setIsLoadingNetworks] = useState(true);
-  const [networkError, setNetworkError] = useState<string | null>(null);
-
-  // State for ad units
-  const [adUnits, setAdUnits] = useState<AdUnitConfig[]>([]);
-  const [isLoadingUnits, setIsLoadingUnits] = useState(true);
-  const [unitError, setUnitError] = useState<string | null>(null);
-  
-  // State for display rules
-  const [displayRules, setDisplayRules] = useState<AdDisplayRule[]>([]);
-  const [isLoadingRules, setIsLoadingRules] = useState(true);
-  const [rulesError, setRulesError] = useState<string | null>(null);
-  
-  // State for new network form
-  const [showNetworkForm, setShowNetworkForm] = useState(false);
-  const [newNetwork, setNewNetwork] = useState({
-    network: 'admob',
-    api_key: '',
-    app_id: '',
-    is_active: true,
-    is_mediation_primary: false,
-    is_mediation_secondary: false
-  });
-  
-  // State for new ad unit form
-  const [showUnitForm, setShowUnitForm] = useState(false);
-  const [newUnit, setNewUnit] = useState({
-    network_id: '',
-    unit_type: 'banner',
-    unit_id: '',
-    placement: 'home_screen',
-    is_active: true
-  });
-  
-  // State for new rule form
-  const [showRuleForm, setShowRuleForm] = useState(false);
-  const [newRule, setNewRule] = useState({
-    rule_type: 'role',
-    rule_value: 'listener',
-    is_enabled: true
-  });
-  
-  // State for form submission
+export const BlogManagementSection = (): JSX.Element => {
+  const [posts, setPosts] = useState<BlogPost[]>([]);
+  const [isLoading, setIsLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+  const [success, setSuccess] = useState<string | null>(null);
+  const [editingPost, setEditingPost] = useState<BlogPost | null>(null);
+  const [formData, setFormData] = useState(defaultForm);
   const [isSubmitting, setIsSubmitting] = useState(false);
-  const [formSuccess, setFormSuccess] = useState<string | null>(null);
-  
-  // State for countries list
-  const [countries, setCountries] = useState<string[]>([]);
-  
-  // Tabs state
-  const [activeTab, setActiveTab] = useState<'networks' | 'units' | 'rules' | 'mediation' | 'placements' | 'web_ads'>('networks');
-  
-  // Mediation config state
-  const [mediationConfig, setMediationConfig] = useState<any>(null);
-  const [isLoadingMediation, setIsLoadingMediation] = useState(true);
-  
-  // Placements state
-  const [placements, setPlacements] = useState<any[]>([]);
-  const [isLoadingPlacements, setIsLoadingPlacements] = useState(true);
-  const [placementError, setPlacementError] = useState<string | null>(null);
-  const [showPlacementForm, setShowPlacementForm] = useState(false);
-  const [newPlacement, setNewPlacement] = useState({
-    placement_key: '',
-    placement_name: '',
-    screen_name: '',
-    ad_unit_id: '',
-    ad_type: 'banner' as 'banner' | 'interstitial' | 'rewarded',
-    position: '',
-    is_enabled: true,
-    display_priority: 0
-  });
-  
-  // Placement keys for dropdown
-  const [placementKeys, setPlacementKeys] = useState<Array<{key: string, name: string, screen: string}>>([]);
-  const [isLoadingPlacementKeys, setIsLoadingPlacementKeys] = useState(false);
-  const [useCustomPlacementKey, setUseCustomPlacementKey] = useState(false);
+  const [showForm, setShowForm] = useState(false);
+  /** FAQ items: simple Q&A pairs (optional). Used on the post and for search/schema. */
+  const [faqItems, setFaqItems] = useState<Array<{ question: string; answer: string }>>([{ question: '', answer: '' }]);
+  const [isUploadingFeatureImage, setIsUploadingFeatureImage] = useState(false);
+  const featureImageInputRef = useRef<HTMLInputElement>(null);
 
-  const formatRuleValue = (type: string, value: string): string => {
-    switch (type) {
-      case 'role':
-        return value.charAt(0).toUpperCase() + value.slice(1);
-      case 'content_type':
-        switch (value) {
-          case 'song': return 'Music';
-          case 'video': return 'Video';
-          case 'short_clip': return 'Short Clip';
-          default: return value.charAt(0).toUpperCase() + value.slice(1);
-        }
-      case 'country':
-        return value;
-      default:
-        return value;
+  const fetchPosts = async () => {
+    setIsLoading(true);
+    setError(null);
+    try {
+      const { data, error: fetchError } = await supabase
+        .from('blog_posts')
+        .select('*')
+        .order('created_at', { ascending: false });
+      if (fetchError) throw fetchError;
+      setPosts((data as BlogPost[]) || []);
+    } catch (err) {
+      console.error('Error fetching blog posts:', err);
+      setError(err instanceof Error ? err.message : 'Failed to load blog posts');
+      setPosts([]);
+    } finally {
+      setIsLoading(false);
     }
-  };
-
-  const formatDate = (dateString: string): string => {
-    const date = new Date(dateString);
-    return date.toLocaleDateString('en-US', {
-      year: 'numeric',
-      month: 'short',
-      day: 'numeric',
-      hour: '2-digit',
-      minute: '2-digit'
-    });
   };
 
   useEffect(() => {
-    fetchAdNetworks();
-    fetchAdUnits();
-    fetchDisplayRules();
-    fetchCountries();
-    fetchMediationConfig();
-    fetchPlacements();
-    fetchPlacementKeys();
+    fetchPosts();
   }, []);
 
-  const fetchAdNetworks = async () => {
-    try {
-      setIsLoadingNetworks(true);
-      setNetworkError(null);
-      
-      const { data, error } = await supabase
-        .from('ad_networks')
-        .select('*')
-        .order('created_at', { ascending: false });
-      
-      if (error) throw error;
-      
-      setAdNetworks(data || []);
-    } catch (err) {
-      console.error('Error fetching ad networks:', err);
-      setNetworkError('Failed to load ad networks');
-    } finally {
-      setIsLoadingNetworks(false);
+  useEffect(() => {
+    if (editingPost) {
+      setFormData({
+        title: editingPost.title,
+        slug: editingPost.slug,
+        excerpt: editingPost.excerpt || '',
+        content: editingPost.content || '',
+        cover_image_url: editingPost.cover_image_url || '',
+        category: editingPost.category || '',
+        tags: Array.isArray(editingPost.tags) ? editingPost.tags.join(', ') : '',
+        is_published: !!editingPost.is_published,
+        published_at: editingPost.published_at ? editingPost.published_at.slice(0, 16) : ''
+      });
+      setFaqItems(
+        editingPost.faq && editingPost.faq.length > 0
+          ? editingPost.faq.map((q) => ({ question: q.question || '', answer: q.answer || '' }))
+          : [{ question: '', answer: '' }]
+      );
+      setShowForm(true);
+    } else if (!showForm) {
+      setFormData(defaultForm);
+      setFaqItems([{ question: '', answer: '' }]);
     }
-  };
+  }, [editingPost, showForm]);
 
-  const fetchAdUnits = async () => {
-    try {
-      setIsLoadingUnits(true);
-      setUnitError(null);
-      
-      const { data, error } = await supabase
-        .from('ad_units')
-        .select('*')
-        .order('created_at', { ascending: false });
-      
-      if (error) throw error;
-      
-      setAdUnits(data || []);
-    } catch (err) {
-      console.error('Error fetching ad units:', err);
-      setUnitError('Failed to load ad units');
-    } finally {
-      setIsLoadingUnits(false);
-    }
-  };
-
-  const fetchDisplayRules = async () => {
-    try {
-      setIsLoadingRules(true);
-      setRulesError(null);
-      
-      const { data, error } = await supabase
-        .from('ad_display_rules')
-        .select('*')
-        .order('created_at', { ascending: false });
-      
-      if (error) throw error;
-      
-      setDisplayRules(data || []);
-    } catch (err) {
-      console.error('Error fetching display rules:', err);
-      setRulesError('Failed to load display rules');
-    } finally {
-      setIsLoadingRules(false);
-    }
-  };
-
-  const fetchCountries = async () => {
-    try {
-      // Get unique countries from users table
-      const { data, error } = await supabase
-        .from('users')
-        .select('country')
-        .not('country', 'is', null)
-        .order('country');
-
-      if (error) throw error;
-      
-      // Extract unique countries
-      const uniqueCountries = Array.from(new Set(data.map(item => item.country).filter(Boolean)));
-      setCountries(uniqueCountries);
-    } catch (err) {
-      console.error('Error fetching countries:', err);
-      // Don't set error state to avoid blocking the UI
-    }
-  };
-
-  const fetchMediationConfig = async () => {
-    try {
-      setIsLoadingMediation(true);
-      const { data, error } = await supabase
-        .from('ad_mediation_config')
-        .select(`
-          *,
-          primary_network:ad_networks!ad_mediation_config_primary_network_id_fkey(*),
-          secondary_network:ad_networks!ad_mediation_config_secondary_network_id_fkey(*)
-        `)
-        .eq('is_active', true)
-        .maybeSingle();
-
-      if (error && error.code !== 'PGRST116') throw error; // PGRST116 is "not found"
-      setMediationConfig(data || null);
-    } catch (err) {
-      console.error('Error fetching mediation config:', err);
-    } finally {
-      setIsLoadingMediation(false);
-    }
-  };
-
-  const fetchPlacements = async () => {
-    try {
-      setIsLoadingPlacements(true);
-      const { data, error } = await supabase
-        .from('ad_placements')
-        .select(`
-          *,
-          ad_units (
-            id,
-            unit_id,
-            unit_type,
-            ad_networks (
-              id,
-              network,
-              app_id
-            )
-          )
-        `)
-        .order('screen_name', { ascending: true })
-        .order('display_priority', { ascending: false });
-
-      if (error) throw error;
-      setPlacements(data || []);
-    } catch (err) {
-      console.error('Error fetching placements:', err);
-    } finally {
-      setIsLoadingPlacements(false);
-    }
-  };
-
-  const fetchPlacementKeys = async () => {
-    try {
-      setIsLoadingPlacementKeys(true);
-      const { data, error } = await supabase
-        .from('ad_placements')
-        .select('placement_key, placement_name, screen_name')
-        .eq('is_enabled', true)
-        .order('screen_name', { ascending: true })
-        .order('placement_name', { ascending: true });
-
-      if (error) throw error;
-      
-      // Transform to simple array for dropdown
-      const keys = (data || []).map((p: any) => ({
-        key: p.placement_key,
-        name: p.placement_name,
-        screen: p.screen_name
-      }));
-      setPlacementKeys(keys);
-    } catch (err) {
-      console.error('Error fetching placement keys:', err);
-      // If table doesn't exist yet, use empty array (backward compatible)
-      setPlacementKeys([]);
-    } finally {
-      setIsLoadingPlacementKeys(false);
-    }
-  };
-
-  const handleNetworkInputChange = (e: React.ChangeEvent<HTMLInputElement | HTMLSelectElement>) => {
-    const { name, value } = e.target;
-    setNewNetwork(prev => ({
+  const handleChange = (e: React.ChangeEvent<HTMLInputElement | HTMLTextAreaElement | HTMLSelectElement>) => {
+    const { name, value, type } = e.target;
+    const checked = (e.target as HTMLInputElement).checked;
+    setFormData((prev) => ({
       ...prev,
-      [name]: value,
+      [name]: type === 'checkbox' ? checked : value
     }));
+    if (name === 'title' && !editingPost) {
+      const slug = value
+        .toLowerCase()
+        .replace(/[^a-z0-9\s-]/g, '')
+        .replace(/\s+/g, '-')
+        .replace(/-+/g, '-')
+        .replace(/^-|-$/g, '');
+      setFormData((prev) => ({ ...prev, slug }));
+    }
   };
 
-  const handleNetworkCheckboxChange = (e: React.ChangeEvent<HTMLInputElement>) => {
-    const { name, checked } = e.target;
-    setNewNetwork(prev => ({
-      ...prev,
-      [name]: checked,
-    }));
+  const getFaqForSave = (): Array<{ question: string; answer: string }> =>
+    faqItems
+      .filter((item) => item.question.trim() && item.answer.trim())
+      .map((item) => ({ question: item.question.trim(), answer: item.answer.trim() }));
+
+  const updateFaqItem = (index: number, field: 'question' | 'answer', value: string) => {
+    setFaqItems((prev) => {
+      const next = [...prev];
+      next[index] = { ...next[index], [field]: value };
+      return next;
+    });
   };
 
-  const handleUnitInputChange = (e: React.ChangeEvent<HTMLInputElement | HTMLSelectElement>) => {
-    const { name, value } = e.target;
-    setNewUnit(prev => ({
-      ...prev,
-      [name]: value,
-    }));
+  const addFaqItem = () => setFaqItems((prev) => [...prev, { question: '', answer: '' }]);
+  const removeFaqItem = (index: number) =>
+    setFaqItems((prev) => (prev.length <= 1 ? [{ question: '', answer: '' }] : prev.filter((_, i) => i !== index)));
+
+  const uploadFeatureImage = async (file: File): Promise<string> => {
+    const { data: { user } } = await supabase.auth.getUser();
+    if (!user) throw new Error('You must be signed in to upload images.');
+    const validation = validateImageFile(file);
+    if (!validation.valid) throw new Error(validation.error || 'Invalid image');
+    const fileExt = getValidatedExtension(file.name, ALLOWED_IMAGE_EXTENSIONS);
+    if (!fileExt) throw new Error('Allowed: jpg, jpeg, png, webp, gif');
+    const base = sanitizeFileName(file.name).replace(/\.[^.]+$/, '') || 'image';
+    const fileName = `blog-${Date.now()}-${base}.${fileExt}`;
+    const filePath = `${user.id}/blog/${fileName}`;
+    const { error: uploadError } = await supabase.storage
+      .from('thumbnails')
+      .upload(filePath, file, { cacheControl: '3600', upsert: false });
+    if (uploadError) {
+      const msg = typeof uploadError === 'object' && uploadError !== null && 'message' in uploadError
+        ? (uploadError as { message?: string }).message
+        : String(uploadError);
+      throw new Error(msg || 'Storage upload failed');
+    }
+    const { data: { publicUrl } } = supabase.storage.from('thumbnails').getPublicUrl(filePath);
+    return publicUrl;
   };
 
-  const handleUnitCheckboxChange = (e: React.ChangeEvent<HTMLInputElement>) => {
-    const { name, checked } = e.target;
-    setNewUnit(prev => ({
-      ...prev,
-      [name]: checked,
-    }));
+  const handleFeatureImageSelect = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    e.target.value = '';
+    setError(null);
+    try {
+      setIsUploadingFeatureImage(true);
+      const url = await uploadFeatureImage(file);
+      setFormData((prev) => ({ ...prev, cover_image_url: url }));
+    } catch (err) {
+      const message = err instanceof Error ? err.message : typeof err === 'object' && err !== null && 'message' in err ? String((err as { message: unknown }).message) : 'Upload failed';
+      setError(message);
+    } finally {
+      setIsUploadingFeatureImage(false);
+    }
   };
 
-  const handleRuleInputChange = (e: React.ChangeEvent<HTMLInputElement | HTMLSelectElement>) => {
-    const { name, value } = e.target;
-    setNewRule(prev => ({
-      ...prev,
-      [name]: value,
-    }));
+  const clearFeatureImage = () => setFormData((prev) => ({ ...prev, cover_image_url: '' }));
+
+  const handlePublish = async (postId: string) => {
+    setError(null);
+    try {
+      const { error: updateError } = await supabase
+        .from('blog_posts')
+        .update({
+          is_published: true,
+          published_at: new Date().toISOString(),
+          updated_at: new Date().toISOString()
+        })
+        .eq('id', postId);
+      if (updateError) throw updateError;
+      setSuccess('Post published. It will appear on the home screen and /blog.');
+      await fetchPosts();
+      setTimeout(() => setSuccess(null), 3000);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Failed to publish');
+    }
   };
 
-  const handleRuleCheckboxChange = (e: React.ChangeEvent<HTMLInputElement>) => {
-    const { name, checked } = e.target;
-    setNewRule(prev => ({
-      ...prev,
-      [name]: checked,
-    }));
-  };
-
-  const handleSubmitNetwork = async (e: React.FormEvent) => {
+  const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
+    setError(null);
+    setSuccess(null);
+    if (!formData.title.trim() || !formData.slug.trim()) {
+      setError('Title and slug are required');
+      return;
+    }
+    if (!formData.cover_image_url.trim()) {
+      setError('Feature image is required. Every post must have a feature image.');
+      return;
+    }
     setIsSubmitting(true);
-    setFormSuccess(null);
-    
     try {
-      const networkData: any = {
-        network: newNetwork.network,
-        api_key: newNetwork.api_key,
-        app_id: newNetwork.app_id,
-        is_active: newNetwork.is_active
+      const rawContent = formData.content.trim();
+      const content = looksLikeHtml(rawContent) ? rawContent : simpleMarkdownToHtml(rawContent);
+
+      const payload = {
+        title: formData.title.trim(),
+        slug: formData.slug.trim().toLowerCase(),
+        excerpt: formData.excerpt.trim() || null,
+        content: content || '',
+        cover_image_url: formData.cover_image_url.trim() || null,
+        category: formData.category.trim() || null,
+        tags: formData.tags
+          .split(',')
+          .map((t) => t.trim())
+          .filter(Boolean),
+        is_published: formData.is_published,
+        published_at: formData.is_published
+          ? (formData.published_at ? new Date(formData.published_at).toISOString() : new Date().toISOString())
+          : null,
+        faq: getFaqForSave(),
+        updated_at: new Date().toISOString()
       };
 
-      // Add optional fields if present (only if migration has been applied)
-      // Try to detect if migration columns exist by attempting to include them
-      // If they cause errors, we'll catch and retry without them
-      const optionalNetworkFields: string[] = [];
-      
-      if ((newNetwork as any).sdk_key && (newNetwork as any).sdk_key.trim()) {
-        optionalNetworkFields.push('sdk_key');
-        networkData.sdk_key = (newNetwork as any).sdk_key;
+      if (editingPost) {
+        const { error: updateError } = await supabase.from('blog_posts').update(payload).eq('id', editingPost.id);
+        if (updateError) throw updateError;
+        setSuccess('Post updated successfully');
+      } else {
+        const { error: insertError } = await supabase.from('blog_posts').insert({ ...payload, created_at: new Date().toISOString() });
+        if (insertError) throw insertError;
+        setSuccess('Post created successfully');
       }
-      if ((newNetwork as any).ecpm_floor && (newNetwork as any).ecpm_floor !== '') {
-        const ecpm = parseFloat((newNetwork as any).ecpm_floor);
-        if (!isNaN(ecpm)) {
-          optionalNetworkFields.push('ecpm_floor');
-          networkData.ecpm_floor = ecpm;
-        }
-      }
-      if ((newNetwork as any).is_mediation_primary !== undefined && (newNetwork as any).is_mediation_primary) {
-        optionalNetworkFields.push('is_mediation_primary');
-        networkData.is_mediation_primary = true;
-      }
-      if ((newNetwork as any).is_mediation_secondary !== undefined && (newNetwork as any).is_mediation_secondary) {
-        optionalNetworkFields.push('is_mediation_secondary');
-        networkData.is_mediation_secondary = true;
-      }
-
-      let { data, error } = await supabase
-        .from('ad_networks')
-        .insert([networkData])
-        .select();
-      
-      // If error is about missing columns, retry without optional fields
-      if (error && optionalNetworkFields.length > 0 && 
-          (error.message?.includes('column') || error.message?.includes('does not exist'))) {
-        console.warn('Optional fields not available, retrying without them:', error.message);
-        // Remove optional fields and retry
-        const basicNetworkData = {
-          network: newNetwork.network,
-          api_key: newNetwork.api_key,
-          app_id: newNetwork.app_id,
-          is_active: newNetwork.is_active
-        };
-        const retryResult = await supabase
-          .from('ad_networks')
-          .insert([basicNetworkData])
-          .select();
-        data = retryResult.data;
-        error = retryResult.error;
-      }
-      
-      if (error) throw error;
-      
-      if (!data || data.length === 0) {
-        throw new Error('No data returned from insert');
-      }
-      
-      setFormSuccess('Ad network added successfully');
-      setAdNetworks(prev => [data![0], ...prev]);
-      setShowNetworkForm(false);
-      setNewNetwork({
-        network: 'admob',
-        api_key: '',
-        app_id: '',
-        is_active: true,
-        is_mediation_primary: false,
-        is_mediation_secondary: false
-      });
-      
-      // Clear success message after 3 seconds
-      setTimeout(() => {
-        setFormSuccess(null);
-      }, 3000);
-    } catch (err: any) {
-      console.error('Error adding ad network:', err);
-      const errorMessage = err?.message || err?.details || err?.hint || 'Failed to add ad network';
-      setNetworkError(`Failed to add ad network: ${errorMessage}`);
-      
-      // Check if it's a schema error
-      if (errorMessage.includes('column') && errorMessage.includes('does not exist')) {
-        setNetworkError('Database schema not updated. Please run the migration: npx supabase db push');
-      }
+      setEditingPost(null);
+      setFormData(defaultForm);
+      setShowForm(false);
+      await fetchPosts();
+      setTimeout(() => setSuccess(null), 3000);
+    } catch (err) {
+      console.error('Error saving post:', err);
+      setError(err instanceof Error ? err.message : 'Failed to save post');
     } finally {
       setIsSubmitting(false);
     }
   };
 
-  const handleSubmitUnit = async (e: React.FormEvent) => {
-    e.preventDefault();
-    setIsSubmitting(true);
-    setFormSuccess(null);
-    
+  const handleDelete = async (id: string) => {
+    if (!confirm('Delete this post? This cannot be undone.')) return;
     try {
-      const unitData: any = {
-        network_id: newUnit.network_id,
-        unit_type: newUnit.unit_type,
-        unit_id: newUnit.unit_id,
-        placement: newUnit.placement,
-        is_active: newUnit.is_active
-      };
-
-      // Add optional fields if present (only if migration has been applied)
-      const optionalUnitFields: string[] = [];
-      
-      if ((newUnit as any).ecpm_floor && (newUnit as any).ecpm_floor !== '') {
-        const ecpm = parseFloat((newUnit as any).ecpm_floor);
-        if (!isNaN(ecpm)) {
-          optionalUnitFields.push('ecpm_floor');
-          unitData.ecpm_floor = ecpm;
-        }
+      const { error: deleteError } = await supabase.from('blog_posts').delete().eq('id', id);
+      if (deleteError) throw deleteError;
+      setSuccess('Post deleted');
+      if (editingPost?.id === id) {
+        setEditingPost(null);
+        setShowForm(false);
       }
-      if ((newUnit as any).auto_cpm_bidding !== undefined && (newUnit as any).auto_cpm_bidding) {
-        optionalUnitFields.push('auto_cpm_bidding');
-        unitData.auto_cpm_bidding = true;
-      }
-
-      let { data, error } = await supabase
-        .from('ad_units')
-        .insert([unitData])
-        .select();
-      
-      // If error is about missing columns, retry without optional fields
-      if (error && optionalUnitFields.length > 0 && 
-          (error.message?.includes('column') || error.message?.includes('does not exist'))) {
-        console.warn('Optional fields not available, retrying without them:', error.message);
-        // Remove optional fields and retry
-        const basicUnitData = {
-          network_id: newUnit.network_id,
-          unit_type: newUnit.unit_type,
-          unit_id: newUnit.unit_id,
-          placement: newUnit.placement,
-          is_active: newUnit.is_active
-        };
-        const retryResult = await supabase
-          .from('ad_units')
-          .insert([basicUnitData])
-          .select();
-        data = retryResult.data;
-        error = retryResult.error;
-      }
-      
-      if (error) throw error;
-      
-      if (!data || data.length === 0) {
-        throw new Error('No data returned from insert');
-      }
-      
-      setFormSuccess('Ad unit added successfully');
-      setAdUnits(prev => [data![0], ...prev]);
-      setShowUnitForm(false);
-      setNewUnit({
-        network_id: '',
-        unit_type: 'banner',
-        unit_id: '',
-        placement: '',
-        is_active: true
-      });
-      // Refresh placement keys after adding unit (in case it's linked to a placement)
-      fetchPlacementKeys();
-      
-      // Clear success message after 3 seconds
-      setTimeout(() => {
-        setFormSuccess(null);
-      }, 3000);
-    } catch (err: any) {
-      console.error('Error adding ad unit:', err);
-      const errorMessage = err?.message || err?.details || err?.hint || 'Failed to add ad unit';
-      setUnitError(`Failed to add ad unit: ${errorMessage}`);
-      
-      // Check if it's a schema error
-      if (errorMessage.includes('column') && errorMessage.includes('does not exist')) {
-        setUnitError('Database schema not updated. Please run the migration: npx supabase db push');
-      }
-    } finally {
-      setIsSubmitting(false);
-    }
-  };
-
-  const handleSubmitRule = async (e: React.FormEvent) => {
-    e.preventDefault();
-    setIsSubmitting(true);
-    setFormSuccess(null);
-    
-    try {
-      const { data, error } = await supabase
-        .from('ad_display_rules')
-        .insert([
-          {
-            rule_type: newRule.rule_type,
-            rule_value: newRule.rule_value,
-            is_enabled: newRule.is_enabled
-          }
-        ])
-        .select();
-      
-      if (error) throw error;
-      
-      setFormSuccess('Display rule added successfully');
-      setDisplayRules(prev => [data[0], ...prev]);
-      setShowRuleForm(false);
-      setNewRule({
-        rule_type: 'role',
-        rule_value: 'listener',
-        is_enabled: true
-      });
-      
-      // Clear success message after 3 seconds
-      setTimeout(() => {
-        setFormSuccess(null);
-      }, 3000);
+      await fetchPosts();
+      setTimeout(() => setSuccess(null), 3000);
     } catch (err) {
-      console.error('Error adding display rule:', err);
-      setRulesError('Failed to add display rule');
-    } finally {
-      setIsSubmitting(false);
+      console.error('Error deleting post:', err);
+      setError(err instanceof Error ? err.message : 'Failed to delete post');
     }
-  };
-
-  const toggleNetworkStatus = async (id: string, currentStatus: boolean) => {
-    try {
-      const { error } = await supabase
-        .from('ad_networks')
-        .update({ is_active: !currentStatus })
-        .eq('id', id);
-      
-      if (error) throw error;
-      
-      // Update local state
-      setAdNetworks(prev => 
-        prev.map(network => 
-          network.id === id ? { ...network, is_active: !currentStatus } : network
-        )
-      );
-    } catch (err) {
-      console.error('Error toggling network status:', err);
-      setNetworkError('Failed to update network status');
-    }
-  };
-
-  const toggleUnitStatus = async (id: string, currentStatus: boolean) => {
-    try {
-      const { error } = await supabase
-        .from('ad_units')
-        .update({ is_active: !currentStatus })
-        .eq('id', id);
-      
-      if (error) throw error;
-      
-      // Update local state
-      setAdUnits(prev => 
-        prev.map(unit => 
-          unit.id === id ? { ...unit, is_active: !currentStatus } : unit
-        )
-      );
-    } catch (err) {
-      console.error('Error toggling unit status:', err);
-      setUnitError('Failed to update unit status');
-    }
-  };
-
-  const toggleRuleStatus = async (id: string, currentStatus: boolean) => {
-    try {
-      const { error } = await supabase
-        .from('ad_display_rules')
-        .update({ is_enabled: !currentStatus })
-        .eq('id', id);
-      
-      if (error) throw error;
-      
-      // Update local state
-      setDisplayRules(prev => 
-        prev.map(rule => 
-          rule.id === id ? { ...rule, is_enabled: !currentStatus } : rule
-        )
-      );
-    } catch (err) {
-      console.error('Error toggling rule status:', err);
-      setRulesError('Failed to update rule status');
-    }
-  };
-
-  const deleteNetwork = async (id: string) => {
-    if (!confirm('Are you sure you want to delete this ad network? This will also delete all associated ad units.')) {
-      return;
-    }
-    
-    try {
-      const { error } = await supabase
-        .from('ad_networks')
-        .delete()
-        .eq('id', id);
-      
-      if (error) throw error;
-      
-      // Update local state
-      setAdNetworks(prev => prev.filter(network => network.id !== id));
-      // Also filter out any ad units associated with this network
-      setAdUnits(prev => prev.filter(unit => unit.network_id !== id));
-    } catch (err) {
-      console.error('Error deleting ad network:', err);
-      setNetworkError('Failed to delete ad network');
-    }
-  };
-
-  const deleteUnit = async (id: string) => {
-    if (!confirm('Are you sure you want to delete this ad unit?')) {
-      return;
-    }
-    
-    try {
-      const { error } = await supabase
-        .from('ad_units')
-        .delete()
-        .eq('id', id);
-      
-      if (error) throw error;
-      
-      // Update local state
-      setAdUnits(prev => prev.filter(unit => unit.id !== id));
-    } catch (err) {
-      console.error('Error deleting ad unit:', err);
-      setUnitError('Failed to delete ad unit');
-    }
-  };
-
-  const deleteRule = async (id: string) => {
-    if (!confirm('Are you sure you want to delete this display rule?')) {
-      return;
-    }
-    
-    try {
-      const { error } = await supabase
-        .from('ad_display_rules')
-        .delete()
-        .eq('id', id);
-      
-      if (error) throw error;
-      
-      // Update local state
-      setDisplayRules(prev => prev.filter(rule => rule.id !== id));
-    } catch (err) {
-      console.error('Error deleting display rule:', err);
-      setRulesError('Failed to delete display rule');
-    }
-  };
-
-  const getNetworkName = (id: string): string => {
-    const network = adNetworks.find(n => n.id === id);
-    return network ? network.network : 'Unknown';
   };
 
   return (
-    <div className="space-y-4 min-h-full">
-      {/* Header with Main Tabs */}
-      <div className="bg-white rounded-xl border border-gray-100 shadow-sm">
-        <div className="px-5 pt-5 pb-0">
-          <div className="flex items-center justify-between mb-4">
-            <div className="flex items-center gap-2.5">
-              <div className="w-8 h-8 rounded-lg bg-blue-50 flex items-center justify-center flex-shrink-0">
-                <Zap className="w-4 h-4 text-blue-600" />
-              </div>
-              <div>
-                <h2 className="text-xl font-bold text-gray-900 leading-tight">Ad Management & Monetization</h2>
-                <p className="text-sm text-gray-400 mt-0.5">Manage ad networks, revenue settings, and safety caps</p>
-              </div>
-            </div>
+    <div className="p-6 bg-white rounded-lg shadow">
+      <div className="flex items-center justify-between mb-6">
+        <h2 className="text-xl font-bold text-gray-900">Blog</h2>
+        <button
+          type="button"
+          onClick={() => {
+            setEditingPost(null);
+            setFormData(defaultForm);
+            setFaqItems([{ question: '', answer: '' }]);
+            setShowForm(!showForm);
+          }}
+          className="flex items-center gap-2 px-4 py-2 bg-[#309605] text-white rounded-lg hover:bg-[#3ba208] transition-colors"
+        >
+          <Plus className="w-4 h-4" />
+          {showForm ? 'Cancel' : 'Add post'}
+        </button>
+      </div>
 
-            {mainTab === 'management' && (
-              <div className="flex items-center gap-2">
-                <a
-                  href="/admin/analytics?tab=ads"
-                  className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium bg-blue-50 hover:bg-blue-100 border border-blue-100 text-blue-600 rounded-lg transition-colors"
-                >
-                  <BarChart className="w-3.5 h-3.5" />
-                  Ad Analytics
-                </a>
-                <button
-                  onClick={() => { fetchAdNetworks(); fetchAdUnits(); fetchDisplayRules(); }}
-                  className="p-2 bg-gray-50 hover:bg-gray-100 border border-gray-200 rounded-lg text-gray-600 transition-colors"
-                  title="Refresh"
-                >
-                  <RefreshCw className="w-4 h-4" />
-                </button>
-              </div>
-            )}
-          </div>
-
-          {/* Main Tabs */}
-          <nav className="flex gap-1">
-            {([
-              { key: 'management', label: 'Ad Management' },
-              { key: 'revenue', label: 'Ad Revenue' },
-              { key: 'safety', label: 'Safety Caps' },
-            ] as const).map((tab) => (
-              <button
-                key={tab.key}
-                onClick={() => setMainTab(tab.key)}
-                className={`px-4 py-2.5 text-sm font-medium border-b-2 transition-colors whitespace-nowrap ${
-                  mainTab === tab.key
-                    ? 'border-[#309605] text-[#309605]'
-                    : 'border-transparent text-gray-500 hover:text-gray-700 hover:border-gray-200'
-                }`}
-              >
-                {tab.label}
-              </button>
-            ))}
-          </nav>
-        </div>
-
-        {/* Main Tab Content */}
-        <div className="p-5">
-          {mainTab === 'management' && (
-            <div className="space-y-5">
-              {/* Success Message */}
-              {formSuccess && (
-                <div className="p-3 bg-green-50 border border-green-100 rounded-lg">
-                  <p className="text-sm text-green-700">{formSuccess}</p>
-                </div>
-              )}
-
-              {/* Sub-Tabs */}
-              <div className="flex border-b border-gray-100">
-                {([
-                  { key: 'networks', label: 'Ad Networks' },
-                  { key: 'units', label: 'Ad Units' },
-                  { key: 'rules', label: 'Display Rules' },
-                  { key: 'mediation', label: 'Mediation' },
-                  { key: 'placements', label: 'Placements' },
-                  { key: 'web_ads', label: 'Web Ads', icon: <Globe className="w-3.5 h-3.5" /> },
-                ] as const).map((tab) => (
-                  <button
-                    key={tab.key}
-                    onClick={() => setActiveTab(tab.key)}
-                    className={`py-2.5 px-4 text-sm font-medium border-b-2 transition-colors flex items-center gap-1.5 ${
-                      activeTab === tab.key ? 'text-[#309605] border-[#309605]' : 'border-transparent text-gray-500 hover:text-gray-700'
-                    }`}
-                  >
-                    {tab.icon}
-                    {tab.label}
-                  </button>
-                ))}
-              </div>
-
-      {/* Ad Networks Tab */}
-      {activeTab === 'networks' && (
-        <div className="space-y-4">
-          <div className="flex justify-between items-center">
-            <p className="text-sm font-semibold text-gray-900">Ad Networks</p>
-            <button
-              onClick={() => setShowNetworkForm(true)}
-              className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium bg-[#309605] hover:bg-[#3ba208] rounded-lg text-white transition-colors"
-            >
-              <Plus className="w-3.5 h-3.5" />
-              Add Network
-            </button>
-          </div>
-
-          {/* Network Form */}
-          {showNetworkForm && (
-            <div className="bg-gray-50 p-4 rounded-lg border border-gray-100 mb-4">
-              <p className="text-sm font-semibold text-gray-900 mb-3">Add Ad Network</p>
-              
-              <form onSubmit={handleSubmitNetwork} className="space-y-4">
-                <div>
-                  <label className="block text-gray-700 text-sm font-medium mb-2">
-                    Network *
-                  </label>
-                  <select
-                    name="network"
-                    value={newNetwork.network}
-                    onChange={handleNetworkInputChange}
-                    required
-                    className="w-full px-4 py-2 bg-white border border-gray-300 rounded-lg text-gray-900 focus:outline-none focus:ring-2 focus:ring-[#309605]"
-                  >
-                    <option value="admob">Google AdMob</option>
-                    <option value="monetag">Monetag</option>
-                    <option value="facebook">Facebook Audience Network</option>
-                    <option value="unity">Unity Ads</option>
-                    <option value="applovin">AppLovin</option>
-                    <option value="monetag">Monetag</option>
-                    <option value="custom">Custom</option>
-                  </select>
-                </div>
-                
-                <div>
-                  <label className="block text-gray-700 text-sm font-medium mb-2">
-                    API Key / Publisher ID *
-                  </label>
-                  <input
-                    type="text"
-                    name="api_key"
-                    value={newNetwork.api_key}
-                    onChange={handleNetworkInputChange}
-                    required
-                    className="w-full px-4 py-2 bg-white border border-gray-300 rounded-lg text-gray-900 focus:outline-none focus:ring-2 focus:ring-[#309605]"
-                    placeholder="Enter API key or publisher ID"
-                  />
-                </div>
-                
-                <div>
-                  <label className="block text-gray-700 text-sm font-medium mb-2">
-                    App ID *
-                  </label>
-                  <input
-                    type="text"
-                    name="app_id"
-                    value={newNetwork.app_id}
-                    onChange={handleNetworkInputChange}
-                    required
-                    className="w-full px-4 py-2 bg-white border border-gray-300 rounded-lg text-gray-900 focus:outline-none focus:ring-2 focus:ring-[#309605]"
-                    placeholder="Enter app ID"
-                  />
-                </div>
-                
-                {newNetwork.network === 'applovin' && (
-                  <div>
-                    <label className="block text-gray-700 text-sm font-medium mb-2">
-                      SDK Key (AppLovin)
-                    </label>
-                    <input
-                      type="text"
-                      name="sdk_key"
-                      value={(newNetwork as any).sdk_key || ''}
-                      onChange={handleNetworkInputChange}
-                      className="w-full px-4 py-2 bg-white border border-gray-300 rounded-lg text-gray-900 focus:outline-none focus:ring-2 focus:ring-[#309605]"
-                      placeholder="Enter AppLovin SDK Key"
-                    />
-                  </div>
-                )}
-                
-                <div>
-                  <label className="block text-gray-700 text-sm font-medium mb-2">
-                    eCPM Floor (USD)
-                  </label>
-                  <input
-                    type="number"
-                    step="0.01"
-                    min="0"
-                    name="ecpm_floor"
-                    value={(newNetwork as any).ecpm_floor || ''}
-                    onChange={handleNetworkInputChange}
-                    className="w-full px-4 py-2 bg-white border border-gray-300 rounded-lg text-gray-900 focus:outline-none focus:ring-2 focus:ring-[#309605]"
-                    placeholder="e.g., 1.50 for AdMob, 2.50 for AppLovin"
-                  />
-                  <p className="text-xs text-gray-500 mt-1">Minimum CPM for this network</p>
-                </div>
-                
-                <div className="space-y-2">
-                  <div className="flex items-center">
-                    <input
-                      type="checkbox"
-                      id="is_mediation_primary"
-                      name="is_mediation_primary"
-                      checked={(newNetwork as any).is_mediation_primary || false}
-                      onChange={(e) => {
-                        setNewNetwork(prev => ({
-                          ...prev,
-                          is_mediation_primary: e.target.checked,
-                          is_mediation_secondary: e.target.checked ? false : prev.is_mediation_secondary
-                        }));
-                      }}
-                      className="w-4 h-4 rounded border-gray-300 text-[#309605] focus:ring-[#309605]"
-                    />
-                    <label htmlFor="is_mediation_primary" className="ml-2 text-gray-700 text-sm">
-                      Mediation Primary (AdMob)
-                    </label>
-                  </div>
-                  
-                  <div className="flex items-center">
-                    <input
-                      type="checkbox"
-                      id="is_mediation_secondary"
-                      name="is_mediation_secondary"
-                      checked={(newNetwork as any).is_mediation_secondary || false}
-                      onChange={(e) => {
-                        setNewNetwork(prev => ({
-                          ...prev,
-                          is_mediation_secondary: e.target.checked,
-                          is_mediation_primary: e.target.checked ? false : prev.is_mediation_primary
-                        }));
-                      }}
-                      className="w-4 h-4 rounded border-gray-300 text-[#309605] focus:ring-[#309605]"
-                    />
-                    <label htmlFor="is_mediation_secondary" className="ml-2 text-gray-700 text-sm">
-                      Mediation Secondary (AppLovin)
-                    </label>
-                  </div>
-                </div>
-                
-                <div className="flex items-center">
-                  <input
-                    type="checkbox"
-                    id="is_active"
-                    name="is_active"
-                    checked={newNetwork.is_active}
-                    onChange={handleNetworkCheckboxChange}
-                    className="w-4 h-4 rounded border-gray-300 text-[#309605] focus:ring-[#309605]"
-                  />
-                  <label htmlFor="is_active" className="ml-2 text-gray-700 text-sm">
-                    Active
-                  </label>
-                </div>
-                
-                {networkError && (
-                  <div className="p-3 bg-red-100 border border-red-200 rounded-lg">
-                    <p className="text-red-700 text-sm">{networkError}</p>
-                  </div>
-                )}
-                
-                <div className="flex gap-3 pt-2">
-                  <button
-                    type="button"
-                    onClick={() => {
-                      setShowNetworkForm(false);
-                      setNetworkError(null);
-                    }}
-                    className="px-4 py-2 bg-white hover:bg-gray-100 border border-gray-300 rounded-lg text-gray-700 transition-all duration-200"
-                  >
-                    Cancel
-                  </button>
-                  <button
-                    type="submit"
-                    disabled={isSubmitting}
-                    className="px-4 py-2 bg-[#309605] hover:bg-[#3ba208] rounded-lg text-white transition-all duration-200 disabled:opacity-50 disabled:cursor-not-allowed"
-                  >
-                    {isSubmitting ? 'Adding...' : 'Add Network'}
-                  </button>
-                </div>
-              </form>
-            </div>
-          )}
-
-          {/* Networks List */}
-          {isLoadingNetworks ? (
-            <div className="flex items-center justify-center py-12">
-              {null}
-              <p className="ml-4 text-gray-700">Loading ad networks...</p>
-            </div>
-          ) : networkError && adNetworks.length === 0 ? (
-            <div className="p-6 bg-red-100 border border-red-200 rounded-lg text-center">
-              <AlertTriangle className="w-8 h-8 text-red-500 mx-auto mb-2" />
-              <p className="text-red-700">{networkError}</p>
-              <button
-                onClick={fetchAdNetworks}
-                className="mt-4 px-4 py-2 bg-red-100 hover:bg-red-200 text-red-700 rounded-lg"
-              >
-                Try Again
-              </button>
-            </div>
-          ) : adNetworks.length === 0 ? (
-            <div className="p-6 bg-gray-100 rounded-lg text-center">
-              <p className="text-gray-700">No ad networks configured yet. Add your first ad network to get started.</p>
-            </div>
-          ) : (
-            <div className="overflow-x-auto">
-              <table className="w-full border-collapse">
-                <thead>
-                  <tr className="bg-gray-100 text-left">
-                    <th className="p-4 text-gray-700 font-medium">Network</th>
-                    <th className="p-4 text-gray-700 font-medium">API Key / Publisher ID</th>
-                    <th className="p-4 text-gray-700 font-medium">App ID</th>
-                    <th className="p-4 text-gray-700 font-medium">Status</th>
-                    <th className="p-4 text-gray-700 font-medium">Added</th>
-                    <th className="p-4 text-gray-700 font-medium">Actions</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {adNetworks.map((network) => (
-                    <tr key={network.id} className="border-b border-gray-200 hover:bg-gray-50">
-                      <td className="p-4">
-                        <div className="font-medium text-gray-900 capitalize">{network.network}</div>
-                      </td>
-                      <td className="p-4">
-                        <div className="text-gray-700 font-mono text-sm">
-                          {network.api_key.substring(0, 8)}...{network.api_key.substring(network.api_key.length - 4)}
-                        </div>
-                      </td>
-                      <td className="p-4">
-                        <div className="text-gray-700 font-mono text-sm">{network.app_id}</div>
-                      </td>
-                      <td className="p-4">
-                        <span className={`px-2 py-1 rounded-full text-xs font-medium ${
-                          network.is_active 
-                            ? 'bg-green-100 text-green-700 border border-green-200' 
-                            : 'bg-red-100 text-red-700 border border-red-200'
-                        }`}>
-                          {network.is_active ? 'Active' : 'Inactive'}
-                        </span>
-                      </td>
-                      <td className="p-4 text-gray-700">{formatDate(network.created_at)}</td>
-                      <td className="p-4">
-                        <div className="flex space-x-2">
-                          <button
-                            onClick={() => toggleNetworkStatus(network.id, network.is_active)}
-                            className={`p-2 rounded-lg ${
-                              network.is_active 
-                                ? 'bg-red-100 hover:bg-red-200 text-red-700' 
-                                : 'bg-green-100 hover:bg-green-200 text-green-700'
-                            }`}
-                            title={network.is_active ? 'Deactivate' : 'Activate'}
-                          >
-                            {network.is_active ? <X size={16} /> : <Check size={16} />}
-                          </button>
-                          <button
-                            onClick={() => deleteNetwork(network.id)}
-                            className="p-2 bg-red-100 hover:bg-red-200 rounded-lg text-red-700"
-                            title="Delete"
-                          >
-                            <Trash2 size={16} />
-                          </button>
-                        </div>
-                      </td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
-          )}
+      {(error || success) && (
+        <div
+          className={`mb-4 p-3 rounded-lg ${error ? 'bg-red-100 text-red-700' : 'bg-green-100 text-green-700'}`}
+        >
+          {error || success}
         </div>
       )}
 
-      {/* Ad Units Tab */}
-      {activeTab === 'units' && (
-        <div className="space-y-6">
-          <div className="flex justify-between items-center">
-            <h3 className="text-xl font-semibold text-gray-900">Ad Units</h3>
-            <button
-              onClick={() => {
-                if (adNetworks.length === 0) {
-                  alert('Please add at least one ad network first');
-                  return;
-                }
-                setShowUnitForm(true);
-                setNewUnit({
-                  ...newUnit,
-                  network_id: adNetworks[0].id
-                });
-              }}
-              className="flex items-center gap-2 px-4 py-2 bg-[#309605] hover:bg-[#3ba208] rounded-lg text-white text-sm font-medium transition-all duration-200"
-            >
-              <Plus className="w-4 h-4" />
-              Add Ad Unit
-            </button>
-          </div>
-
-          {/* Unit Form */}
-          {showUnitForm && (
-            <div className="bg-gray-100 p-6 rounded-lg border border-gray-200 mb-6">
-              <h4 className="text-lg font-semibold text-gray-900 mb-4">Add Ad Unit</h4>
-              
-              <form onSubmit={handleSubmitUnit} className="space-y-4">
-                <div>
-                  <label className="block text-gray-700 text-sm font-medium mb-2">
-                    Ad Network *
-                  </label>
-                  <select
-                    name="network_id"
-                    value={newUnit.network_id}
-                    onChange={handleUnitInputChange}
-                    required
-                    className="w-full px-4 py-2 bg-white border border-gray-300 rounded-lg text-gray-900 focus:outline-none focus:ring-2 focus:ring-[#309605]"
-                  >
-                    <option value="">Select ad network</option>
-                    {adNetworks.map(network => (
-                      <option key={network.id} value={network.id}>
-                        {network.network} ({network.app_id})
-                      </option>
-                    ))}
-                  </select>
-                </div>
-                
-                <div>
-                  <label className="block text-gray-700 text-sm font-medium mb-2">
-                    Ad Unit Type *
-                  </label>
-                  <select
-                    name="unit_type"
-                    value={newUnit.unit_type}
-                    onChange={handleUnitInputChange}
-                    required
-                    className="w-full px-4 py-2 bg-white border border-gray-300 rounded-lg text-gray-900 focus:outline-none focus:ring-2 focus:ring-[#309605]"
-                  >
-                    <option value="banner">Banner</option>
-                    <option value="interstitial">Interstitial</option>
-                    <option value="rewarded">Rewarded</option>
-                    <option value="native">Native</option>
-                  </select>
-                </div>
-                
-                <div>
-                  <label className="block text-gray-700 text-sm font-medium mb-2">
-                    Ad Unit ID *
-                  </label>
-                  <input
-                    type="text"
-                    name="unit_id"
-                    value={newUnit.unit_id}
-                    onChange={handleUnitInputChange}
-                    required
-                    className="w-full px-4 py-2 bg-white border border-gray-300 rounded-lg text-gray-900 focus:outline-none focus:ring-2 focus:ring-[#309605]"
-                    placeholder="Enter ad unit ID"
-                  />
-                </div>
-                
-                <div>
-                  <label className="block text-gray-700 text-sm font-medium mb-2">
-                    Placement Key *
-                  </label>
-                  {isLoadingPlacementKeys ? (
-                    <div className="w-full px-4 py-2 bg-white border border-gray-300 rounded-lg text-gray-500">
-                      Loading placement keys...
-                    </div>
-                  ) : (
-                    <select
-                      name="placement"
-                      value={newUnit.placement}
-                      onChange={handleUnitInputChange}
-                      required
-                      className="w-full px-4 py-2 bg-white border border-gray-300 rounded-lg text-gray-900 focus:outline-none focus:ring-2 focus:ring-[#309605]"
-                    >
-                      <option value="">Select Placement Key</option>
-                      {placementKeys.length > 0 ? (
-                        placementKeys.map((pk) => (
-                          <option key={pk.key} value={pk.key}>
-                            {pk.name} ({pk.screen}) - {pk.key}
-                          </option>
-                        ))
-                      ) : (
-                        <>
-                          <option value="home_screen">Home Screen (Legacy)</option>
-                          <option value="explore_screen">Explore Screen (Legacy)</option>
-                          <option value="library_screen">Library Screen (Legacy)</option>
-                          <option value="profile_screen">Profile Screen (Legacy)</option>
-                          <option value="between_songs">Between Songs (Legacy)</option>
-                          <option value="after_video">After Video (Legacy)</option>
-                          <option value="playlist_view">Playlist View (Legacy)</option>
-                        </>
-                      )}
-                    </select>
-                  )}
-                  <p className="text-xs text-gray-500 mt-1">
-                    {placementKeys.length > 0 
-                      ? `${placementKeys.length} placement key(s) available. Create new placements in the Placements tab.`
-                      : 'No placement keys found. Create placements in the Placements tab first, or use legacy placement values.'}
-                  </p>
-                </div>
-                
-                <div>
-                  <label className="block text-gray-700 text-sm font-medium mb-2">
-                    eCPM Floor (USD)
-                  </label>
-                  <input
-                    type="number"
-                    step="0.01"
-                    min="0"
-                    name="ecpm_floor"
-                    value={(newUnit as any).ecpm_floor || ''}
-                    onChange={handleUnitInputChange}
-                    className="w-full px-4 py-2 bg-white border border-gray-300 rounded-lg text-gray-900 focus:outline-none focus:ring-2 focus:ring-[#309605]"
-                    placeholder="e.g., 1.50"
-                  />
-                  <p className="text-xs text-gray-500 mt-1">Minimum CPM for this ad unit</p>
-                </div>
-                
-                <div className="flex items-center">
-                  <input
-                    type="checkbox"
-                    id="auto_cpm_bidding"
-                    name="auto_cpm_bidding"
-                    checked={(newUnit as any).auto_cpm_bidding !== false}
-                    onChange={(e) => {
-                      setNewUnit(prev => ({
-                        ...prev,
-                        auto_cpm_bidding: e.target.checked
-                      }));
-                    }}
-                    className="w-4 h-4 rounded border-gray-300 text-[#309605] focus:ring-[#309605]"
-                  />
-                  <label htmlFor="auto_cpm_bidding" className="ml-2 text-gray-700 text-sm">
-                    Enable Automatic CPM Bidding
-                  </label>
-                </div>
-                
-                <div className="flex items-center">
-                  <input
-                    type="checkbox"
-                    id="unit_is_active"
-                    name="is_active"
-                    checked={newUnit.is_active}
-                    onChange={handleUnitCheckboxChange}
-                    className="w-4 h-4 rounded border-gray-300 text-[#309605] focus:ring-[#309605]"
-                  />
-                  <label htmlFor="unit_is_active" className="ml-2 text-gray-700 text-sm">
-                    Active
-                  </label>
-                </div>
-                
-                {unitError && (
-                  <div className="p-3 bg-red-100 border border-red-200 rounded-lg">
-                    <p className="text-red-700 text-sm">{unitError}</p>
-                  </div>
-                )}
-                
-                <div className="flex gap-3 pt-2">
-                  <button
-                    type="button"
-                    onClick={() => {
-                      setShowUnitForm(false);
-                      setUnitError(null);
-                    }}
-                    className="px-4 py-2 bg-white hover:bg-gray-100 border border-gray-300 rounded-lg text-gray-700 transition-all duration-200"
-                  >
-                    Cancel
-                  </button>
-                  <button
-                    type="submit"
-                    disabled={isSubmitting}
-                    className="px-4 py-2 bg-[#309605] hover:bg-[#3ba208] rounded-lg text-white transition-all duration-200 disabled:opacity-50 disabled:cursor-not-allowed"
-                  >
-                    {isSubmitting ? 'Adding...' : 'Add Unit'}
-                  </button>
-                </div>
-              </form>
-            </div>
-          )}
-
-          {/* Units List */}
-          {isLoadingUnits ? (
-            <div className="flex items-center justify-center py-12">
-              {null}
-              <p className="ml-4 text-gray-700">Loading ad units...</p>
-            </div>
-          ) : unitError && adUnits.length === 0 ? (
-            <div className="p-6 bg-red-100 border border-red-200 rounded-lg text-center">
-              <AlertTriangle className="w-8 h-8 text-red-500 mx-auto mb-2" />
-              <p className="text-red-700">{unitError}</p>
-              <button
-                onClick={fetchAdUnits}
-                className="mt-4 px-4 py-2 bg-red-100 hover:bg-red-200 text-red-700 rounded-lg"
-              >
-                Try Again
-              </button>
-            </div>
-          ) : adUnits.length === 0 ? (
-            <div className="p-6 bg-gray-100 rounded-lg text-center">
-              <p className="text-gray-700">No ad units configured yet. Add your first ad unit to get started.</p>
-            </div>
-          ) : (
-            <div className="overflow-x-auto">
-              <table className="w-full border-collapse">
-                <thead>
-                  <tr className="bg-gray-100 text-left">
-                    <th className="p-4 text-gray-700 font-medium">Network</th>
-                    <th className="p-4 text-gray-700 font-medium">Type</th>
-                    <th className="p-4 text-gray-700 font-medium">Unit ID</th>
-                    <th className="p-4 text-gray-700 font-medium">Placement</th>
-                    <th className="p-4 text-gray-700 font-medium">Status</th>
-                    <th className="p-4 text-gray-700 font-medium">Actions</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {adUnits.map((unit) => (
-                    <tr key={unit.id} className="border-b border-gray-200 hover:bg-gray-50">
-                      <td className="p-4">
-                        <div className="font-medium text-gray-900 capitalize">{getNetworkName(unit.network_id)}</div>
-                      </td>
-                      <td className="p-4">
-                        <div className="text-gray-700 capitalize">{unit.unit_type}</div>
-                      </td>
-                      <td className="p-4">
-                        <div className="text-gray-700 font-mono text-sm">
-                          {unit.unit_id.length > 20 
-                            ? `${unit.unit_id.substring(0, 10)}...${unit.unit_id.substring(unit.unit_id.length - 10)}`
-                            : unit.unit_id
-                          }
-                        </div>
-                      </td>
-                      <td className="p-4">
-                        <div className="text-gray-700">
-                          {unit.placement.split('_').map(word => word.charAt(0).toUpperCase() + word.slice(1)).join(' ')}
-                        </div>
-                      </td>
-                      <td className="p-4">
-                        <span className={`px-2 py-1 rounded-full text-xs font-medium ${
-                          unit.is_active 
-                            ? 'bg-green-100 text-green-700 border border-green-200' 
-                            : 'bg-red-100 text-red-700 border border-red-200'
-                        }`}>
-                          {unit.is_active ? 'Active' : 'Inactive'}
-                        </span>
-                      </td>
-                      <td className="p-4">
-                        <div className="flex space-x-2">
-                          <button
-                            onClick={() => toggleUnitStatus(unit.id, unit.is_active)}
-                            className={`p-2 rounded-lg ${
-                              unit.is_active 
-                                ? 'bg-red-100 hover:bg-red-200 text-red-700' 
-                                : 'bg-green-100 hover:bg-green-200 text-green-700'
-                            }`}
-                            title={unit.is_active ? 'Deactivate' : 'Activate'}
-                          >
-                            {unit.is_active ? <X size={16} /> : <Check size={16} />}
-                          </button>
-                          <button
-                            onClick={() => deleteUnit(unit.id)}
-                            className="p-2 bg-red-100 hover:bg-red-200 rounded-lg text-red-700"
-                            title="Delete"
-                          >
-                            <Trash2 size={16} />
-                          </button>
-                        </div>
-                      </td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
-          )}
-        </div>
-      )}
-
-      {/* Display Rules Tab */}
-      {activeTab === 'rules' && (
-        <div className="space-y-6">
-          <div className="flex items-center justify-between">
-            <h3 className="text-xl font-semibold text-gray-900">Ad Display Rules</h3>
-            <button
-              onClick={() => setShowRuleForm(true)}
-              className="flex items-center gap-2 px-4 py-2 bg-[#309605] hover:bg-[#3ba208] rounded-lg text-white text-sm font-medium transition-all duration-200"
-            >
-              <Plus className="w-4 h-4" />
-              Add Rule
-            </button>
-          </div>
-          
-          {/* Rule Form */}
-          {showRuleForm && (
-            <div className="bg-gray-100 p-6 rounded-lg border border-gray-200 mb-6">
-              <h4 className="text-lg font-semibold text-gray-900 mb-4">Add Display Rule</h4>
-              
-              <form onSubmit={handleSubmitRule} className="space-y-4">
-                <div>
-                  <label className="block text-gray-700 text-sm font-medium mb-2">
-                    Rule Type *
-                  </label>
-                  <select
-                    name="rule_type"
-                    value={newRule.rule_type}
-                    onChange={handleRuleInputChange}
-                    required
-                    className="w-full px-4 py-2 bg-white border border-gray-300 rounded-lg text-gray-900 focus:outline-none focus:ring-2 focus:ring-[#309605]"
-                  >
-                    <option value="role">User Role</option>
-                    <option value="content_type">Content Type</option>
-                    <option value="country">Country</option>
-                  </select>
-                </div>
-                
-                <div>
-                  <label className="block text-gray-700 text-sm font-medium mb-2">
-                    Rule Value *
-                  </label>
-                  {newRule.rule_type === 'role' && (
-                    <select
-                      name="rule_value"
-                      value={newRule.rule_value}
-                      onChange={handleRuleInputChange}
-                      required
-                      className="w-full px-4 py-2 bg-white border border-gray-300 rounded-lg text-gray-900 focus:outline-none focus:ring-2 focus:ring-[#309605]"
-                    >
-                      <option value="listener">Listener</option>
-                      <option value="creator">Creator</option>
-                      <option value="admin">Admin</option>
-                    </select>
-                  )}
-                  
-                  {newRule.rule_type === 'content_type' && (
-                    <select
-                      name="rule_value"
-                      value={newRule.rule_value}
-                      onChange={handleRuleInputChange}
-                      required
-                      className="w-full px-4 py-2 bg-white border border-gray-300 rounded-lg text-gray-900 focus:outline-none focus:ring-2 focus:ring-[#309605]"
-                    >
-                      <option value="song">Music</option>
-                      <option value="video">Video</option>
-                      <option value="short_clip">Short Clip</option>
-                    </select>
-                  )}
-                  
-                  {newRule.rule_type === 'country' && (
-                    <select
-                      name="rule_value"
-                      value={newRule.rule_value}
-                      onChange={handleRuleInputChange}
-                      required
-                      className="w-full px-4 py-2 bg-white border border-gray-300 rounded-lg text-gray-900 focus:outline-none focus:ring-2 focus:ring-[#309605]"
-                    >
-                      <option value="">Select country</option>
-                      {countries.map(country => (
-                        <option key={country} value={country}>
-                          {country}
-                        </option>
-                      ))}
-                    </select>
-                  )}
-                </div>
-                
-                <div className="flex items-center">
-                  <input
-                    type="checkbox"
-                    id="rule_is_enabled"
-                    name="is_enabled"
-                    checked={newRule.is_enabled}
-                    onChange={handleRuleCheckboxChange}
-                    className="w-4 h-4 rounded border-gray-300 text-[#309605] focus:ring-[#309605]"
-                  />
-                  <label htmlFor="rule_is_enabled" className="ml-2 text-gray-700 text-sm">
-                    Enabled
-                  </label>
-                </div>
-                
-                {rulesError && (
-                  <div className="p-3 bg-red-100 border border-red-200 rounded-lg">
-                    <p className="text-red-700 text-sm">{rulesError}</p>
-                  </div>
-                )}
-                
-                <div className="flex gap-3 pt-2">
-                  <button
-                    type="button"
-                    onClick={() => {
-                      setShowRuleForm(false);
-                      setRulesError(null);
-                    }}
-                    className="px-4 py-2 bg-white hover:bg-gray-100 border border-gray-300 rounded-lg text-gray-700 transition-all duration-200"
-                  >
-                    Cancel
-                  </button>
-                  <button
-                    type="submit"
-                    disabled={isSubmitting || (newRule.rule_type === 'country' && !newRule.rule_value)}
-                    className="px-4 py-2 bg-[#309605] hover:bg-[#3ba208] rounded-lg text-white transition-all duration-200 disabled:opacity-50 disabled:cursor-not-allowed"
-                  >
-                    {isSubmitting ? 'Adding...' : 'Add Rule'}
-                  </button>
-                </div>
-              </form>
-            </div>
-          )}
-
-          {/* Rules List */}
-          {isLoadingRules ? (
-            <div className="flex items-center justify-center py-12">
-              {null}
-              <p className="ml-4 text-gray-700">Loading display rules...</p>
-            </div>
-          ) : rulesError && displayRules.length === 0 ? (
-            <div className="p-6 bg-red-100 border border-red-200 rounded-lg text-center">
-              <AlertTriangle className="w-8 h-8 text-red-500 mx-auto mb-2" />
-              <p className="text-red-700">{rulesError}</p>
-              <button
-                onClick={fetchDisplayRules}
-                className="mt-4 px-4 py-2 bg-red-100 hover:bg-red-200 text-red-700 rounded-lg"
-              >
-                Try Again
-              </button>
-            </div>
-          ) : displayRules.length === 0 ? (
-            <div className="p-6 bg-gray-100 rounded-lg text-center">
-              <p className="text-gray-700">No display rules configured yet. Add your first rule to control ad visibility.</p>
-            </div>
-          ) : (
-            <div className="overflow-x-auto">
-              <table className="w-full border-collapse">
-                <thead>
-                  <tr className="bg-gray-100 text-left">
-                    <th className="p-4 text-gray-700 font-medium">Rule Type</th>
-                    <th className="p-4 text-gray-700 font-medium">Value</th>
-                    <th className="p-4 text-gray-700 font-medium">Status</th>
-                    <th className="p-4 text-gray-700 font-medium">Created</th>
-                    <th className="p-4 text-gray-700 font-medium">Actions</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {displayRules.map((rule) => (
-                    <tr key={rule.id} className="border-b border-gray-200 hover:bg-gray-50">
-                      <td className="p-4">
-                        <div className="font-medium text-gray-900">
-                          {rule.rule_type === 'role' && (
-                            <div className="flex items-center gap-2">
-                              <Users className="w-4 h-4 text-blue-600" />
-                              <span>User Role</span>
-                            </div>
-                          )}
-                          {rule.rule_type === 'content_type' && (
-                            <div className="flex items-center gap-2">
-                              {rule.rule_value === 'song' && <Music className="w-4 h-4 text-[#309605]" />}
-                              {rule.rule_value === 'video' && <Video className="w-4 h-4 text-pink-600" />}
-                              {rule.rule_value === 'short_clip' && <Zap className="w-4 h-4 text-yellow-600" />}
-                              <span>Content Type</span>
-                            </div>
-                          )}
-                          {rule.rule_type === 'country' && (
-                            <div className="flex items-center gap-2">
-                              <Globe className="w-4 h-4 text-green-600" />
-                              <span>Country</span>
-                            </div>
-                          )}
-                        </div>
-                      </td>
-                      <td className="p-4">
-                        <div className="text-gray-700">{formatRuleValue(rule.rule_type, rule.rule_value)}</div>
-                      </td>
-                      <td className="p-4">
-                        <span className={`px-2 py-1 rounded-full text-xs font-medium ${
-                          rule.is_enabled 
-                            ? 'bg-green-100 text-green-700 border border-green-200' 
-                            : 'bg-red-100 text-red-700 border border-red-200'
-                        }`}>
-                          {rule.is_enabled ? 'Enabled' : 'Disabled'}
-                        </span>
-                      </td>
-                      <td className="p-4 text-gray-700">{formatDate(rule.created_at)}</td>
-                      <td className="p-4">
-                        <div className="flex space-x-2">
-                          <button
-                            onClick={() => toggleRuleStatus(rule.id, rule.is_enabled)}
-                            className={`p-2 rounded-lg ${
-                              rule.is_enabled 
-                                ? 'bg-red-100 hover:bg-red-200 text-red-700' 
-                                : 'bg-green-100 hover:bg-green-200 text-green-700'
-                            }`}
-                            title={rule.is_enabled ? 'Disable' : 'Enable'}
-                          >
-                            {rule.is_enabled ? <X size={16} /> : <Check size={16} />}
-                          </button>
-                          <button
-                            onClick={() => deleteRule(rule.id)}
-                            className="p-2 bg-red-100 hover:bg-red-200 rounded-lg text-red-700"
-                            title="Delete"
-                          >
-                            <Trash2 size={16} />
-                          </button>
-                        </div>
-                      </td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
-          )}
-        </div>
-      )}
-
-      {/* Mediation Tab */}
-      {activeTab === 'mediation' && (
-        <div className="space-y-6">
-          <div className="flex justify-between items-center">
+      {showForm && (
+        <form onSubmit={handleSubmit} className="mb-8 p-4 border border-gray-200 rounded-lg space-y-4">
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
             <div>
-              <h3 className="text-xl font-semibold text-gray-900">Ad Mediation Configuration</h3>
-              <p className="text-sm text-gray-600 mt-1">Configure AdMob as primary and AppLovin as secondary with automatic CPM bidding</p>
+              <label className="block text-sm font-medium text-gray-700 mb-1">Title *</label>
+              <input
+                type="text"
+                name="title"
+                value={formData.title}
+                onChange={handleChange}
+                className="w-full px-3 py-2 border border-gray-300 rounded-lg"
+                placeholder="Post title"
+              />
+            </div>
+            <div>
+              <label className="block text-sm font-medium text-gray-700 mb-1">Slug * (URL: /blog/slug)</label>
+              <input
+                type="text"
+                name="slug"
+                value={formData.slug}
+                onChange={handleChange}
+                className="w-full px-3 py-2 border border-gray-300 rounded-lg"
+                placeholder="post-slug"
+              />
             </div>
           </div>
-
-          {isLoadingMediation ? (
-            <div className="flex items-center justify-center py-12">
-              {null}
-              <p className="ml-4 text-gray-700">Loading mediation configuration...</p>
-            </div>
-          ) : (
-            <div className="bg-white rounded-lg shadow p-6">
-              {mediationConfig ? (
-                <div className="space-y-6">
-                  <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-6">
-                    <div className="p-4 bg-blue-50 rounded-lg border border-blue-200">
-                      <h4 className="font-semibold text-gray-900 mb-2">Primary Network (AdMob)</h4>
-                      {mediationConfig.primary_network ? (
-                        <div className="space-y-2">
-                          <p className="text-sm text-gray-700">
-                            <span className="font-medium">Network:</span> {mediationConfig.primary_network.network}
-                          </p>
-                          <p className="text-sm text-gray-700">
-                            <span className="font-medium">App ID:</span> {mediationConfig.primary_network.app_id}
-                          </p>
-                          <p className="text-sm text-gray-700">
-                            <span className="font-medium">eCPM Floor:</span> ${mediationConfig.primary_network.ecpm_floor || '1.50'}
-                          </p>
-                        </div>
-                      ) : (
-                        <p className="text-sm text-gray-500">No primary network configured</p>
-                      )}
-                    </div>
-
-                    <div className="p-4 bg-green-50 rounded-lg border border-green-200">
-                      <h4 className="font-semibold text-gray-900 mb-2">Secondary Network (AppLovin)</h4>
-                      {mediationConfig.secondary_network ? (
-                        <div className="space-y-2">
-                          <p className="text-sm text-gray-700">
-                            <span className="font-medium">Network:</span> {mediationConfig.secondary_network.network}
-                          </p>
-                          <p className="text-sm text-gray-700">
-                            <span className="font-medium">App ID:</span> {mediationConfig.secondary_network.app_id}
-                          </p>
-                          <p className="text-sm text-gray-700">
-                            <span className="font-medium">eCPM Floor:</span> ${mediationConfig.secondary_network.ecpm_floor || '2.50'}
-                          </p>
-                        </div>
-                      ) : (
-                        <p className="text-sm text-gray-500">No secondary network configured</p>
-                      )}
-                    </div>
-                  </div>
-
-                  <div className="p-4 bg-green-50 rounded-lg border border-green-200">
-                    <div className="flex items-center justify-between">
-                      <div>
-                        <h4 className="font-semibold text-gray-900 mb-1">Automatic CPM Bidding</h4>
-                        <p className="text-sm text-gray-600">The network with the highest CPM will serve the ad first</p>
-                      </div>
-                      <span className={`px-3 py-1 rounded-full text-sm font-medium ${
-                        mediationConfig.auto_cpm_bidding
-                          ? 'bg-green-100 text-green-700 border border-green-200'
-                          : 'bg-gray-100 text-gray-700 border border-gray-200'
-                      }`}>
-                        {mediationConfig.auto_cpm_bidding ? 'Enabled' : 'Disabled'}
-                      </span>
-                    </div>
-                  </div>
-                </div>
-              ) : (
-                <div className="text-center py-8">
-                  <p className="text-gray-600 mb-4">No mediation configuration found. Configure networks with mediation roles first.</p>
-                  <button
-                    onClick={() => {
-                      setActiveTab('networks');
-                      setShowNetworkForm(true);
-                    }}
-                    className="px-4 py-2 bg-[#309605] hover:bg-[#3ba208] text-white rounded-lg"
-                  >
-                    Configure Networks
-                  </button>
-                </div>
+          <div>
+            <label className="block text-sm font-medium text-gray-700 mb-1">Excerpt</label>
+            <textarea
+              name="excerpt"
+              value={formData.excerpt}
+              onChange={handleChange}
+              rows={2}
+              className="w-full px-3 py-2 border border-gray-300 rounded-lg"
+              placeholder="Short summary for SEO and cards"
+            />
+          </div>
+          <div>
+            <label className="block text-sm font-medium text-gray-700 mb-1">Content (plain text — use **bold**, *italic*, ## headings)</label>
+            <p className="text-xs text-gray-500 mb-1">
+              Write in plain text. Use <strong>**bold**</strong>, <em>*italic*</em>, <code>## Heading 2</code>, <code>### Heading 3</code>, and <code>[link text](https://url)</code>. New lines become paragraphs. No HTML needed.
+              {formData.content && looksLikeHtml(formData.content) && (
+                <span className="block mt-1 text-amber-600">Showing saved HTML. Edit as-is or replace with simple formatting above.</span>
               )}
-            </div>
-          )}
-        </div>
-      )}
-
-      {/* Placements Tab */}
-      {activeTab === 'placements' && (
-        <div className="space-y-6">
-          <div className="flex justify-between items-center">
-            <h3 className="text-xl font-semibold text-gray-900">Ad Placements</h3>
-            <button
-              onClick={() => {
-                if (adUnits.length === 0) {
-                  alert('Please add at least one ad unit first');
-                  return;
-                }
-                setShowPlacementForm(true);
-              }}
-              className="flex items-center gap-2 px-4 py-2 bg-[#309605] hover:bg-[#3ba208] rounded-lg text-white text-sm font-medium transition-all duration-200"
-            >
-              <Plus className="w-4 h-4" />
-              Add Placement
-            </button>
+            </p>
+            <textarea
+              name="content"
+              value={formData.content}
+              onChange={handleChange}
+              rows={10}
+              className="w-full px-3 py-2 border border-gray-300 rounded-lg"
+              placeholder="Write your post here. Example:&#10;&#10;## Introduction&#10;&#10;This is **bold** and *italic*. [Learn more](https://example.com)."
+            />
           </div>
-
-          {showPlacementForm && (
-            <div className="bg-gray-100 p-6 rounded-lg border border-gray-200 mb-6">
-              <h4 className="text-lg font-semibold text-gray-900 mb-4">Add Ad Placement</h4>
-              <form onSubmit={async (e) => {
-                e.preventDefault();
-                setIsSubmitting(true);
-                setFormSuccess(null);
-                
-                setPlacementError(null);
-                
-                try {
-                  // Validate required fields
-                  if (!newPlacement.placement_key || !newPlacement.placement_key.trim()) {
-                    setPlacementError('Please enter a placement key');
-                    setIsSubmitting(false);
-                    return;
-                  }
-                  if (!newPlacement.placement_name || !newPlacement.placement_name.trim()) {
-                    setPlacementError('Please enter a placement name');
-                    setIsSubmitting(false);
-                    return;
-                  }
-                  if (!newPlacement.screen_name) {
-                    setPlacementError('Please select a screen name');
-                    setIsSubmitting(false);
-                    return;
-                  }
-                  if (!newPlacement.ad_unit_id) {
-                    setPlacementError('Please select an ad unit');
-                    setIsSubmitting(false);
-                    return;
-                  }
-
-                  // Prepare placement data with proper formatting
-                  const placementData: any = {
-                    placement_key: newPlacement.placement_key.trim(),
-                    placement_name: newPlacement.placement_name.trim(),
-                    screen_name: newPlacement.screen_name,
-                    ad_unit_id: newPlacement.ad_unit_id,
-                    ad_type: newPlacement.ad_type,
-                    is_enabled: newPlacement.is_enabled,
-                    display_priority: newPlacement.display_priority || 0,
-                    conditions: {} // Default empty conditions object
-                  };
-
-                  // Add position if provided
-                  if (newPlacement.position && newPlacement.position.trim()) {
-                    placementData.position = newPlacement.position.trim();
-                  }
-
-                  console.log('Submitting placement:', placementData);
-
-                  // First check if table exists
-                  const { error: tableError } = await supabase
-                    .from('ad_placements')
-                    .select('id')
-                    .limit(1);
-
-                  if (tableError) {
-                    console.error('Table check error:', tableError);
-                    // If table doesn't exist, provide helpful message
-                    if (tableError.message?.includes('relation') || tableError.message?.includes('does not exist') || tableError.code === '42P01') {
-                      throw new Error('The ad_placements table does not exist. Please run the migration: npx supabase db push');
-                    }
-                    throw tableError;
-                  }
-
-                  // Now insert the placement
-                  const { data, error } = await supabase
-                    .from('ad_placements')
-                    .insert([placementData])
-                    .select();
-
-                  if (error) {
-                    console.error('Supabase insert error details:', {
-                      message: error.message,
-                      details: error.details,
-                      hint: error.hint,
-                      code: error.code,
-                      status: (error as any).status,
-                      statusText: (error as any).statusText
-                    });
-                    // Ensure error has all properties
-                    const enhancedError: any = {
-                      ...error,
-                      message: error.message || 'Unknown database error',
-                      details: error.details || null,
-                      hint: error.hint || null,
-                      code: error.code || null,
-                      status: (error as any).status || null,
-                      statusText: (error as any).statusText || null
-                    };
-                    throw enhancedError;
-                  }
-
-                  if (!data || data.length === 0) {
-                    throw new Error('No data returned from insert - placement may not have been created');
-                  }
-
-                  setFormSuccess('Placement added successfully');
-                  setPlacements(prev => [...prev, data[0]]);
-                  setShowPlacementForm(false);
-                  setNewPlacement({
-                    placement_key: '',
-                    placement_name: '',
-                    screen_name: '',
-                    ad_unit_id: '',
-                    ad_type: 'banner',
-                    position: '',
-                    is_enabled: true,
-                    display_priority: 0
-                  });
-                  setUseCustomPlacementKey(false);
-                  // Refresh placement keys dropdown
-                  fetchPlacementKeys();
-                  setTimeout(() => setFormSuccess(null), 3000);
-                } catch (err: any) {
-                  // Comprehensive error logging
-                  console.group('❌ Placement Insert Error');
-                  console.error('Error object:', err);
-                  console.error('Error type:', typeof err);
-                  console.error('Error keys:', err ? Object.keys(err) : 'null');
-                  console.error('Error stringified:', JSON.stringify(err, null, 2));
-                  console.error('Error message:', err?.message);
-                  console.error('Error details:', err?.details);
-                  console.error('Error hint:', err?.hint);
-                  console.error('Error code:', err?.code);
-                  console.error('Error status:', err?.status);
-                  console.error('Error statusText:', err?.statusText);
-                  console.error('Full error:', err);
-                  console.groupEnd();
-                  
-                  // Build detailed error message
-                  let errorMessage = 'Failed to add placement: ';
-                  let foundMessage = false;
-                  
-                  // Try multiple ways to get error message - check all possible paths
-                  if (err?.message) {
-                    errorMessage += err.message;
-                    foundMessage = true;
-                  }
-                  if (!foundMessage && err?.details) {
-                    errorMessage += err.details;
-                    foundMessage = true;
-                  }
-                  if (!foundMessage && err?.hint) {
-                    errorMessage += err.hint;
-                    foundMessage = true;
-                  }
-                  if (!foundMessage && err?.error?.message) {
-                    errorMessage += err.error.message;
-                    foundMessage = true;
-                  }
-                  if (!foundMessage && typeof err === 'string') {
-                    errorMessage += err;
-                    foundMessage = true;
-                  }
-                  if (!foundMessage && err?.toString && err.toString() !== '[object Object]') {
-                    errorMessage += err.toString();
-                    foundMessage = true;
-                  }
-                  
-                  if (!foundMessage) {
-                    errorMessage += 'Unknown error occurred. ';
-                    // Add raw error info for debugging
-                    if (err) {
-                      errorMessage += `Error type: ${typeof err}`;
-                      if (err.code) errorMessage += `, Code: ${err.code}`;
-                      if (err.status) errorMessage += `, Status: ${err.status}`;
-                    }
-                    errorMessage += ' Please check browser console (F12) for full details.';
-                  }
-
-                  // Add specific guidance for common errors
-                  const errorStr = JSON.stringify(err).toLowerCase();
-                  const errorMsg = (err?.message || '').toLowerCase();
-                  
-                  if (err?.code === '23505' || errorMsg.includes('duplicate') || errorMsg.includes('unique') || errorStr.includes('duplicate')) {
-                    errorMessage += '\n\n⚠️ This placement key already exists. Please use a different key.';
-                  } else if (err?.code === '23503' || errorMsg.includes('foreign key') || errorStr.includes('foreign key')) {
-                    errorMessage += '\n\n⚠️ The selected ad unit does not exist. Please select a valid ad unit.';
-                  } else if (errorMsg.includes('column') || errorMsg.includes('does not exist') || errorStr.includes('relation') || errorStr.includes('table')) {
-                    errorMessage += '\n\n⚠️ Database schema not updated. Please run the migration:\n\nnpx supabase db push\n\nOr manually apply the migration in Supabase Dashboard.';
-                  } else if (errorMsg.includes('permission') || errorMsg.includes('policy') || errorMsg.includes('rls') || errorStr.includes('permission') || errorStr.includes('policy')) {
-                    errorMessage += '\n\n⚠️ You do not have permission to add placements. Please check your admin role.';
-                  } else if (errorMsg.includes('null value') || errorMsg.includes('not null') || errorStr.includes('null')) {
-                    errorMessage += '\n\n⚠️ Required field is missing. Please fill in all required fields.';
-                  } else if (err?.status === 401 || err?.status === 403) {
-                    errorMessage += '\n\n⚠️ Authentication error. Please refresh the page and try again.';
-                  } else if (err?.status === 404) {
-                    errorMessage += '\n\n⚠️ Table not found. Please ensure the migration has been applied.';
-                  }
-
-                  setPlacementError(errorMessage);
-                } finally {
-                  setIsSubmitting(false);
-                }
-              }} className="space-y-4">
-                <div>
-                  <label className="block text-gray-700 text-sm font-medium mb-2">Placement Key *</label>
-                  {isLoadingPlacementKeys ? (
-                    <div className="w-full px-4 py-2 bg-white border border-gray-300 rounded-lg text-gray-500">
-                      Loading placement keys...
-                    </div>
-                  ) : (
-                    <>
-                      {!useCustomPlacementKey ? (
-                        <select
-                          value={newPlacement.placement_key}
-                          onChange={(e) => {
-                            const selectedKey = e.target.value;
-                            if (selectedKey === '__custom__') {
-                              setUseCustomPlacementKey(true);
-                              setNewPlacement(prev => ({ ...prev, placement_key: '' }));
-                            } else {
-                              const selectedPlacement = placementKeys.find(pk => pk.key === selectedKey);
-                              setNewPlacement(prev => ({
-                                ...prev,
-                                placement_key: selectedKey,
-                                // Auto-fill name and screen if selecting existing placement
-                                placement_name: selectedPlacement ? selectedPlacement.name : prev.placement_name,
-                                screen_name: selectedPlacement ? selectedPlacement.screen : prev.screen_name
-                              }));
-                            }
-                          }}
-                          required={!useCustomPlacementKey}
-                          className="w-full px-4 py-2 bg-white border border-gray-300 rounded-lg text-gray-900 focus:outline-none focus:ring-2 focus:ring-[#309605]"
-                        >
-                          <option value="">Select Placement Key</option>
-                          {placementKeys.length > 0 && (
-                            <optgroup label="Existing Placement Keys">
-                              {placementKeys.map((pk) => (
-                                <option key={pk.key} value={pk.key}>
-                                  {pk.name} ({pk.screen}) - {pk.key}
-                                </option>
-                              ))}
-                            </optgroup>
-                          )}
-                          <optgroup label="Common Templates">
-                            <option value="home_screen_banner">Home Screen Banner</option>
-                            <option value="home_screen_interstitial">Home Screen Interstitial</option>
-                            <option value="mini_music_player_top_banner">Mini Music Player Top Banner</option>
-                            <option value="music_player_bottom_banner">Music Player Bottom Banner</option>
-                            <option value="during_song_playback_banner">During Song Playback Banner</option>
-                            <option value="before_song_play_interstitial">Before Song Play Interstitial</option>
-                            <option value="after_song_play_interstitial">After Song Play Interstitial</option>
-                            <option value="video_player_bottom_banner">Video Player Bottom Banner</option>
-                            <option value="before_video_play_interstitial">Before Video Play Interstitial</option>
-                            <option value="after_video_play_rewarded">After Video Play Rewarded</option>
-                            <option value="album_player_bottom_banner">Album Player Bottom Banner</option>
-                            <option value="playlist_player_bottom_banner">Playlist Player Bottom Banner</option>
-                            <option value="loops_video_bottom_banner">Loops Video Bottom Banner</option>
-                          </optgroup>
-                          <option value="__custom__">➕ Create Custom Placement Key</option>
-                        </select>
-                      ) : (
-                        <div className="space-y-2">
-                          <input
-                            type="text"
-                            value={newPlacement.placement_key}
-                            onChange={(e) => setNewPlacement(prev => ({ ...prev, placement_key: e.target.value }))}
-                            required
-                            className="w-full px-4 py-2 bg-white border border-gray-300 rounded-lg text-gray-900 focus:outline-none focus:ring-2 focus:ring-[#309605]"
-                            placeholder="Enter custom placement key (e.g., home_screen_banner)"
-                          />
-                          <button
-                            type="button"
-                            onClick={() => {
-                              setUseCustomPlacementKey(false);
-                              setNewPlacement(prev => ({ ...prev, placement_key: '' }));
-                            }}
-                            className="text-xs text-[#309605] hover:text-[#3ba208] underline"
-                          >
-                            ← Select from dropdown instead
-                          </button>
-                        </div>
-                      )}
-                      <p className="text-xs text-gray-500 mt-1">
-                        {placementKeys.length > 0 
-                          ? `Select from ${placementKeys.length} existing placement key(s), choose a template, or create a custom one.`
-                          : 'Select a template or create a custom placement key (e.g., home_screen_banner).'}
-                      </p>
-                    </>
-                  )}
-                </div>
-                <div>
-                  <label className="block text-gray-700 text-sm font-medium mb-2">Placement Name *</label>
-                  <input
-                    type="text"
-                    value={newPlacement.placement_name}
-                    onChange={(e) => setNewPlacement(prev => ({ ...prev, placement_name: e.target.value }))}
-                    required
-                    className="w-full px-4 py-2 bg-white border border-gray-300 rounded-lg"
-                    placeholder="e.g., Home Screen Banner"
+          <div>
+            <label className="block text-sm font-medium text-gray-700 mb-1">Feature image *</label>
+            <p className="text-xs text-gray-500 mb-2">
+              Every post must have a feature image (blog cards and top of post). Upload an image (JPG, PNG, WebP, GIF, max 5MB) or paste a URL below.
+            </p>
+            <input
+              ref={featureImageInputRef}
+              type="file"
+              accept="image/jpeg,image/png,image/webp,image/gif"
+              onChange={handleFeatureImageSelect}
+              className="hidden"
+            />
+            {formData.cover_image_url ? (
+              <div className="space-y-2">
+                <div className="relative inline-block rounded-lg overflow-hidden border border-gray-200 max-w-xs">
+                  <img
+                    src={formData.cover_image_url}
+                    alt="Feature"
+                    className="h-40 w-auto object-cover"
                   />
                 </div>
-                <div>
-                  <label className="block text-gray-700 text-sm font-medium mb-2">Screen Name *</label>
-                  <select
-                    value={newPlacement.screen_name}
-                    onChange={(e) => setNewPlacement(prev => ({ ...prev, screen_name: e.target.value }))}
-                    required
-                    className="w-full px-4 py-2 bg-white border border-gray-300 rounded-lg"
+                <div className="flex gap-2">
+                  <button
+                    type="button"
+                    onClick={() => featureImageInputRef.current?.click()}
+                    disabled={isUploadingFeatureImage}
+                    className="flex items-center gap-1.5 px-3 py-1.5 text-sm bg-gray-100 text-gray-700 rounded-lg hover:bg-gray-200 disabled:opacity-50"
                   >
-                    <option value="">Select Screen</option>
-                    <option value="HomePlayer">Home Screen</option>
-                    <option value="MiniMusicPlayer">Mini Music Player</option>
-                    <option value="MusicPlayerScreen">Music Player</option>
-                    <option value="VideoPlayerScreen">Video Player</option>
-                    <option value="AlbumPlayerScreen">Album Player</option>
-                    <option value="PlaylistPlayerScreen">Playlist Player</option>
-                    <option value="LoopsVideoDisplay">Loops Video Display</option>
-                    <option value="ExploreScreen">Explore Screen</option>
-                    <option value="LibraryScreen">Library Screen</option>
-                    <option value="ProfileScreen">Profile Screen</option>
-                  </select>
+                    {isUploadingFeatureImage ? <Loader2 className="w-4 h-4 animate-spin" /> : <Upload className="w-4 h-4" />}
+                    {isUploadingFeatureImage ? 'Uploading…' : 'Replace image'}
+                  </button>
+                  <button type="button" onClick={clearFeatureImage} className="text-sm text-red-600 hover:underline">
+                    Remove
+                  </button>
                 </div>
-                <div>
-                  <label className="block text-gray-700 text-sm font-medium mb-2">Ad Unit *</label>
-                  <select
-                    value={newPlacement.ad_unit_id}
-                    onChange={(e) => setNewPlacement(prev => ({ ...prev, ad_unit_id: e.target.value }))}
-                    required
-                    className="w-full px-4 py-2 bg-white border border-gray-300 rounded-lg"
+              </div>
+            ) : (
+              <button
+                type="button"
+                onClick={() => featureImageInputRef.current?.click()}
+                disabled={isUploadingFeatureImage}
+                className="w-full flex flex-col items-center justify-center gap-2 p-6 border-2 border-dashed border-gray-300 rounded-lg hover:border-[#309605] hover:bg-gray-50/50 transition-colors disabled:opacity-50"
+              >
+                {isUploadingFeatureImage ? (
+                  <Loader2 className="w-10 h-10 text-[#309605] animate-spin" />
+                ) : (
+                  <ImageIcon className="w-10 h-10 text-gray-400" />
+                )}
+                <span className="text-sm font-medium text-gray-600">
+                  {isUploadingFeatureImage ? 'Uploading…' : 'Click to upload feature image'}
+                </span>
+                <span className="text-xs text-gray-400">JPG, PNG, WebP or GIF, max 5MB</span>
+              </button>
+            )}
+            <p className="text-xs text-gray-400 mt-2">Or paste image URL:</p>
+            <input
+              type="url"
+              name="cover_image_url"
+              value={formData.cover_image_url}
+              onChange={handleChange}
+              className="mt-1 w-full px-3 py-2 border border-gray-300 rounded-lg text-sm"
+              placeholder="https://..."
+            />
+          </div>
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+            <div>
+              <label className="block text-sm font-medium text-gray-700 mb-1">Category</label>
+              <input
+                type="text"
+                name="category"
+                value={formData.category}
+                onChange={handleChange}
+                className="w-full px-3 py-2 border border-gray-300 rounded-lg"
+                placeholder="e.g. News"
+              />
+            </div>
+            <div>
+              <label className="block text-sm font-medium text-gray-700 mb-1">Tags (comma-separated)</label>
+              <input
+                type="text"
+                name="tags"
+                value={formData.tags}
+                onChange={handleChange}
+                className="w-full px-3 py-2 border border-gray-300 rounded-lg"
+                placeholder="music, artist, tips"
+              />
+            </div>
+          </div>
+          <div className="p-4 rounded-lg border-2 border-amber-200 bg-amber-50/80 space-y-3">
+            <p className="text-sm font-medium text-amber-800">Posts only appear on the home screen and /blog when they are <strong>Published</strong>. Check the box below and save.</p>
+            <label className="flex items-center gap-3 cursor-pointer">
+              <input
+                type="checkbox"
+                name="is_published"
+                checked={formData.is_published}
+                onChange={handleChange}
+                className="rounded border-gray-300 w-5 h-5"
+              />
+              <span className="text-base font-semibold text-gray-800">Published (show on home & blog)</span>
+            </label>
+            <p className="text-xs text-amber-700">If &quot;Published at&quot; is empty, we use current time when you save.</p>
+            <div>
+              <label className="block text-sm font-medium text-gray-700 mb-1">Published at (optional)</label>
+              <input
+                type="datetime-local"
+                name="published_at"
+                value={formData.published_at}
+                onChange={handleChange}
+                className="px-3 py-2 border border-gray-300 rounded-lg"
+              />
+            </div>
+          </div>
+          <div>
+            <label className="block text-sm font-medium text-gray-700 mb-1">
+              <span className="flex items-center gap-1">
+                FAQ <span className="text-gray-400 font-normal">(optional)</span>
+              </span>
+            </label>
+            <p className="text-xs text-gray-500 mb-2">
+              Add questions and answers that match your post. They can be shown on the page and help Google show rich results in search. Leave blank if you don’t need them.
+            </p>
+            {faqItems.map((item, index) => (
+              <div key={index} className="mb-3 p-3 border border-gray-200 rounded-lg bg-gray-50/50">
+                <div className="flex justify-between items-center mb-2">
+                  <span className="text-xs font-medium text-gray-500">Q&A #{index + 1}</span>
+                  <button
+                    type="button"
+                    onClick={() => removeFaqItem(index)}
+                    className="text-xs text-red-600 hover:underline"
                   >
-                    <option value="">Select Ad Unit</option>
-                    {adUnits.map(unit => (
-                      <option key={unit.id} value={unit.id}>
-                        {unit.unit_type} - {unit.placement} ({unit.unit_id.substring(0, 20)}...)
-                      </option>
-                    ))}
-                  </select>
+                    Remove
+                  </button>
                 </div>
-                <div>
-                  <label className="block text-gray-700 text-sm font-medium mb-2">Ad Type *</label>
-                  <select
-                    value={newPlacement.ad_type}
-                    onChange={(e) => setNewPlacement(prev => ({ ...prev, ad_type: e.target.value as any }))}
-                    required
-                    className="w-full px-4 py-2 bg-white border border-gray-300 rounded-lg"
-                  >
-                    <option value="banner">Banner</option>
-                    <option value="interstitial">Interstitial</option>
-                    <option value="rewarded">Rewarded</option>
-                  </select>
-                </div>
-                <div>
-                  <label className="block text-gray-700 text-sm font-medium mb-2">Position</label>
-                  <select
-                    value={newPlacement.position}
-                    onChange={(e) => setNewPlacement(prev => ({ ...prev, position: e.target.value }))}
-                    className="w-full px-4 py-2 bg-white border border-gray-300 rounded-lg"
-                  >
-                    <option value="">Select Position</option>
-                    <option value="top">Top</option>
-                    <option value="bottom">Bottom</option>
-                    <option value="center">Center</option>
-                    <option value="before_content">Before Content</option>
-                    <option value="after_content">After Content</option>
-                    <option value="in_content">In Content</option>
-                  </select>
-                </div>
-                
-                {placementError && (
-                  <div className="p-4 bg-red-50 border border-red-200 rounded-lg">
-                    <div className="flex items-start gap-2">
-                      <AlertTriangle className="w-5 h-5 text-red-600 flex-shrink-0 mt-0.5" />
-                      <div className="flex-1">
-                        <p className="text-red-800 text-sm font-medium mb-1">Error</p>
-                        <p className="text-red-700 text-sm whitespace-pre-line">{placementError}</p>
-                      </div>
+                <input
+                  type="text"
+                  value={item.question}
+                  onChange={(e) => updateFaqItem(index, 'question', e.target.value)}
+                  className="w-full px-3 py-2 border border-gray-300 rounded-lg mb-2 text-sm"
+                  placeholder="Question"
+                />
+                <textarea
+                  value={item.answer}
+                  onChange={(e) => updateFaqItem(index, 'answer', e.target.value)}
+                  rows={2}
+                  className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm"
+                  placeholder="Answer"
+                />
+              </div>
+            ))}
+            <button
+              type="button"
+              onClick={addFaqItem}
+              className="text-sm text-[#309605] hover:underline flex items-center gap-1"
+            >
+              <Plus className="w-4 h-4" />
+              Add another Q&A
+            </button>
+          </div>
+          <button
+            type="submit"
+            disabled={isSubmitting}
+            className="flex items-center gap-2 px-4 py-2 bg-[#309605] text-white rounded-lg hover:bg-[#3ba208] disabled:opacity-50"
+          >
+            {isSubmitting && <Loader2 className="w-4 h-4 animate-spin" />}
+            {editingPost ? 'Update post' : 'Create post'}
+          </button>
+        </form>
+      )}
+
+      {isLoading ? (
+        <div className="flex items-center gap-3 text-gray-600">
+          <LoadingLogo variant="pulse" size={32} />
+          <span>Loading posts...</span>
+        </div>
+      ) : posts.length === 0 ? (
+        <p className="text-gray-500">No blog posts yet. Add one above.</p>
+      ) : (
+        <div className="overflow-x-auto">
+          <table className="w-full border border-gray-200 rounded-lg">
+            <thead className="bg-gray-50">
+              <tr>
+                <th className="text-left p-3 text-sm font-semibold text-gray-700">Title</th>
+                <th className="text-left p-3 text-sm font-semibold text-gray-700">Slug</th>
+                <th className="text-left p-3 text-sm font-semibold text-gray-700">Status</th>
+                <th className="text-left p-3 text-sm font-semibold text-gray-700">Updated</th>
+                <th className="p-3 text-sm font-semibold text-gray-700">Actions</th>
+              </tr>
+            </thead>
+            <tbody>
+              {posts.map((post) => (
+                <tr key={post.id} className="border-t border-gray-200 hover:bg-gray-50">
+                  <td className="p-3 text-gray-900">{post.title}</td>
+                  <td className="p-3 text-gray-600 font-mono text-sm">/blog/{post.slug}</td>
+                  <td className="p-3">
+                    <span className={post.is_published ? 'text-green-600' : 'text-gray-500'}>
+                      {post.is_published ? 'Published' : 'Draft'}
+                    </span>
+                  </td>
+                  <td className="p-3 text-gray-500 text-sm">{post.updated_at ? new Date(post.updated_at).toLocaleDateString() : '—'}</td>
+                  <td className="p-3">
+                    <div className="flex flex-wrap gap-2 items-center">
+                      {!post.is_published && (
+                        <button
+                          type="button"
+                          onClick={() => handlePublish(post.id)}
+                          className="px-2 py-1.5 text-sm font-medium text-white bg-[#309605] hover:bg-[#3ba208] rounded-lg"
+                        >
+                          Publish
+                        </button>
+                      )}
                       <button
                         type="button"
-                        onClick={() => setPlacementError(null)}
-                        className="text-red-600 hover:text-red-800"
+                        onClick={() => setEditingPost(post)}
+                        className="p-2 text-gray-600 hover:bg-gray-200 rounded-lg"
+                        aria-label="Edit"
                       >
-                        <X className="w-4 h-4" />
+                        <Pencil className="w-4 h-4" />
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => handleDelete(post.id)}
+                        className="p-2 text-red-600 hover:bg-red-50 rounded-lg"
+                        aria-label="Delete"
+                      >
+                        <Trash2 className="w-4 h-4" />
                       </button>
                     </div>
-                  </div>
-                )}
-                
-                {formSuccess && (
-                  <div className="p-4 bg-green-50 border border-green-200 rounded-lg">
-                    <p className="text-green-800 text-sm">{formSuccess}</p>
-                  </div>
-                )}
-                
-                <div className="flex gap-3 pt-2">
-                  <button
-                    type="button"
-                    onClick={() => {
-                      setShowPlacementForm(false);
-                      setPlacementError(null);
-                      setFormSuccess(null);
-                    }}
-                    className="px-4 py-2 bg-white hover:bg-gray-100 border border-gray-300 rounded-lg text-gray-700"
-                  >
-                    Cancel
-                  </button>
-                  <button
-                    type="submit"
-                    disabled={isSubmitting}
-                    className="px-4 py-2 bg-[#309605] hover:bg-[#3ba208] rounded-lg text-white disabled:opacity-50 disabled:cursor-not-allowed"
-                  >
-                    {isSubmitting ? 'Adding...' : 'Add Placement'}
-                  </button>
-                </div>
-              </form>
-            </div>
-          )}
-
-          {isLoadingPlacements ? (
-            <div className="flex items-center justify-center py-12">
-              {null}
-              <p className="ml-4 text-gray-700">Loading placements...</p>
-            </div>
-          ) : placements.length === 0 ? (
-            <div className="p-6 bg-gray-100 rounded-lg text-center">
-              <p className="text-gray-700">No placements configured yet.</p>
-            </div>
-          ) : (
-            <div className="overflow-x-auto">
-              <table className="w-full border-collapse">
-                <thead>
-                  <tr className="bg-gray-100 text-left">
-                    <th className="p-4 text-gray-700 font-medium">Placement Key</th>
-                    <th className="p-4 text-gray-700 font-medium">Screen</th>
-                    <th className="p-4 text-gray-700 font-medium">Ad Type</th>
-                    <th className="p-4 text-gray-700 font-medium">Position</th>
-                    <th className="p-4 text-gray-700 font-medium">Status</th>
-                    <th className="p-4 text-gray-700 font-medium">Actions</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {placements.map((placement) => (
-                    <tr key={placement.id} className="border-b border-gray-200 hover:bg-gray-50">
-                      <td className="p-4 font-medium text-gray-900">{placement.placement_key}</td>
-                      <td className="p-4 text-gray-700">{placement.screen_name}</td>
-                      <td className="p-4 text-gray-700 capitalize">{placement.ad_type}</td>
-                      <td className="p-4 text-gray-700">{placement.position || 'N/A'}</td>
-                      <td className="p-4">
-                        <span className={`px-2 py-1 rounded-full text-xs font-medium ${
-                          placement.is_enabled
-                            ? 'bg-green-100 text-green-700 border border-green-200'
-                            : 'bg-red-100 text-red-700 border border-red-200'
-                        }`}>
-                          {placement.is_enabled ? 'Enabled' : 'Disabled'}
-                        </span>
-                      </td>
-                      <td className="p-4">
-                        <div className="flex space-x-2">
-                          <button
-                            onClick={async () => {
-                              const { error } = await supabase
-                                .from('ad_placements')
-                                .update({ is_enabled: !placement.is_enabled })
-                                .eq('id', placement.id);
-                              if (!error) {
-                                setPlacements(prev => prev.map(p => p.id === placement.id ? { ...p, is_enabled: !p.is_enabled } : p));
-                                fetchPlacementKeys(); // Refresh dropdown
-                              }
-                            }}
-                            className={`p-2 rounded-lg ${
-                              placement.is_enabled
-                                ? 'bg-red-100 hover:bg-red-200 text-red-700'
-                                : 'bg-green-100 hover:bg-green-200 text-green-700'
-                            }`}
-                          >
-                            {placement.is_enabled ? <X size={16} /> : <Check size={16} />}
-                          </button>
-                          <button
-                            onClick={async () => {
-                              if (confirm('Delete this placement?')) {
-                                const { error } = await supabase
-                                  .from('ad_placements')
-                                  .delete()
-                                  .eq('id', placement.id);
-                                if (!error) {
-                                  setPlacements(prev => prev.filter(p => p.id !== placement.id));
-                                  fetchPlacementKeys(); // Refresh dropdown
-                                }
-                              }
-                            }}
-                            className="p-2 bg-red-100 hover:bg-red-200 rounded-lg text-red-700"
-                          >
-                            <Trash2 size={16} />
-                          </button>
-                        </div>
-                      </td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
-          )}
-              </div>
-            )}
-          </div>
-        )}
-
-      {activeTab === 'web_ads' && (
-        <div className="mt-6">
-          <WebAdsSection />
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
         </div>
       )}
-
-        {mainTab === 'revenue' && (
-          <AdRevenueSection />
-        )}
-
-        {mainTab === 'safety' && (
-          <AdSafetyCapsSection />
-        )}
-      </div>
-    </div>
     </div>
   );
 };
