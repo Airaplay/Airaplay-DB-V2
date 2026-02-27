@@ -268,6 +268,7 @@ export const AdminDashboardScreen = (): JSX.Element => {
         case 'country_performance': return <CountryPerformanceSection />;
         case 'earnings': return <EarningsPayoutSettingsSection />;
         case 'support': return <SupportTicketsSection />;
+        case 'blog': return <BlogManagementSection />;
         case 'analysis': return <AnalysisSection />;
         case 'announcements': return <AnnouncementsSection />;
         case 'admin_settings': return <AdminSettingsSection />;
