@@ -1,600 +1,620 @@
-import { useState, useEffect, useCallback, useRef } from 'react';
-import { useNavigate } from 'react-router-dom';
-import { Users, FileText, HelpCircle, BarChart, Settings, LogOut, Home, DollarSign, BarChart2, Bell, UserCog, Zap, Image, Coins, Wallet, Calendar, UserPlus, Megaphone, Flag, Star, Music, Tags, Sparkles, ListMusic, Shield, Award, Trophy, TrendingUp, Activity, Gift, Globe, Monitor, ChevronDown, ChevronRight, Menu, X, BookOpen } from 'lucide-react';
-import { supabase, getUserRole } from '../../lib/supabase';
-import { cacheInvalidation } from '../../lib/enhancedDataFetching';
-import { performCompleteLogout } from '../../lib/logoutService';
-import { ErrorBoundary } from '../../components/ErrorBoundary';
-import { UserManagementSection } from './UserManagementSection';
-import { ContentManagementSection } from './ContentManagementSection';
-import { FaqManagementSection } from './FaqManagementSection';
-import { AnalyticsOverviewSection } from './AnalyticsOverviewSection';
-import { CountryPerformanceSection } from './CountryPerformanceSection';
-import { EarningsPayoutSettingsSection } from './EarningsPayoutSettingsSection';
-import { AnalysisSection } from './AnalysisSection';
-import { AnnouncementsSection } from './AnnouncementsSection';
-import { AdminSettingsSection } from './AdminSettingsSection';
-import { AdManagementSection } from './AdManagementSection';
-import { FeatureBannerSection } from './FeatureBannerSection';
-import { TreatManagerSection } from './TreatManagerSection';
-import { DailyCheckinSection } from './DailyCheckinSection';
-import { ReferralManagementSection } from './ReferralManagementSection';
-import { PromotionManagerSection } from './PromotionManagerSection';
-import { ReportManagementSection } from './ReportManagementSection';
-import { FeaturedArtistsSection } from './FeaturedArtistsSection';
-import { MixManagerSection } from './MixManagerSection';
-import { GenreManagerSection } from './GenreManagerSection';
-import { PaymentMonitoringSection } from './PaymentMonitoringSection';
-import { NativeAdsSection } from './NativeAdsSection';
-import { MoodAnalysisSection } from './MoodAnalysisSection';
-import { ListenerCurationsSection } from './ListenerCurationsSection';
-import { ContributionRewardsSection } from './ContributionRewardsSection';
-import { ContentSectionThresholdsManager } from './ContentSectionThresholdsManager';
-import { FinancialControlsSection } from './FinancialControlsSection';
-import { PromotionalCreditsSection } from './PromotionalCreditsSection';
-import { DailyMixManagerSection } from './DailyMixManagerSection';
-import { AdminNotificationBell } from '../../components/AdminNotificationBell';
-import { SupportTicketsSection } from './SupportTicketsSection';
-import { WebAdsSection } from './WebAdsSection';
-import { BlogManagementSection } from './BlogManagementSection';
+import { useState, useEffect, useRef } from 'react';
+import { Plus, Pencil, Trash2, Loader2, Upload, ImageIcon } from 'lucide-react';
+import { supabase } from '../../lib/supabase';
+import { LoadingLogo } from '../../components/LoadingLogo';
+import { validateImageFile, getValidatedExtension, sanitizeFileName, ALLOWED_IMAGE_EXTENSIONS } from '../../lib/fileSecurity';
 
-type SectionType = 'users' | 'content' | 'faqs' | 'analytics' | 'country_performance' | 'settings' | 'earnings' | 'analysis' | 'announcements' | 'admin_settings' | 'ad_management' | 'native_ads' | 'web_ads' | 'feature_banners' | 'treat_manager' | 'daily_checkin' | 'referral_management' | 'promotion_manager' | 'reports' | 'featured_artists' | 'mix_manager' | 'daily_mix_manager' | 'genre_manager' | 'payment_monitoring' | 'mood_analysis' | 'listener_curations' | 'contribution_rewards' | 'content_thresholds' | 'financial_controls' | 'promotional_credits' | 'support' | 'blog';
-
-const ADMIN_ROLES = ['admin', 'manager', 'editor', 'account'];
-
-const getDeviceInfo = () => ({
-  userAgent: navigator.userAgent || '',
-});
-
-interface NavGroup {
-  label: string;
-  items: { section: SectionType; label: string; icon: React.ReactNode }[];
+interface BlogPost {
+  id: string;
+  slug: string;
+  title: string;
+  excerpt: string | null;
+  content: string;
+  cover_image_url: string | null;
+  faq: Array<{ question: string; answer: string }> | null;
+  category: string | null;
+  tags: string[] | null;
+  is_published: boolean;
+  published_at: string | null;
+  created_at: string;
+  updated_at: string | null;
 }
 
-const getSectionLabel = (section: SectionType): string => {
-  const labels: Partial<Record<SectionType, string>> = {
-    analytics: 'Dashboard',
-    users: 'User Management',
-    content: 'Content Management',
-    earnings: 'Earnings & Payouts',
-    support: 'Support & Withdrawals',
-    payment_monitoring: 'Payment Monitoring',
-    reports: 'Reports',
-    admin_settings: 'Admin Settings',
-    financial_controls: 'Financial Controls',
-    web_ads: 'Web Ads',
-    country_performance: 'Country Performance',
-    analysis: 'Ad Analysis',
-    content_thresholds: 'Section Thresholds',
-    feature_banners: 'Feature Banners',
-    treat_manager: 'Treat Manager',
-    daily_checkin: 'Daily Check-in',
-    referral_management: 'Referral Management',
-    promotion_manager: 'Promotions',
-    featured_artists: 'Featured Artists',
-    listener_curations: 'Listener Curations',
-    contribution_rewards: 'Contribution System',
-    mix_manager: 'Mix Manager',
-    daily_mix_manager: 'Daily Mix AI',
-    genre_manager: 'Genre Manager',
-    native_ads: 'Native Ads',
-    ad_management: 'Ad Management',
-    announcements: 'Announcements',
-    faqs: 'FAQs',
-    blog: 'Blog',
-    mood_analysis: 'Mood Analysis',
-    promotional_credits: 'Promo Credits',
-    settings: 'Settings',
-  };
-  return labels[section] || section;
+const defaultForm = {
+  title: '',
+  slug: '',
+  excerpt: '',
+  content: '',
+  cover_image_url: '',
+  category: '',
+  tags: '',
+  is_published: false,
+  published_at: '',
 };
 
-export const AdminDashboardScreen = (): JSX.Element => {
-  const navigate = useNavigate();
-  const [activeSection, setActiveSection] = useState<SectionType>('analytics');
+/** Converts simple Markdown-style formatting to HTML. No HTML knowledge required. */
+function simpleMarkdownToHtml(text: string): string {
+  if (!text.trim()) return '';
+  const escape = (s: string) =>
+    s
+      .replace(/&/g, '&amp;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;');
+  let out = escape(text);
+  // Links: [text](url)
+  out = out.replace(/\[([^\]]+)\]\(([^)]+)\)/g, '<a href="$2" target="_blank" rel="noopener noreferrer">$1</a>');
+  // Bold **text**
+  out = out.replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>');
+  // Italic *text*
+  out = out.replace(/\*([^*]+)\*/g, '<em>$1</em>');
+  // Headings (at start of line)
+  out = out.replace(/^### (.+)$/gm, '<h3>$1</h3>');
+  out = out.replace(/^## (.+)$/gm, '<h2>$1</h2>');
+  // Paragraphs: wrap double newlines in <p>
+  const paragraphs = out.split(/\n\n+/).filter((p) => p.trim());
+  return paragraphs.map((p) => {
+    const trimmed = p.trim();
+    if (/^<h[23]>/.test(trimmed)) return trimmed;
+    return `<p>${trimmed.replace(/\n/g, '<br />')}</p>`;
+  }).join('\n');
+}
+
+/** True if string looks like raw HTML (so we don’t run Markdown on it). */
+function looksLikeHtml(s: string): boolean {
+  const t = s.trim();
+  return t.startsWith('<') && (t.includes('</') || t.includes('/>'));
+}
+
+export const BlogManagementSection = (): JSX.Element => {
+  const [posts, setPosts] = useState<BlogPost[]>([]);
   const [isLoading, setIsLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
-  const [renderError, setRenderError] = useState<string | null>(null);
-  const [userRole, setUserRole] = useState<string | null>(null);
-  const [userProfile, setUserProfile] = useState<any>(null);
-  const [sidebarOpen, setSidebarOpen] = useState(false);
-  const [isMobile, setIsMobile] = useState(window.innerWidth < 1025);
-  const [expandedGroups, setExpandedGroups] = useState<Record<string, boolean>>({
-    overview: true,
-    users: true,
-    content: false,
-    monetization: false,
-    advertising: false,
-    engagement: false,
-    system: false,
-  });
-  const lastRoleCheckRef = useRef<number>(0);
-  const ROLE_RECHECK_INTERVAL = 5 * 60 * 1000;
+  const [success, setSuccess] = useState<string | null>(null);
+  const [editingPost, setEditingPost] = useState<BlogPost | null>(null);
+  const [formData, setFormData] = useState(defaultForm);
+  const [isSubmitting, setIsSubmitting] = useState(false);
+  const [showForm, setShowForm] = useState(false);
+  /** FAQ items: simple Q&A pairs (optional). Used on the post and for search/schema. */
+  const [faqItems, setFaqItems] = useState<Array<{ question: string; answer: string }>>([{ question: '', answer: '' }]);
+  const [isUploadingFeatureImage, setIsUploadingFeatureImage] = useState(false);
+  const featureImageInputRef = useRef<HTMLInputElement>(null);
 
-  const logAdminAction = useCallback(async (actionType: string, details: Record<string, unknown> = {}) => {
+  const fetchPosts = async () => {
+    setIsLoading(true);
+    setError(null);
     try {
-      const { userAgent } = getDeviceInfo();
-      await supabase.rpc('log_admin_activity_with_context', {
-        action_type_param: actionType,
-        details_param: details,
-        ip_address_param: '',
-        user_agent_param: userAgent,
-      });
-    } catch {
-      // Non-critical
-    }
-  }, []);
-
-  const reVerifyRole = useCallback(async (): Promise<boolean> => {
-    try {
-      const { data: { user }, error: authError } = await supabase.auth.getUser();
-      if (authError || !user) return false;
-
-      const { data, error: roleError } = await supabase
-        .from('users')
-        .select('role')
-        .eq('id', user.id)
-        .maybeSingle();
-
-      if (roleError || !data) return false;
-
-      const freshRole = data.role ?? null;
-
-      if (!ADMIN_ROLES.includes(freshRole ?? '')) {
-        await cacheInvalidation.byTags(['user', 'auth']);
-        navigate('/admin/login');
-        return false;
-      }
-
-      setUserRole(freshRole);
-      lastRoleCheckRef.current = Date.now();
-      return true;
-    } catch {
-      return false;
-    }
-  }, [navigate]);
-
-  useEffect(() => {
-    checkAdminAccess();
-  }, []);
-
-  useEffect(() => {
-    setRenderError(null);
-  }, [activeSection]);
-
-  useEffect(() => {
-    const handleResize = () => {
-      setIsMobile(window.innerWidth < 1025);
-    };
-    window.addEventListener('resize', handleResize);
-    return () => window.removeEventListener('resize', handleResize);
-  }, []);
-
-  const checkAdminAccess = async () => {
-    try {
-      setIsLoading(true);
-      setError(null);
-
-      const { data: { session }, error: authError } = await supabase.auth.getSession();
-
-      if (authError || !session) {
-        if (authError) console.error('Authentication error:', authError);
-        setError('You must be signed in to access this page');
-        navigate('/admin/login');
-        return;
-      }
-
-      const { data: userData, error: userError } = await supabase
-        .from('users')
+      const { data, error: fetchError } = await supabase
+        .from('blog_posts')
         .select('*')
-        .eq('id', session.user.id)
-        .single();
-
-      if (userError || !userData) {
-        setError('Unable to verify your account');
-        navigate('/admin/login');
-        return;
-      }
-
-      const role = userData.role ?? null;
-
-      if (!ADMIN_ROLES.includes(role ?? '')) {
-        setError('You do not have permission to access the admin dashboard');
-        navigate('/admin/login');
-        return;
-      }
-
-      setUserRole(role);
-      setUserProfile(userData);
-      lastRoleCheckRef.current = Date.now();
+        .order('created_at', { ascending: false });
+      if (fetchError) throw fetchError;
+      setPosts((data as BlogPost[]) || []);
     } catch (err) {
-      console.error('Error checking admin access:', err);
-      setError('An error occurred while checking permissions');
-      navigate('/admin/login');
+      console.error('Error fetching blog posts:', err);
+      setError(err instanceof Error ? err.message : 'Failed to load blog posts');
+      setPosts([]);
     } finally {
       setIsLoading(false);
     }
   };
 
-  const handleSectionChange = useCallback(async (section: SectionType) => {
-    const now = Date.now();
-    if (now - lastRoleCheckRef.current > ROLE_RECHECK_INTERVAL) {
-      const stillValid = await reVerifyRole();
-      if (!stillValid) return;
-    }
-    setActiveSection(section);
-    setSidebarOpen(false);
-    logAdminAction('view_section', { section });
-  }, [reVerifyRole, logAdminAction, ROLE_RECHECK_INTERVAL]);
+  useEffect(() => {
+    fetchPosts();
+  }, []);
 
-  const handleSignOut = async () => {
-    try {
-      setUserRole(null);
-      setUserProfile(null);
-      await performCompleteLogout();
-      navigate('/admin/login', { replace: true });
-    } catch (error) {
-      console.error('Error signing out:', error);
-      setUserRole(null);
-      setUserProfile(null);
-      navigate('/admin/login', { replace: true });
-    }
-  };
-
-  const hasAccessToSection = (section: SectionType): boolean => {
-    if (userRole === 'admin') return true;
-    if (userRole === 'manager') {
-      return section !== 'admin_settings' && section !== 'treat_manager' && section !== 'payment_monitoring' && section !== 'financial_controls' && section !== 'promotional_credits' && section !== 'country_performance';
-    }
-    if (userRole === 'editor') {
-      return ['content', 'faqs', 'blog'].includes(section);
-    }
-    if (userRole === 'account') {
-      return ['analytics', 'earnings', 'support', 'payment_monitoring', 'financial_controls', 'promotional_credits', 'treat_manager', 'country_performance'].includes(section);
-    }
-    return false;
-  };
-
-  const toggleGroup = (group: string) => {
-    setExpandedGroups(prev => ({ ...prev, [group]: !prev[group] }));
-  };
-
-  const renderSection = () => {
-    try {
-      switch (activeSection) {
-        case 'users': return <UserManagementSection />;
-        case 'content': return <ContentManagementSection />;
-        case 'faqs': return <FaqManagementSection />;
-        case 'blog': return <BlogManagementSection />;
-        case 'analytics': return <AnalyticsOverviewSection />;
-        case 'country_performance': return <CountryPerformanceSection />;
-        case 'earnings': return <EarningsPayoutSettingsSection />;
-        case 'support': return <SupportTicketsSection />;
-        case 'analysis': return <AnalysisSection />;
-        case 'announcements': return <AnnouncementsSection />;
-        case 'admin_settings': return <AdminSettingsSection />;
-        case 'ad_management': return <AdManagementSection />;
-        case 'native_ads': return <NativeAdsSection />;
-        case 'web_ads': return <WebAdsSection />;
-        case 'feature_banners': return <FeatureBannerSection />;
-        case 'treat_manager': return <TreatManagerSection />;
-        case 'daily_checkin': return <DailyCheckinSection />;
-        case 'referral_management': return <ReferralManagementSection />;
-        case 'promotion_manager': return <PromotionManagerSection />;
-        case 'reports': return <ReportManagementSection />;
-        case 'featured_artists': return <FeaturedArtistsSection />;
-        case 'mix_manager': return <MixManagerSection />;
-        case 'daily_mix_manager': return <DailyMixManagerSection />;
-        case 'genre_manager': return <GenreManagerSection />;
-        case 'mood_analysis': return <MoodAnalysisSection />;
-        case 'payment_monitoring': return <PaymentMonitoringSection />;
-        case 'listener_curations': return <ListenerCurationsSection />;
-        case 'contribution_rewards': return <ContributionRewardsSection />;
-        case 'content_thresholds': return <ContentSectionThresholdsManager />;
-        case 'financial_controls': return <FinancialControlsSection />;
-        case 'promotional_credits': return <PromotionalCreditsSection />;
-        case 'settings':
-          return (
-            <div className="p-6 bg-white rounded-xl border border-gray-100 shadow-sm">
-              <h2 className="text-xl font-bold text-gray-900 mb-2">Settings</h2>
-              <p className="text-gray-500">Admin settings will be implemented in a future update.</p>
-            </div>
-          );
-        default: return <AnalyticsOverviewSection />;
-      }
-    } catch (error) {
-      console.error('Error rendering section:', error);
-      return (
-        <div className="p-6 bg-white rounded-xl border border-gray-100 shadow-sm">
-          <div className="flex items-center gap-3 mb-4">
-            <div className="w-10 h-10 bg-red-50 rounded-full flex items-center justify-center">
-              <span className="text-red-500 font-bold">!</span>
-            </div>
-            <h2 className="text-xl font-bold text-gray-900">Section Error</h2>
-          </div>
-          <p className="text-gray-500 mb-4">
-            An error occurred: {error instanceof Error ? error.message : 'Unknown error'}
-          </p>
-          <button
-            onClick={() => handleSectionChange('analytics')}
-            className="px-4 py-2 bg-[#309605] text-white rounded-lg hover:bg-[#3ba208] transition-colors text-sm font-medium"
-          >
-            Go to Dashboard
-          </button>
-        </div>
+  useEffect(() => {
+    if (editingPost) {
+      setFormData({
+        title: editingPost.title,
+        slug: editingPost.slug,
+        excerpt: editingPost.excerpt || '',
+        content: editingPost.content || '',
+        cover_image_url: editingPost.cover_image_url || '',
+        category: editingPost.category || '',
+        tags: Array.isArray(editingPost.tags) ? editingPost.tags.join(', ') : '',
+        is_published: !!editingPost.is_published,
+        published_at: editingPost.published_at ? editingPost.published_at.slice(0, 16) : ''
+      });
+      setFaqItems(
+        editingPost.faq && editingPost.faq.length > 0
+          ? editingPost.faq.map((q) => ({ question: q.question || '', answer: q.answer || '' }))
+          : [{ question: '', answer: '' }]
       );
+      setShowForm(true);
+    } else if (!showForm) {
+      setFormData(defaultForm);
+      setFaqItems([{ question: '', answer: '' }]);
+    }
+  }, [editingPost, showForm]);
+
+  const handleChange = (e: React.ChangeEvent<HTMLInputElement | HTMLTextAreaElement | HTMLSelectElement>) => {
+    const { name, value, type } = e.target;
+    const checked = (e.target as HTMLInputElement).checked;
+    setFormData((prev) => ({
+      ...prev,
+      [name]: type === 'checkbox' ? checked : value
+    }));
+    if (name === 'title' && !editingPost) {
+      const slug = value
+        .toLowerCase()
+        .replace(/[^a-z0-9\s-]/g, '')
+        .replace(/\s+/g, '-')
+        .replace(/-+/g, '-')
+        .replace(/^-|-$/g, '');
+      setFormData((prev) => ({ ...prev, slug }));
     }
   };
 
-  const NavItem = ({ section, icon, label }: { section: SectionType; icon: React.ReactNode; label: string }) => {
-    if (!hasAccessToSection(section)) return null;
-    const isActive = activeSection === section;
-    return (
-      <button
-        onClick={() => handleSectionChange(section)}
-        className={`w-full flex items-center gap-3 px-3 py-2 rounded-lg text-sm transition-all duration-150 ${
-          isActive
-            ? 'bg-[#309605] text-white font-medium shadow-sm'
-            : 'text-gray-600 hover:bg-gray-50 hover:text-gray-900'
-        }`}
-      >
-        <span className={`flex-shrink-0 ${isActive ? 'text-white' : 'text-gray-400'}`}>{icon}</span>
-        <span className="truncate">{label}</span>
-      </button>
-    );
+  const getFaqForSave = (): Array<{ question: string; answer: string }> =>
+    faqItems
+      .filter((item) => item.question.trim() && item.answer.trim())
+      .map((item) => ({ question: item.question.trim(), answer: item.answer.trim() }));
+
+  const updateFaqItem = (index: number, field: 'question' | 'answer', value: string) => {
+    setFaqItems((prev) => {
+      const next = [...prev];
+      next[index] = { ...next[index], [field]: value };
+      return next;
+    });
   };
 
-  const NavGroup = ({ groupKey, label, children }: { groupKey: string; label: string; children: React.ReactNode }) => (
-    <div className="mb-1">
-      <button
-        onClick={() => toggleGroup(groupKey)}
-        className="w-full flex items-center justify-between px-3 py-1.5 mb-1"
-      >
-        <span className="text-[10px] font-semibold text-gray-400 uppercase tracking-widest">{label}</span>
-        {expandedGroups[groupKey]
-          ? <ChevronDown className="w-3 h-3 text-gray-400" />
-          : <ChevronRight className="w-3 h-3 text-gray-400" />
-        }
-      </button>
-      {expandedGroups[groupKey] && (
-        <div className="space-y-0.5">
-          {children}
-        </div>
-      )}
-    </div>
-  );
+  const addFaqItem = () => setFaqItems((prev) => [...prev, { question: '', answer: '' }]);
+  const removeFaqItem = (index: number) =>
+    setFaqItems((prev) => (prev.length <= 1 ? [{ question: '', answer: '' }] : prev.filter((_, i) => i !== index)));
 
-  if (isLoading) {
-    return (
-      <div className="flex items-center justify-center min-h-screen bg-gray-50">
-        <div className="flex items-center gap-3">
-          <div className="animate-spin rounded-full h-6 w-6 border-2 border-[#309605] border-t-transparent"></div>
-          <p className="text-gray-600 font-medium">Loading dashboard...</p>
-        </div>
-      </div>
-    );
-  }
+  const uploadFeatureImage = async (file: File): Promise<string> => {
+    const { data: { user } } = await supabase.auth.getUser();
+    if (!user) throw new Error('You must be signed in to upload images.');
+    const validation = validateImageFile(file);
+    if (!validation.valid) throw new Error(validation.error || 'Invalid image');
+    const fileExt = getValidatedExtension(file.name, ALLOWED_IMAGE_EXTENSIONS);
+    if (!fileExt) throw new Error('Allowed: jpg, jpeg, png, webp, gif');
+    const base = sanitizeFileName(file.name).replace(/\.[^.]+$/, '') || 'image';
+    const fileName = `blog-${Date.now()}-${base}.${fileExt}`;
+    const filePath = `${user.id}/blog/${fileName}`;
+    const { error: uploadError } = await supabase.storage
+      .from('thumbnails')
+      .upload(filePath, file, { cacheControl: '3600', upsert: false });
+    if (uploadError) {
+      const msg = typeof uploadError === 'object' && uploadError !== null && 'message' in uploadError
+        ? (uploadError as { message?: string }).message
+        : String(uploadError);
+      throw new Error(msg || 'Storage upload failed');
+    }
+    const { data: { publicUrl } } = supabase.storage.from('thumbnails').getPublicUrl(filePath);
+    return publicUrl;
+  };
 
-  if (error) {
-    return (
-      <div className="flex flex-col items-center justify-center min-h-screen bg-gray-50 p-6">
-        <div className="w-16 h-16 bg-red-50 rounded-2xl flex items-center justify-center mb-4 border border-red-100">
-          <span className="text-red-500 text-2xl font-bold">!</span>
-        </div>
-        <h1 className="text-xl font-bold text-gray-900 mb-2">Access Denied</h1>
-        <p className="text-gray-500 mb-6 text-center text-sm max-w-sm">{error}</p>
-        <button
-          onClick={() => navigate('/admin/login')}
-          className="px-5 py-2.5 bg-[#309605] text-white rounded-lg hover:bg-[#3ba208] transition-colors text-sm font-medium"
-        >
-          Go to Login
-        </button>
-      </div>
-    );
-  }
+  const handleFeatureImageSelect = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    e.target.value = '';
+    setError(null);
+    try {
+      setIsUploadingFeatureImage(true);
+      const url = await uploadFeatureImage(file);
+      setFormData((prev) => ({ ...prev, cover_image_url: url }));
+    } catch (err) {
+      const message = err instanceof Error ? err.message : typeof err === 'object' && err !== null && 'message' in err ? String((err as { message: unknown }).message) : 'Upload failed';
+      setError(message);
+    } finally {
+      setIsUploadingFeatureImage(false);
+    }
+  };
 
-  if (!userRole) {
-    return (
-      <div className="flex items-center justify-center min-h-screen bg-gray-50">
-        <div className="text-center">
-          <div className="animate-spin rounded-full h-6 w-6 border-2 border-[#309605] border-t-transparent mx-auto mb-3"></div>
-          <p className="text-gray-600 font-medium text-sm">Verifying access...</p>
-        </div>
-      </div>
-    );
-  }
+  const clearFeatureImage = () => setFormData((prev) => ({ ...prev, cover_image_url: '' }));
+
+  const handlePublish = async (postId: string) => {
+    setError(null);
+    try {
+      const { error: updateError } = await supabase
+        .from('blog_posts')
+        .update({
+          is_published: true,
+          published_at: new Date().toISOString(),
+          updated_at: new Date().toISOString()
+        })
+        .eq('id', postId);
+      if (updateError) throw updateError;
+      setSuccess('Post published. It will appear on the home screen and /blog.');
+      await fetchPosts();
+      setTimeout(() => setSuccess(null), 3000);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Failed to publish');
+    }
+  };
+
+  const handleSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setError(null);
+    setSuccess(null);
+    if (!formData.title.trim() || !formData.slug.trim()) {
+      setError('Title and slug are required');
+      return;
+    }
+    if (!formData.cover_image_url.trim()) {
+      setError('Feature image is required. Every post must have a feature image.');
+      return;
+    }
+    setIsSubmitting(true);
+    try {
+      const rawContent = formData.content.trim();
+      const content = looksLikeHtml(rawContent) ? rawContent : simpleMarkdownToHtml(rawContent);
+
+      const payload = {
+        title: formData.title.trim(),
+        slug: formData.slug.trim().toLowerCase(),
+        excerpt: formData.excerpt.trim() || null,
+        content: content || '',
+        cover_image_url: formData.cover_image_url.trim() || null,
+        category: formData.category.trim() || null,
+        tags: formData.tags
+          .split(',')
+          .map((t) => t.trim())
+          .filter(Boolean),
+        is_published: formData.is_published,
+        published_at: formData.is_published
+          ? (formData.published_at ? new Date(formData.published_at).toISOString() : new Date().toISOString())
+          : null,
+        faq: getFaqForSave(),
+        updated_at: new Date().toISOString()
+      };
+
+      if (editingPost) {
+        const { error: updateError } = await supabase.from('blog_posts').update(payload).eq('id', editingPost.id);
+        if (updateError) throw updateError;
+        setSuccess('Post updated successfully');
+      } else {
+        const { error: insertError } = await supabase.from('blog_posts').insert({ ...payload, created_at: new Date().toISOString() });
+        if (insertError) throw insertError;
+        setSuccess('Post created successfully');
+      }
+      setEditingPost(null);
+      setFormData(defaultForm);
+      setShowForm(false);
+      await fetchPosts();
+      setTimeout(() => setSuccess(null), 3000);
+    } catch (err) {
+      console.error('Error saving post:', err);
+      setError(err instanceof Error ? err.message : 'Failed to save post');
+    } finally {
+      setIsSubmitting(false);
+    }
+  };
+
+  const handleDelete = async (id: string) => {
+    if (!confirm('Delete this post? This cannot be undone.')) return;
+    try {
+      const { error: deleteError } = await supabase.from('blog_posts').delete().eq('id', id);
+      if (deleteError) throw deleteError;
+      setSuccess('Post deleted');
+      if (editingPost?.id === id) {
+        setEditingPost(null);
+        setShowForm(false);
+      }
+      await fetchPosts();
+      setTimeout(() => setSuccess(null), 3000);
+    } catch (err) {
+      console.error('Error deleting post:', err);
+      setError(err instanceof Error ? err.message : 'Failed to delete post');
+    }
+  };
 
   return (
-    <div className="admin-layout flex h-screen overflow-hidden bg-gray-50 w-full">
-      {/* Mobile Overlay */}
-      {isMobile && sidebarOpen && (
+    <div className="p-6 bg-white rounded-lg shadow">
+      <div className="flex items-center justify-between mb-6">
+        <h2 className="text-xl font-bold text-gray-900">Blog</h2>
+        <button
+          type="button"
+          onClick={() => {
+            setEditingPost(null);
+            setFormData(defaultForm);
+            setFaqItems([{ question: '', answer: '' }]);
+            setShowForm(!showForm);
+          }}
+          className="flex items-center gap-2 px-4 py-2 bg-[#309605] text-white rounded-lg hover:bg-[#3ba208] transition-colors"
+        >
+          <Plus className="w-4 h-4" />
+          {showForm ? 'Cancel' : 'Add post'}
+        </button>
+      </div>
+
+      {(error || success) && (
         <div
-          className="fixed inset-0 bg-black/40 backdrop-blur-sm z-40"
-          onClick={() => setSidebarOpen(false)}
-        />
+          className={`mb-4 p-3 rounded-lg ${error ? 'bg-red-100 text-red-700' : 'bg-green-100 text-green-700'}`}
+        >
+          {error || success}
+        </div>
       )}
 
-      {/* Sidebar */}
-      <aside className={`
-        w-[220px] h-screen bg-white border-r border-gray-100 flex flex-col fixed z-50
-        transition-transform duration-300 ease-in-out
-        ${isMobile ? (sidebarOpen ? 'translate-x-0' : '-translate-x-full') : 'translate-x-0'}
-      `}>
-        {/* Logo */}
-        <div className="flex items-center justify-between px-5 py-4 border-b border-gray-100">
-          <img src="/Black_logo.fw.png" alt="Airaplay Admin" className="h-9 object-contain" />
-          {isMobile && (
-            <button onClick={() => setSidebarOpen(false)} className="p-1.5 hover:bg-gray-100 rounded-lg">
-              <X className="w-4 h-4 text-gray-500" />
-            </button>
-          )}
-        </div>
-
-        {/* Navigation */}
-        <nav className="flex-1 px-3 py-4 overflow-y-auto space-y-4">
-          <NavGroup groupKey="overview" label="Overview">
-            <NavItem section="analytics" icon={<BarChart className="w-4 h-4" />} label="Dashboard" />
-            <NavItem section="country_performance" icon={<Globe className="w-4 h-4" />} label="Country Performance" />
-            <NavItem section="analysis" icon={<BarChart2 className="w-4 h-4" />} label="Ad Analysis" />
-          </NavGroup>
-
-          <NavGroup groupKey="users" label="Users & Content">
-            <NavItem section="users" icon={<Users className="w-4 h-4" />} label="Users" />
-            <NavItem section="content" icon={<FileText className="w-4 h-4" />} label="Content" />
-            <NavItem section="content_thresholds" icon={<Tags className="w-4 h-4" />} label="Section Thresholds" />
-            <NavItem section="featured_artists" icon={<Star className="w-4 h-4" />} label="Featured Artists" />
-            <NavItem section="reports" icon={<Flag className="w-4 h-4" />} label="Reports" />
-          </NavGroup>
-
-          <NavGroup groupKey="monetization" label="Monetization">
-            <NavItem section="earnings" icon={<DollarSign className="w-4 h-4" />} label="Earnings & Payouts" />
-            <NavItem section="support" icon={<Wallet className="w-4 h-4" />} label="Support & Withdrawals" />
-            <NavItem section="payment_monitoring" icon={<Activity className="w-4 h-4" />} label="Payment Monitoring" />
-            <NavItem section="financial_controls" icon={<Shield className="w-4 h-4" />} label="Financial Controls" />
-            <NavItem section="treat_manager" icon={<Coins className="w-4 h-4" />} label="Treat Manager" />
-            <NavItem section="promotional_credits" icon={<Gift className="w-4 h-4" />} label="Promo Credits" />
-          </NavGroup>
-
-          <NavGroup groupKey="advertising" label="Advertising">
-            <NavItem section="ad_management" icon={<Zap className="w-4 h-4" />} label="Ad Management" />
-            <NavItem section="native_ads" icon={<Image className="w-4 h-4" />} label="Native Ads" />
-            <NavItem section="web_ads" icon={<Monitor className="w-4 h-4" />} label="Web Ads" />
-            <NavItem section="feature_banners" icon={<Image className="w-4 h-4" />} label="Feature Banners" />
-          </NavGroup>
-
-          <NavGroup groupKey="engagement" label="Engagement">
-            <NavItem section="promotion_manager" icon={<Megaphone className="w-4 h-4" />} label="Promotions" />
-            <NavItem section="listener_curations" icon={<ListMusic className="w-4 h-4" />} label="Listener Curations" />
-            <NavItem section="contribution_rewards" icon={<Award className="w-4 h-4" />} label="Contribution System" />
-            <NavItem section="daily_checkin" icon={<Calendar className="w-4 h-4" />} label="Daily Check-in" />
-            <NavItem section="referral_management" icon={<UserPlus className="w-4 h-4" />} label="Referrals" />
-            <NavItem section="announcements" icon={<Bell className="w-4 h-4" />} label="Announcements" />
-          </NavGroup>
-
-          <NavGroup groupKey="system" label="System">
-            <NavItem section="mix_manager" icon={<Music className="w-4 h-4" />} label="Mix Manager" />
-            <NavItem section="daily_mix_manager" icon={<Sparkles className="w-4 h-4" />} label="Daily Mix AI" />
-            <NavItem section="genre_manager" icon={<Tags className="w-4 h-4" />} label="Genre Manager" />
-            <NavItem section="mood_analysis" icon={<TrendingUp className="w-4 h-4" />} label="Mood Analysis" />
-            <NavItem section="faqs" icon={<HelpCircle className="w-4 h-4" />} label="FAQs" />
-            <NavItem section="blog" icon={<BookOpen className="w-4 h-4" />} label="Blog" />
-            <NavItem section="admin_settings" icon={<UserCog className="w-4 h-4" />} label="Admin Settings" />
-          </NavGroup>
-        </nav>
-
-        {/* User Footer */}
-        <div className="px-3 py-3 border-t border-gray-100">
-          <div className="flex items-center gap-3 px-2 py-2 mb-2">
-            <div className="w-8 h-8 rounded-full bg-[#e6f7f1] flex items-center justify-center flex-shrink-0">
-              {userProfile?.avatar_url ? (
-                <img src={userProfile.avatar_url} alt="Profile" className="w-full h-full rounded-full object-cover" />
-              ) : (
-                <span className="text-[#309605] text-sm font-semibold">
-                  {userProfile?.display_name?.charAt(0) || 'A'}
-                </span>
+      {showForm && (
+        <form onSubmit={handleSubmit} className="mb-8 p-4 border border-gray-200 rounded-lg space-y-4">
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+            <div>
+              <label className="block text-sm font-medium text-gray-700 mb-1">Title *</label>
+              <input
+                type="text"
+                name="title"
+                value={formData.title}
+                onChange={handleChange}
+                className="w-full px-3 py-2 border border-gray-300 rounded-lg"
+                placeholder="Post title"
+              />
+            </div>
+            <div>
+              <label className="block text-sm font-medium text-gray-700 mb-1">Slug * (URL: /blog/slug)</label>
+              <input
+                type="text"
+                name="slug"
+                value={formData.slug}
+                onChange={handleChange}
+                className="w-full px-3 py-2 border border-gray-300 rounded-lg"
+                placeholder="post-slug"
+              />
+            </div>
+          </div>
+          <div>
+            <label className="block text-sm font-medium text-gray-700 mb-1">Excerpt</label>
+            <textarea
+              name="excerpt"
+              value={formData.excerpt}
+              onChange={handleChange}
+              rows={2}
+              className="w-full px-3 py-2 border border-gray-300 rounded-lg"
+              placeholder="Short summary for SEO and cards"
+            />
+          </div>
+          <div>
+            <label className="block text-sm font-medium text-gray-700 mb-1">Content (plain text — use **bold**, *italic*, ## headings)</label>
+            <p className="text-xs text-gray-500 mb-1">
+              Write in plain text. Use <strong>**bold**</strong>, <em>*italic*</em>, <code>## Heading 2</code>, <code>### Heading 3</code>, and <code>[link text](https://url)</code>. New lines become paragraphs. No HTML needed.
+              {formData.content && looksLikeHtml(formData.content) && (
+                <span className="block mt-1 text-amber-600">Showing saved HTML. Edit as-is or replace with simple formatting above.</span>
               )}
-            </div>
-            <div className="min-w-0">
-              <p className="text-gray-900 font-medium text-sm truncate">{userProfile?.display_name || 'Admin'}</p>
-              <p className="text-xs text-gray-400 truncate capitalize">{userRole}</p>
-            </div>
+            </p>
+            <textarea
+              name="content"
+              value={formData.content}
+              onChange={handleChange}
+              rows={10}
+              className="w-full px-3 py-2 border border-gray-300 rounded-lg"
+              placeholder="Write your post here. Example:&#10;&#10;## Introduction&#10;&#10;This is **bold** and *italic*. [Learn more](https://example.com)."
+            />
           </div>
-          <div className="space-y-0.5">
-            <button
-              onClick={() => navigate('/')}
-              className="w-full flex items-center gap-2.5 px-3 py-2 rounded-lg text-gray-500 hover:bg-gray-50 hover:text-gray-700 transition-colors text-sm"
-            >
-              <Home className="w-4 h-4" />
-              <span>Back to App</span>
-            </button>
-            <button
-              onClick={handleSignOut}
-              className="w-full flex items-center gap-2.5 px-3 py-2 rounded-lg text-gray-500 hover:bg-red-50 hover:text-red-600 transition-colors text-sm"
-            >
-              <LogOut className="w-4 h-4" />
-              <span>Sign Out</span>
-            </button>
-          </div>
-        </div>
-      </aside>
-
-      {/* Main Content */}
-      <div className={`flex-1 flex flex-col overflow-hidden ${isMobile ? 'ml-0' : 'ml-[220px]'}`}>
-        {/* Top Header */}
-        <header className="flex-shrink-0 bg-white border-b border-gray-100 px-6 py-3.5">
-          <div className="flex items-center justify-between">
-            <div className="flex items-center gap-3">
-              {isMobile && (
-                <button
-                  onClick={() => setSidebarOpen(true)}
-                  className="p-2 hover:bg-gray-100 rounded-lg transition-colors"
-                >
-                  <Menu className="w-5 h-5 text-gray-600" />
-                </button>
-              )}
-              <div>
-                <h1 className="text-base font-semibold text-gray-900 leading-tight">
-                  {getSectionLabel(activeSection)}
-                </h1>
-                <p className="text-xs text-gray-400 leading-tight">Airaplay Admin</p>
-              </div>
-            </div>
-            <div className="flex items-center gap-2">
-              <AdminNotificationBell onNavigateToSection={(section) => handleSectionChange(section as SectionType)} />
-            </div>
-          </div>
-        </header>
-
-        {/* Content Area */}
-        <main className="flex-1 overflow-auto">
-          <div className="p-6 w-full min-h-full">
-            {renderError ? (
-              <div className="p-6 bg-white rounded-xl border border-gray-100 shadow-sm">
-                <div className="flex items-center gap-3 mb-4">
-                  <div className="w-10 h-10 bg-red-50 rounded-xl flex items-center justify-center">
-                    <span className="text-red-500 font-bold">!</span>
-                  </div>
-                  <h2 className="text-lg font-bold text-gray-900">Section Error</h2>
+          <div>
+            <label className="block text-sm font-medium text-gray-700 mb-1">Feature image *</label>
+            <p className="text-xs text-gray-500 mb-2">
+              Every post must have a feature image (blog cards and top of post). Upload an image (JPG, PNG, WebP, GIF, max 5MB) or paste a URL below.
+            </p>
+            <input
+              ref={featureImageInputRef}
+              type="file"
+              accept="image/jpeg,image/png,image/webp,image/gif"
+              onChange={handleFeatureImageSelect}
+              className="hidden"
+            />
+            {formData.cover_image_url ? (
+              <div className="space-y-2">
+                <div className="relative inline-block rounded-lg overflow-hidden border border-gray-200 max-w-xs">
+                  <img
+                    src={formData.cover_image_url}
+                    alt="Feature"
+                    className="h-40 w-auto object-cover"
+                  />
                 </div>
-                <p className="text-gray-500 mb-4 text-sm">{renderError}</p>
-                <button
-                  onClick={() => { setRenderError(null); handleSectionChange('analytics'); }}
-                  className="px-4 py-2 bg-[#309605] text-white rounded-lg hover:bg-[#3ba208] transition-colors text-sm font-medium"
-                >
-                  Go to Dashboard
-                </button>
+                <div className="flex gap-2">
+                  <button
+                    type="button"
+                    onClick={() => featureImageInputRef.current?.click()}
+                    disabled={isUploadingFeatureImage}
+                    className="flex items-center gap-1.5 px-3 py-1.5 text-sm bg-gray-100 text-gray-700 rounded-lg hover:bg-gray-200 disabled:opacity-50"
+                  >
+                    {isUploadingFeatureImage ? <Loader2 className="w-4 h-4 animate-spin" /> : <Upload className="w-4 h-4" />}
+                    {isUploadingFeatureImage ? 'Uploading…' : 'Replace image'}
+                  </button>
+                  <button type="button" onClick={clearFeatureImage} className="text-sm text-red-600 hover:underline">
+                    Remove
+                  </button>
+                </div>
               </div>
             ) : (
-              <ErrorBoundary
-                key={activeSection}
-                fallback={(error, resetError) => (
-                  <div className="p-6 bg-white rounded-xl border border-gray-100 shadow-sm">
-                    <div className="flex items-center gap-3 mb-4">
-                      <div className="w-10 h-10 bg-red-50 rounded-xl flex items-center justify-center">
-                        <span className="text-red-500 font-bold">!</span>
-                      </div>
-                      <h2 className="text-lg font-bold text-gray-900">Section Error</h2>
-                    </div>
-                    <p className="text-gray-500 mb-4 text-sm">
-                      Failed to load {activeSection}: {error.message}
-                    </p>
-                    <div className="flex gap-2">
-                      <button onClick={resetError} className="px-4 py-2 bg-gray-100 text-gray-700 rounded-lg hover:bg-gray-200 transition-colors text-sm font-medium">
-                        Try Again
-                      </button>
-                      <button onClick={() => handleSectionChange('analytics')} className="px-4 py-2 bg-[#309605] text-white rounded-lg hover:bg-[#3ba208] transition-colors text-sm font-medium">
-                        Go to Dashboard
-                      </button>
-                    </div>
-                  </div>
-                )}
+              <button
+                type="button"
+                onClick={() => featureImageInputRef.current?.click()}
+                disabled={isUploadingFeatureImage}
+                className="w-full flex flex-col items-center justify-center gap-2 p-6 border-2 border-dashed border-gray-300 rounded-lg hover:border-[#309605] hover:bg-gray-50/50 transition-colors disabled:opacity-50"
               >
-                {renderSection()}
-              </ErrorBoundary>
+                {isUploadingFeatureImage ? (
+                  <Loader2 className="w-10 h-10 text-[#309605] animate-spin" />
+                ) : (
+                  <ImageIcon className="w-10 h-10 text-gray-400" />
+                )}
+                <span className="text-sm font-medium text-gray-600">
+                  {isUploadingFeatureImage ? 'Uploading…' : 'Click to upload feature image'}
+                </span>
+                <span className="text-xs text-gray-400">JPG, PNG, WebP or GIF, max 5MB</span>
+              </button>
             )}
+            <p className="text-xs text-gray-400 mt-2">Or paste image URL:</p>
+            <input
+              type="url"
+              name="cover_image_url"
+              value={formData.cover_image_url}
+              onChange={handleChange}
+              className="mt-1 w-full px-3 py-2 border border-gray-300 rounded-lg text-sm"
+              placeholder="https://..."
+            />
           </div>
-        </main>
-      </div>
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+            <div>
+              <label className="block text-sm font-medium text-gray-700 mb-1">Category</label>
+              <input
+                type="text"
+                name="category"
+                value={formData.category}
+                onChange={handleChange}
+                className="w-full px-3 py-2 border border-gray-300 rounded-lg"
+                placeholder="e.g. News"
+              />
+            </div>
+            <div>
+              <label className="block text-sm font-medium text-gray-700 mb-1">Tags (comma-separated)</label>
+              <input
+                type="text"
+                name="tags"
+                value={formData.tags}
+                onChange={handleChange}
+                className="w-full px-3 py-2 border border-gray-300 rounded-lg"
+                placeholder="music, artist, tips"
+              />
+            </div>
+          </div>
+          <div className="p-4 rounded-lg border-2 border-amber-200 bg-amber-50/80 space-y-3">
+            <p className="text-sm font-medium text-amber-800">Posts only appear on the home screen and /blog when they are <strong>Published</strong>. Check the box below and save.</p>
+            <label className="flex items-center gap-3 cursor-pointer">
+              <input
+                type="checkbox"
+                name="is_published"
+                checked={formData.is_published}
+                onChange={handleChange}
+                className="rounded border-gray-300 w-5 h-5"
+              />
+              <span className="text-base font-semibold text-gray-800">Published (show on home & blog)</span>
+            </label>
+            <p className="text-xs text-amber-700">If &quot;Published at&quot; is empty, we use current time when you save.</p>
+            <div>
+              <label className="block text-sm font-medium text-gray-700 mb-1">Published at (optional)</label>
+              <input
+                type="datetime-local"
+                name="published_at"
+                value={formData.published_at}
+                onChange={handleChange}
+                className="px-3 py-2 border border-gray-300 rounded-lg"
+              />
+            </div>
+          </div>
+          <div>
+            <label className="block text-sm font-medium text-gray-700 mb-1">
+              <span className="flex items-center gap-1">
+                FAQ <span className="text-gray-400 font-normal">(optional)</span>
+              </span>
+            </label>
+            <p className="text-xs text-gray-500 mb-2">
+              Add questions and answers that match your post. They can be shown on the page and help Google show rich results in search. Leave blank if you don’t need them.
+            </p>
+            {faqItems.map((item, index) => (
+              <div key={index} className="mb-3 p-3 border border-gray-200 rounded-lg bg-gray-50/50">
+                <div className="flex justify-between items-center mb-2">
+                  <span className="text-xs font-medium text-gray-500">Q&A #{index + 1}</span>
+                  <button
+                    type="button"
+                    onClick={() => removeFaqItem(index)}
+                    className="text-xs text-red-600 hover:underline"
+                  >
+                    Remove
+                  </button>
+                </div>
+                <input
+                  type="text"
+                  value={item.question}
+                  onChange={(e) => updateFaqItem(index, 'question', e.target.value)}
+                  className="w-full px-3 py-2 border border-gray-300 rounded-lg mb-2 text-sm"
+                  placeholder="Question"
+                />
+                <textarea
+                  value={item.answer}
+                  onChange={(e) => updateFaqItem(index, 'answer', e.target.value)}
+                  rows={2}
+                  className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm"
+                  placeholder="Answer"
+                />
+              </div>
+            ))}
+            <button
+              type="button"
+              onClick={addFaqItem}
+              className="text-sm text-[#309605] hover:underline flex items-center gap-1"
+            >
+              <Plus className="w-4 h-4" />
+              Add another Q&A
+            </button>
+          </div>
+          <button
+            type="submit"
+            disabled={isSubmitting}
+            className="flex items-center gap-2 px-4 py-2 bg-[#309605] text-white rounded-lg hover:bg-[#3ba208] disabled:opacity-50"
+          >
+            {isSubmitting && <Loader2 className="w-4 h-4 animate-spin" />}
+            {editingPost ? 'Update post' : 'Create post'}
+          </button>
+        </form>
+      )}
+
+      {isLoading ? (
+        <div className="flex items-center gap-3 text-gray-600">
+          <LoadingLogo variant="pulse" size={32} />
+          <span>Loading posts...</span>
+        </div>
+      ) : posts.length === 0 ? (
+        <p className="text-gray-500">No blog posts yet. Add one above.</p>
+      ) : (
+        <div className="overflow-x-auto">
+          <table className="w-full border border-gray-200 rounded-lg">
+            <thead className="bg-gray-50">
+              <tr>
+                <th className="text-left p-3 text-sm font-semibold text-gray-700">Title</th>
+                <th className="text-left p-3 text-sm font-semibold text-gray-700">Slug</th>
+                <th className="text-left p-3 text-sm font-semibold text-gray-700">Status</th>
+                <th className="text-left p-3 text-sm font-semibold text-gray-700">Updated</th>
+                <th className="p-3 text-sm font-semibold text-gray-700">Actions</th>
+              </tr>
+            </thead>
+            <tbody>
+              {posts.map((post) => (
+                <tr key={post.id} className="border-t border-gray-200 hover:bg-gray-50">
+                  <td className="p-3 text-gray-900">{post.title}</td>
+                  <td className="p-3 text-gray-600 font-mono text-sm">/blog/{post.slug}</td>
+                  <td className="p-3">
+                    <span className={post.is_published ? 'text-green-600' : 'text-gray-500'}>
+                      {post.is_published ? 'Published' : 'Draft'}
+                    </span>
+                  </td>
+                  <td className="p-3 text-gray-500 text-sm">{post.updated_at ? new Date(post.updated_at).toLocaleDateString() : '—'}</td>
+                  <td className="p-3">
+                    <div className="flex flex-wrap gap-2 items-center">
+                      {!post.is_published && (
+                        <button
+                          type="button"
+                          onClick={() => handlePublish(post.id)}
+                          className="px-2 py-1.5 text-sm font-medium text-white bg-[#309605] hover:bg-[#3ba208] rounded-lg"
+                        >
+                          Publish
+                        </button>
+                      )}
+                      <button
+                        type="button"
+                        onClick={() => setEditingPost(post)}
+                        className="p-2 text-gray-600 hover:bg-gray-200 rounded-lg"
+                        aria-label="Edit"
+                      >
+                        <Pencil className="w-4 h-4" />
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => handleDelete(post.id)}
+                        className="p-2 text-red-600 hover:bg-red-50 rounded-lg"
+                        aria-label="Delete"
+                      >
+                        <Trash2 className="w-4 h-4" />
+                      </button>
+                    </div>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
     </div>
   );
 };
