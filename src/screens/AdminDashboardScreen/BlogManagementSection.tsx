@@ -29,7 +29,6 @@ const defaultForm = {
   tags: '',
   is_published: false,
   published_at: '',
-  faqJson: '[]'
 };
 
 /** Converts simple Markdown-style formatting to HTML. No HTML knowledge required. */
@@ -74,6 +73,8 @@ export const BlogManagementSection = (): JSX.Element => {
   const [formData, setFormData] = useState(defaultForm);
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [showForm, setShowForm] = useState(false);
+  /** FAQ items: simple Q&A pairs (optional). Used on the post and for search/schema. */
+  const [faqItems, setFaqItems] = useState<Array<{ question: string; answer: string }>>([{ question: '', answer: '' }]);
 
   const fetchPosts = async () => {
     setIsLoading(true);
@@ -109,14 +110,19 @@ export const BlogManagementSection = (): JSX.Element => {
         category: editingPost.category || '',
         tags: Array.isArray(editingPost.tags) ? editingPost.tags.join(', ') : '',
         is_published: !!editingPost.is_published,
-        published_at: editingPost.published_at ? editingPost.published_at.slice(0, 16) : '',
-        faqJson: editingPost.faq && editingPost.faq.length > 0 ? JSON.stringify(editingPost.faq, null, 2) : '[]'
+        published_at: editingPost.published_at ? editingPost.published_at.slice(0, 16) : ''
       });
+      setFaqItems(
+        editingPost.faq && editingPost.faq.length > 0
+          ? editingPost.faq.map((q) => ({ question: q.question || '', answer: q.answer || '' }))
+          : [{ question: '', answer: '' }]
+      );
       setShowForm(true);
     } else if (!showForm) {
       setFormData(defaultForm);
+      setFaqItems([{ question: '', answer: '' }]);
     }
-  }, [editingPost]);
+  }, [editingPost, showForm]);
 
   const handleChange = (e: React.ChangeEvent<HTMLInputElement | HTMLTextAreaElement | HTMLSelectElement>) => {
     const { name, value, type } = e.target;
@@ -136,18 +142,22 @@ export const BlogManagementSection = (): JSX.Element => {
     }
   };
 
-  const parseFaq = (): Array<{ question: string; answer: string }> => {
-    try {
-      const parsed = JSON.parse(formData.faqJson || '[]');
-      return Array.isArray(parsed)
-        ? parsed
-            .filter((item: any) => item && typeof item.question === 'string' && typeof item.answer === 'string')
-            .map((item: any) => ({ question: item.question.trim(), answer: item.answer.trim() }))
-        : [];
-    } catch {
-      return [];
-    }
+  const getFaqForSave = (): Array<{ question: string; answer: string }> =>
+    faqItems
+      .filter((item) => item.question.trim() && item.answer.trim())
+      .map((item) => ({ question: item.question.trim(), answer: item.answer.trim() }));
+
+  const updateFaqItem = (index: number, field: 'question' | 'answer', value: string) => {
+    setFaqItems((prev) => {
+      const next = [...prev];
+      next[index] = { ...next[index], [field]: value };
+      return next;
+    });
   };
+
+  const addFaqItem = () => setFaqItems((prev) => [...prev, { question: '', answer: '' }]);
+  const removeFaqItem = (index: number) =>
+    setFaqItems((prev) => (prev.length <= 1 ? [{ question: '', answer: '' }] : prev.filter((_, i) => i !== index)));
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -155,6 +165,10 @@ export const BlogManagementSection = (): JSX.Element => {
     setSuccess(null);
     if (!formData.title.trim() || !formData.slug.trim()) {
       setError('Title and slug are required');
+      return;
+    }
+    if (!formData.cover_image_url.trim()) {
+      setError('Feature image is required. Every post must have a feature image.');
       return;
     }
     setIsSubmitting(true);
@@ -175,7 +189,7 @@ export const BlogManagementSection = (): JSX.Element => {
           .filter(Boolean),
         is_published: formData.is_published,
         published_at: formData.published_at ? new Date(formData.published_at).toISOString() : null,
-        faq: parseFaq(),
+        faq: getFaqForSave(),
         updated_at: new Date().toISOString()
       };
 
@@ -228,6 +242,7 @@ export const BlogManagementSection = (): JSX.Element => {
           onClick={() => {
             setEditingPost(null);
             setFormData(defaultForm);
+            setFaqItems([{ question: '', answer: '' }]);
             setShowForm(!showForm);
           }}
           className="flex items-center gap-2 px-4 py-2 bg-[#309605] text-white rounded-lg hover:bg-[#3ba208] transition-colors"
@@ -300,7 +315,10 @@ export const BlogManagementSection = (): JSX.Element => {
             />
           </div>
           <div>
-            <label className="block text-sm font-medium text-gray-700 mb-1">Cover image URL</label>
+            <label className="block text-sm font-medium text-gray-700 mb-1">Feature image URL *</label>
+            <p className="text-xs text-gray-500 mb-1">
+              Every post must have a feature image. It appears on blog cards and at the top of the post. Paste an image URL (e.g. from your CDN or Supabase Storage).
+            </p>
             <input
               type="url"
               name="cover_image_url"
@@ -308,6 +326,7 @@ export const BlogManagementSection = (): JSX.Element => {
               onChange={handleChange}
               className="w-full px-3 py-2 border border-gray-300 rounded-lg"
               placeholder="https://..."
+              required
             />
           </div>
           <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
@@ -357,15 +376,50 @@ export const BlogManagementSection = (): JSX.Element => {
             </div>
           </div>
           <div>
-            <label className="block text-sm font-medium text-gray-700 mb-1">FAQ (JSON array for schema)</label>
-            <textarea
-              name="faqJson"
-              value={formData.faqJson}
-              onChange={handleChange}
-              rows={4}
-              className="w-full px-3 py-2 border border-gray-300 rounded-lg font-mono text-sm"
-              placeholder='[{"question":"...","answer":"..."}]'
-            />
+            <label className="block text-sm font-medium text-gray-700 mb-1">
+              <span className="flex items-center gap-1">
+                FAQ <span className="text-gray-400 font-normal">(optional)</span>
+              </span>
+            </label>
+            <p className="text-xs text-gray-500 mb-2">
+              Add questions and answers that match your post. They can be shown on the page and help Google show rich results in search. Leave blank if you don’t need them.
+            </p>
+            {faqItems.map((item, index) => (
+              <div key={index} className="mb-3 p-3 border border-gray-200 rounded-lg bg-gray-50/50">
+                <div className="flex justify-between items-center mb-2">
+                  <span className="text-xs font-medium text-gray-500">Q&A #{index + 1}</span>
+                  <button
+                    type="button"
+                    onClick={() => removeFaqItem(index)}
+                    className="text-xs text-red-600 hover:underline"
+                  >
+                    Remove
+                  </button>
+                </div>
+                <input
+                  type="text"
+                  value={item.question}
+                  onChange={(e) => updateFaqItem(index, 'question', e.target.value)}
+                  className="w-full px-3 py-2 border border-gray-300 rounded-lg mb-2 text-sm"
+                  placeholder="Question"
+                />
+                <textarea
+                  value={item.answer}
+                  onChange={(e) => updateFaqItem(index, 'answer', e.target.value)}
+                  rows={2}
+                  className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm"
+                  placeholder="Answer"
+                />
+              </div>
+            ))}
+            <button
+              type="button"
+              onClick={addFaqItem}
+              className="text-sm text-[#309605] hover:underline flex items-center gap-1"
+            >
+              <Plus className="w-4 h-4" />
+              Add another Q&A
+            </button>
           </div>
           <button
             type="submit"
