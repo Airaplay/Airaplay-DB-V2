@@ -2,7 +2,12 @@ import { useState, useEffect, useRef } from 'react';
 import { Plus, Pencil, Trash2, Loader2, Upload, ImageIcon } from 'lucide-react';
 import { supabase } from '../../lib/supabase';
 import { LoadingLogo } from '../../components/LoadingLogo';
-import { validateImageFile, getValidatedExtension, sanitizeFileName, ALLOWED_IMAGE_EXTENSIONS } from '../../lib/fileSecurity';
+import {
+  validateImageFile,
+  getValidatedExtension,
+  sanitizeFileName,
+  ALLOWED_IMAGE_EXTENSIONS,
+} from '../../lib/fileSecurity';
 
 interface BlogPost {
   id: string;
@@ -20,7 +25,19 @@ interface BlogPost {
   updated_at: string | null;
 }
 
-const defaultForm = {
+interface FormState {
+  title: string;
+  slug: string;
+  excerpt: string;
+  content: string;
+  cover_image_url: string;
+  category: string;
+  tags: string;
+  is_published: boolean;
+  published_at: string;
+}
+
+const INITIAL_FORM: FormState = {
   title: '',
   slug: '',
   excerpt: '',
@@ -32,252 +49,278 @@ const defaultForm = {
   published_at: '',
 };
 
-/** Converts simple Markdown-style formatting to HTML. No HTML knowledge required. */
+type FaqItem = { question: string; answer: string };
+
+const INITIAL_FAQ: FaqItem[] = [{ question: '', answer: '' }];
+
+// --- Helpers: simple Markdown → HTML (no HTML knowledge needed)
 function simpleMarkdownToHtml(text: string): string {
   if (!text.trim()) return '';
-  const escape = (s: string) =>
-    s
-      .replace(/&/g, '&amp;')
-      .replace(/</g, '&lt;')
-      .replace(/>/g, '&gt;');
-  let out = escape(text);
-  // Links: [text](url)
+  const esc = (s: string) => s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+  let out = esc(text);
   out = out.replace(/\[([^\]]+)\]\(([^)]+)\)/g, '<a href="$2" target="_blank" rel="noopener noreferrer">$1</a>');
-  // Bold **text**
   out = out.replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>');
-  // Italic *text*
   out = out.replace(/\*([^*]+)\*/g, '<em>$1</em>');
-  // Headings (at start of line)
   out = out.replace(/^### (.+)$/gm, '<h3>$1</h3>');
   out = out.replace(/^## (.+)$/gm, '<h2>$1</h2>');
-  // Paragraphs: wrap double newlines in <p>
-  const paragraphs = out.split(/\n\n+/).filter((p) => p.trim());
-  return paragraphs.map((p) => {
-    const trimmed = p.trim();
-    if (/^<h[23]>/.test(trimmed)) return trimmed;
-    return `<p>${trimmed.replace(/\n/g, '<br />')}</p>`;
-  }).join('\n');
+  const blocks = out.split(/\n\n+/).filter((p) => p.trim());
+  return blocks
+    .map((p) => {
+      const t = p.trim();
+      if (/^<h[23]>/.test(t)) return t;
+      return `<p>${t.replace(/\n/g, '<br />')}</p>`;
+    })
+    .join('\n');
 }
 
-/** True if string looks like raw HTML (so we don’t run Markdown on it). */
 function looksLikeHtml(s: string): boolean {
   const t = s.trim();
   return t.startsWith('<') && (t.includes('</') || t.includes('/>'));
 }
 
+function slugFromTitle(title: string): string {
+  return title
+    .toLowerCase()
+    .replace(/[^a-z0-9\s-]/g, '')
+    .replace(/\s+/g, '-')
+    .replace(/-+/g, '-')
+    .replace(/^-|-$/g, '');
+}
+
+// --- Component
 export const BlogManagementSection = (): JSX.Element => {
   const [posts, setPosts] = useState<BlogPost[]>([]);
-  const [isLoading, setIsLoading] = useState(true);
+  const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [success, setSuccess] = useState<string | null>(null);
-  const [editingPost, setEditingPost] = useState<BlogPost | null>(null);
-  const [formData, setFormData] = useState(defaultForm);
-  const [isSubmitting, setIsSubmitting] = useState(false);
-  const [showForm, setShowForm] = useState(false);
-  /** FAQ items: simple Q&A pairs (optional). Used on the post and for search/schema. */
-  const [faqItems, setFaqItems] = useState<Array<{ question: string; answer: string }>>([{ question: '', answer: '' }]);
-  const [isUploadingFeatureImage, setIsUploadingFeatureImage] = useState(false);
-  const featureImageInputRef = useRef<HTMLInputElement>(null);
+  const [formOpen, setFormOpen] = useState(false);
+  const [editing, setEditing] = useState<BlogPost | null>(null);
+  const [form, setForm] = useState<FormState>(INITIAL_FORM);
+  const [faq, setFaq] = useState<FaqItem[]>(INITIAL_FAQ);
+  const [submitting, setSubmitting] = useState(false);
+  const [uploadingImage, setUploadingImage] = useState(false);
+  const [publishingId, setPublishingId] = useState<string | null>(null);
+  const fileInputRef = useRef<HTMLInputElement>(null);
 
-  const fetchPosts = async () => {
-    setIsLoading(true);
+  const loadPosts = async () => {
+    setLoading(true);
     setError(null);
     try {
-      const { data, error: fetchError } = await supabase
+      const { data, error: e } = await supabase
         .from('blog_posts')
         .select('*')
         .order('created_at', { ascending: false });
-      if (fetchError) throw fetchError;
-      setPosts((data as BlogPost[]) || []);
+      if (e) throw e;
+      setPosts((data as BlogPost[]) ?? []);
     } catch (err) {
-      console.error('Error fetching blog posts:', err);
-      setError(err instanceof Error ? err.message : 'Failed to load blog posts');
+      setError(err instanceof Error ? err.message : 'Failed to load posts');
       setPosts([]);
     } finally {
-      setIsLoading(false);
+      setLoading(false);
     }
   };
 
   useEffect(() => {
-    fetchPosts();
+    loadPosts();
   }, []);
 
   useEffect(() => {
-    if (editingPost) {
-      setFormData({
-        title: editingPost.title,
-        slug: editingPost.slug,
-        excerpt: editingPost.excerpt || '',
-        content: editingPost.content || '',
-        cover_image_url: editingPost.cover_image_url || '',
-        category: editingPost.category || '',
-        tags: Array.isArray(editingPost.tags) ? editingPost.tags.join(', ') : '',
-        is_published: !!editingPost.is_published,
-        published_at: editingPost.published_at ? editingPost.published_at.slice(0, 16) : ''
+    if (editing) {
+      setForm({
+        title: editing.title,
+        slug: editing.slug,
+        excerpt: editing.excerpt ?? '',
+        content: editing.content ?? '',
+        cover_image_url: editing.cover_image_url ?? '',
+        category: editing.category ?? '',
+        tags: Array.isArray(editing.tags) ? editing.tags.join(', ') : '',
+        is_published: !!editing.is_published,
+        published_at: editing.published_at ? editing.published_at.slice(0, 16) : '',
       });
-      setFaqItems(
-        editingPost.faq && editingPost.faq.length > 0
-          ? editingPost.faq.map((q) => ({ question: q.question || '', answer: q.answer || '' }))
-          : [{ question: '', answer: '' }]
+      setFaq(
+        editing.faq?.length
+          ? editing.faq.map((q) => ({ question: q.question ?? '', answer: q.answer ?? '' }))
+          : INITIAL_FAQ
       );
-      setShowForm(true);
-    } else if (!showForm) {
-      setFormData(defaultForm);
-      setFaqItems([{ question: '', answer: '' }]);
+      setFormOpen(true);
+    } else if (!formOpen) {
+      setForm(INITIAL_FORM);
+      setFaq(INITIAL_FAQ);
     }
-  }, [editingPost, showForm]);
+  }, [editing, formOpen]);
 
-  const handleChange = (e: React.ChangeEvent<HTMLInputElement | HTMLTextAreaElement | HTMLSelectElement>) => {
-    const { name, value, type } = e.target;
-    const checked = (e.target as HTMLInputElement).checked;
-    setFormData((prev) => ({
-      ...prev,
-      [name]: type === 'checkbox' ? checked : value
-    }));
-    if (name === 'title' && !editingPost) {
-      const slug = value
-        .toLowerCase()
-        .replace(/[^a-z0-9\s-]/g, '')
-        .replace(/\s+/g, '-')
-        .replace(/-+/g, '-')
-        .replace(/^-|-$/g, '');
-      setFormData((prev) => ({ ...prev, slug }));
-    }
+  const setFormField = (name: keyof FormState, value: string | boolean) => {
+    setForm((prev) => {
+      const next = { ...prev, [name]: value };
+      if (name === 'title' && !editing && typeof value === 'string') {
+        next.slug = slugFromTitle(value);
+      }
+      return next;
+    });
   };
 
-  const getFaqForSave = (): Array<{ question: string; answer: string }> =>
-    faqItems
-      .filter((item) => item.question.trim() && item.answer.trim())
-      .map((item) => ({ question: item.question.trim(), answer: item.answer.trim() }));
+  const handleInputChange = (e: React.ChangeEvent<HTMLInputElement | HTMLTextAreaElement>) => {
+    const { name, value, type } = e.target;
+    const checked = (e.target as HTMLInputElement).checked;
+    setFormField(name as keyof FormState, type === 'checkbox' ? checked : value);
+  };
 
-  const updateFaqItem = (index: number, field: 'question' | 'answer', value: string) => {
-    setFaqItems((prev) => {
+  const setFaqEntry = (index: number, field: 'question' | 'answer', value: string) => {
+    setFaq((prev) => {
       const next = [...prev];
       next[index] = { ...next[index], [field]: value };
       return next;
     });
   };
 
-  const addFaqItem = () => setFaqItems((prev) => [...prev, { question: '', answer: '' }]);
-  const removeFaqItem = (index: number) =>
-    setFaqItems((prev) => (prev.length <= 1 ? [{ question: '', answer: '' }] : prev.filter((_, i) => i !== index)));
+  const addFaq = () => setFaq((prev) => [...prev, { question: '', answer: '' }]);
+  const removeFaq = (index: number) =>
+    setFaq((prev) => (prev.length <= 1 ? INITIAL_FAQ : prev.filter((_, i) => i !== index)));
 
-  const uploadFeatureImage = async (file: File): Promise<string> => {
+  const getFaqPayload = (): FaqItem[] =>
+    faq
+      .filter((x) => x.question.trim() && x.answer.trim())
+      .map((x) => ({ question: x.question.trim(), answer: x.answer.trim() }));
+
+  const uploadImage = async (file: File): Promise<string> => {
     const { data: { user } } = await supabase.auth.getUser();
     if (!user) throw new Error('You must be signed in to upload images.');
     const validation = validateImageFile(file);
-    if (!validation.valid) throw new Error(validation.error || 'Invalid image');
-    const fileExt = getValidatedExtension(file.name, ALLOWED_IMAGE_EXTENSIONS);
-    if (!fileExt) throw new Error('Allowed: jpg, jpeg, png, webp, gif');
+    if (!validation.valid) throw new Error(validation.error ?? 'Invalid image');
+    const ext = getValidatedExtension(file.name, ALLOWED_IMAGE_EXTENSIONS);
+    if (!ext) throw new Error('Allowed: jpg, jpeg, png, webp, gif');
     const base = sanitizeFileName(file.name).replace(/\.[^.]+$/, '') || 'image';
-    const fileName = `blog-${Date.now()}-${base}.${fileExt}`;
-    const filePath = `${user.id}/blog/${fileName}`;
-    const { error: uploadError } = await supabase.storage
-      .from('thumbnails')
-      .upload(filePath, file, { cacheControl: '3600', upsert: false });
-    if (uploadError) {
-      const msg = typeof uploadError === 'object' && uploadError !== null && 'message' in uploadError
-        ? (uploadError as { message?: string }).message
-        : String(uploadError);
-      throw new Error(msg || 'Storage upload failed');
-    }
-    const { data: { publicUrl } } = supabase.storage.from('thumbnails').getPublicUrl(filePath);
-    return publicUrl;
+    const path = `${user.id}/blog/blog-${Date.now()}-${base}.${ext}`;
+    const { error: e } = await supabase.storage.from('thumbnails').upload(path, file, {
+      cacheControl: '3600',
+      upsert: false,
+    });
+    if (e) throw new Error((e as { message?: string }).message ?? 'Upload failed');
+    const { data } = supabase.storage.from('thumbnails').getPublicUrl(path);
+    return data.publicUrl;
   };
 
-  const handleFeatureImageSelect = async (e: React.ChangeEvent<HTMLInputElement>) => {
+  const onImageSelect = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (!file) return;
     e.target.value = '';
     setError(null);
+    setUploadingImage(true);
     try {
-      setIsUploadingFeatureImage(true);
-      const url = await uploadFeatureImage(file);
-      setFormData((prev) => ({ ...prev, cover_image_url: url }));
+      const url = await uploadImage(file);
+      setForm((prev) => ({ ...prev, cover_image_url: url }));
     } catch (err) {
-      const message = err instanceof Error ? err.message : typeof err === 'object' && err !== null && 'message' in err ? String((err as { message: unknown }).message) : 'Upload failed';
-      setError(message);
+      setError(err instanceof Error ? err.message : 'Upload failed');
     } finally {
-      setIsUploadingFeatureImage(false);
+      setUploadingImage(false);
     }
   };
 
-  const clearFeatureImage = () => setFormData((prev) => ({ ...prev, cover_image_url: '' }));
+  const publishPost = async (id: string) => {
+    setError(null);
+    setPublishingId(id);
+    try {
+      const { error: e } = await supabase
+        .from('blog_posts')
+        .update({
+          is_published: true,
+          published_at: new Date().toISOString(),
+          updated_at: new Date().toISOString(),
+        })
+        .eq('id', id);
+      if (e) throw e;
+      setSuccess('Post published. It will appear on the home screen and /blog.');
+      await loadPosts();
+      setTimeout(() => setSuccess(null), 3000);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Failed to publish');
+    } finally {
+      setPublishingId(null);
+    }
+  };
 
-  const handleSubmit = async (e: React.FormEvent) => {
+  const submitForm = async (e: React.FormEvent) => {
     e.preventDefault();
     setError(null);
     setSuccess(null);
-    if (!formData.title.trim() || !formData.slug.trim()) {
-      setError('Title and slug are required');
+    if (!form.title.trim() || !form.slug.trim()) {
+      setError('Title and slug are required.');
       return;
     }
-    if (!formData.cover_image_url.trim()) {
-      setError('Feature image is required. Every post must have a feature image.');
+    if (!form.cover_image_url.trim()) {
+      setError('Feature image is required.');
       return;
     }
-    setIsSubmitting(true);
+    setSubmitting(true);
     try {
-      const rawContent = formData.content.trim();
+      const rawContent = form.content.trim();
       const content = looksLikeHtml(rawContent) ? rawContent : simpleMarkdownToHtml(rawContent);
-
       const payload = {
-        title: formData.title.trim(),
-        slug: formData.slug.trim().toLowerCase(),
-        excerpt: formData.excerpt.trim() || null,
+        title: form.title.trim(),
+        slug: form.slug.trim().toLowerCase(),
+        excerpt: form.excerpt.trim() || null,
         content: content || '',
-        cover_image_url: formData.cover_image_url.trim() || null,
-        category: formData.category.trim() || null,
-        tags: formData.tags
-          .split(',')
-          .map((t) => t.trim())
-          .filter(Boolean),
-        is_published: formData.is_published,
-        published_at: formData.is_published
-          ? (formData.published_at ? new Date(formData.published_at).toISOString() : new Date().toISOString())
+        cover_image_url: form.cover_image_url.trim() || null,
+        category: form.category.trim() || null,
+        tags: form.tags.split(',').map((t) => t.trim()).filter(Boolean),
+        is_published: form.is_published,
+        published_at: form.is_published
+          ? (form.published_at ? new Date(form.published_at).toISOString() : new Date().toISOString())
           : null,
-        faq: getFaqForSave(),
-        updated_at: new Date().toISOString()
+        faq: getFaqPayload(),
+        updated_at: new Date().toISOString(),
       };
 
-      if (editingPost) {
-        const { error: updateError } = await supabase.from('blog_posts').update(payload).eq('id', editingPost.id);
-        if (updateError) throw updateError;
-        setSuccess('Post updated successfully');
+      if (editing) {
+        const { error: e } = await supabase.from('blog_posts').update(payload).eq('id', editing.id);
+        if (e) throw e;
+        setSuccess('Post updated.');
       } else {
-        const { error: insertError } = await supabase.from('blog_posts').insert({ ...payload, created_at: new Date().toISOString() });
-        if (insertError) throw insertError;
-        setSuccess('Post created successfully');
+        const { data: { user } } = await supabase.auth.getUser();
+        const insert = {
+          ...payload,
+          created_at: new Date().toISOString(),
+          ...(user?.id && { author_id: user.id }),
+        };
+        const { error: e } = await supabase.from('blog_posts').insert(insert);
+        if (e) throw e;
+        setSuccess('Post created.');
       }
-      setEditingPost(null);
-      setFormData(defaultForm);
-      setShowForm(false);
-      await fetchPosts();
+      setEditing(null);
+      setForm(INITIAL_FORM);
+      setFaq(INITIAL_FAQ);
+      setFormOpen(false);
+      await loadPosts();
       setTimeout(() => setSuccess(null), 3000);
     } catch (err) {
-      console.error('Error saving post:', err);
       setError(err instanceof Error ? err.message : 'Failed to save post');
     } finally {
-      setIsSubmitting(false);
+      setSubmitting(false);
     }
   };
 
-  const handleDelete = async (id: string) => {
+  const deletePost = async (id: string) => {
     if (!confirm('Delete this post? This cannot be undone.')) return;
     try {
-      const { error: deleteError } = await supabase.from('blog_posts').delete().eq('id', id);
-      if (deleteError) throw deleteError;
-      setSuccess('Post deleted');
-      if (editingPost?.id === id) {
-        setEditingPost(null);
-        setShowForm(false);
+      const { error: e } = await supabase.from('blog_posts').delete().eq('id', id);
+      if (e) throw e;
+      setSuccess('Post deleted.');
+      if (editing?.id === id) {
+        setEditing(null);
+        setFormOpen(false);
       }
-      await fetchPosts();
+      await loadPosts();
       setTimeout(() => setSuccess(null), 3000);
     } catch (err) {
-      console.error('Error deleting post:', err);
-      setError(err instanceof Error ? err.message : 'Failed to delete post');
+      setError(err instanceof Error ? err.message : 'Failed to delete');
     }
+  };
+
+  const openAdd = () => {
+    setEditing(null);
+    setForm(INITIAL_FORM);
+    setFaq(INITIAL_FAQ);
+    setFormOpen(true);
   };
 
   return (
@@ -287,15 +330,17 @@ export const BlogManagementSection = (): JSX.Element => {
         <button
           type="button"
           onClick={() => {
-            setEditingPost(null);
-            setFormData(defaultForm);
-            setFaqItems([{ question: '', answer: '' }]);
-            setShowForm(!showForm);
+            if (formOpen) {
+              setFormOpen(false);
+              setEditing(null);
+            } else {
+              openAdd();
+            }
           }}
-          className="flex items-center gap-2 px-4 py-2 bg-[#309605] text-white rounded-lg hover:bg-[#3ba208] transition-colors"
+          className="flex items-center gap-2 px-4 py-2 bg-[#309605] text-white rounded-lg hover:bg-[#3ba208]"
         >
           <Plus className="w-4 h-4" />
-          {showForm ? 'Cancel' : 'Add post'}
+          {formOpen ? 'Cancel' : 'Add post'}
         </button>
       </div>
 
@@ -307,16 +352,16 @@ export const BlogManagementSection = (): JSX.Element => {
         </div>
       )}
 
-      {showForm && (
-        <form onSubmit={handleSubmit} className="mb-8 p-4 border border-gray-200 rounded-lg space-y-4">
+      {formOpen && (
+        <form onSubmit={submitForm} className="mb-8 p-4 border border-gray-200 rounded-lg space-y-4">
           <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
             <div>
               <label className="block text-sm font-medium text-gray-700 mb-1">Title *</label>
               <input
                 type="text"
                 name="title"
-                value={formData.title}
-                onChange={handleChange}
+                value={form.title}
+                onChange={handleInputChange}
                 className="w-full px-3 py-2 border border-gray-300 rounded-lg"
                 placeholder="Post title"
               />
@@ -326,73 +371,73 @@ export const BlogManagementSection = (): JSX.Element => {
               <input
                 type="text"
                 name="slug"
-                value={formData.slug}
-                onChange={handleChange}
+                value={form.slug}
+                onChange={handleInputChange}
                 className="w-full px-3 py-2 border border-gray-300 rounded-lg"
                 placeholder="post-slug"
               />
             </div>
           </div>
+
           <div>
             <label className="block text-sm font-medium text-gray-700 mb-1">Excerpt</label>
             <textarea
               name="excerpt"
-              value={formData.excerpt}
-              onChange={handleChange}
+              value={form.excerpt}
+              onChange={handleInputChange}
               rows={2}
               className="w-full px-3 py-2 border border-gray-300 rounded-lg"
               placeholder="Short summary for SEO and cards"
             />
           </div>
+
           <div>
-            <label className="block text-sm font-medium text-gray-700 mb-1">Content (plain text — use **bold**, *italic*, ## headings)</label>
+            <label className="block text-sm font-medium text-gray-700 mb-1">Content</label>
             <p className="text-xs text-gray-500 mb-1">
-              Write in plain text. Use <strong>**bold**</strong>, <em>*italic*</em>, <code>## Heading 2</code>, <code>### Heading 3</code>, and <code>[link text](https://url)</code>. New lines become paragraphs. No HTML needed.
-              {formData.content && looksLikeHtml(formData.content) && (
-                <span className="block mt-1 text-amber-600">Showing saved HTML. Edit as-is or replace with simple formatting above.</span>
-              )}
+              Plain text. Use **bold**, *italic*, ## Heading 2, ### Heading 3, [text](url). New lines = paragraphs.
             </p>
             <textarea
               name="content"
-              value={formData.content}
-              onChange={handleChange}
+              value={form.content}
+              onChange={handleInputChange}
               rows={10}
               className="w-full px-3 py-2 border border-gray-300 rounded-lg"
-              placeholder="Write your post here. Example:&#10;&#10;## Introduction&#10;&#10;This is **bold** and *italic*. [Learn more](https://example.com)."
+              placeholder="Write your post here..."
             />
           </div>
+
           <div>
             <label className="block text-sm font-medium text-gray-700 mb-1">Feature image *</label>
-            <p className="text-xs text-gray-500 mb-2">
-              Every post must have a feature image (blog cards and top of post). Upload an image (JPG, PNG, WebP, GIF, max 5MB) or paste a URL below.
-            </p>
+            <p className="text-xs text-gray-500 mb-2">Upload (JPG, PNG, WebP, GIF, max 5MB) or paste URL.</p>
             <input
-              ref={featureImageInputRef}
+              ref={fileInputRef}
               type="file"
               accept="image/jpeg,image/png,image/webp,image/gif"
-              onChange={handleFeatureImageSelect}
+              onChange={onImageSelect}
               className="hidden"
             />
-            {formData.cover_image_url ? (
+            {form.cover_image_url ? (
               <div className="space-y-2">
-                <div className="relative inline-block rounded-lg overflow-hidden border border-gray-200 max-w-xs">
-                  <img
-                    src={formData.cover_image_url}
-                    alt="Feature"
-                    className="h-40 w-auto object-cover"
-                  />
-                </div>
+                <img
+                  src={form.cover_image_url}
+                  alt="Feature"
+                  className="h-40 w-auto object-cover rounded-lg border border-gray-200 max-w-xs"
+                />
                 <div className="flex gap-2">
                   <button
                     type="button"
-                    onClick={() => featureImageInputRef.current?.click()}
-                    disabled={isUploadingFeatureImage}
-                    className="flex items-center gap-1.5 px-3 py-1.5 text-sm bg-gray-100 text-gray-700 rounded-lg hover:bg-gray-200 disabled:opacity-50"
+                    onClick={() => fileInputRef.current?.click()}
+                    disabled={uploadingImage}
+                    className="flex items-center gap-1.5 px-3 py-1.5 text-sm bg-gray-100 rounded-lg hover:bg-gray-200 disabled:opacity-50"
                   >
-                    {isUploadingFeatureImage ? <Loader2 className="w-4 h-4 animate-spin" /> : <Upload className="w-4 h-4" />}
-                    {isUploadingFeatureImage ? 'Uploading…' : 'Replace image'}
+                    {uploadingImage ? <Loader2 className="w-4 h-4 animate-spin" /> : <Upload className="w-4 h-4" />}
+                    {uploadingImage ? 'Uploading…' : 'Replace'}
                   </button>
-                  <button type="button" onClick={clearFeatureImage} className="text-sm text-red-600 hover:underline">
+                  <button
+                    type="button"
+                    onClick={() => setForm((p) => ({ ...p, cover_image_url: '' }))}
+                    className="text-sm text-red-600 hover:underline"
+                  >
                     Remove
                   </button>
                 </div>
@@ -400,39 +445,38 @@ export const BlogManagementSection = (): JSX.Element => {
             ) : (
               <button
                 type="button"
-                onClick={() => featureImageInputRef.current?.click()}
-                disabled={isUploadingFeatureImage}
-                className="w-full flex flex-col items-center justify-center gap-2 p-6 border-2 border-dashed border-gray-300 rounded-lg hover:border-[#309605] hover:bg-gray-50/50 transition-colors disabled:opacity-50"
+                onClick={() => fileInputRef.current?.click()}
+                disabled={uploadingImage}
+                className="w-full flex flex-col items-center justify-center gap-2 p-6 border-2 border-dashed border-gray-300 rounded-lg hover:border-[#309605] hover:bg-gray-50/50 disabled:opacity-50"
               >
-                {isUploadingFeatureImage ? (
+                {uploadingImage ? (
                   <Loader2 className="w-10 h-10 text-[#309605] animate-spin" />
                 ) : (
                   <ImageIcon className="w-10 h-10 text-gray-400" />
                 )}
                 <span className="text-sm font-medium text-gray-600">
-                  {isUploadingFeatureImage ? 'Uploading…' : 'Click to upload feature image'}
+                  {uploadingImage ? 'Uploading…' : 'Click to upload feature image'}
                 </span>
-                <span className="text-xs text-gray-400">JPG, PNG, WebP or GIF, max 5MB</span>
               </button>
             )}
-            <p className="text-xs text-gray-400 mt-2">Or paste image URL:</p>
             <input
               type="url"
               name="cover_image_url"
-              value={formData.cover_image_url}
-              onChange={handleChange}
-              className="mt-1 w-full px-3 py-2 border border-gray-300 rounded-lg text-sm"
-              placeholder="https://..."
+              value={form.cover_image_url}
+              onChange={handleInputChange}
+              className="mt-2 w-full px-3 py-2 border border-gray-300 rounded-lg text-sm"
+              placeholder="Or paste image URL"
             />
           </div>
+
           <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
             <div>
               <label className="block text-sm font-medium text-gray-700 mb-1">Category</label>
               <input
                 type="text"
                 name="category"
-                value={formData.category}
-                onChange={handleChange}
+                value={form.category}
+                onChange={handleInputChange}
                 className="w-full px-3 py-2 border border-gray-300 rounded-lg"
                 placeholder="e.g. News"
               />
@@ -442,94 +486,84 @@ export const BlogManagementSection = (): JSX.Element => {
               <input
                 type="text"
                 name="tags"
-                value={formData.tags}
-                onChange={handleChange}
+                value={form.tags}
+                onChange={handleInputChange}
                 className="w-full px-3 py-2 border border-gray-300 rounded-lg"
                 placeholder="music, artist, tips"
               />
             </div>
           </div>
-          <div className="flex flex-wrap gap-4 items-center">
-            <label className="flex items-center gap-2">
+
+          <div className="p-4 rounded-lg border-2 border-amber-200 bg-amber-50/80 space-y-3">
+            <p className="text-sm font-medium text-amber-800">
+              Posts show on home and /blog only when <strong>Published</strong>. Check below and save.
+            </p>
+            <label className="flex items-center gap-3 cursor-pointer">
               <input
                 type="checkbox"
                 name="is_published"
-                checked={formData.is_published}
-                onChange={handleChange}
-                className="rounded border-gray-300"
+                checked={form.is_published}
+                onChange={(e) => setFormField('is_published', e.target.checked)}
+                className="rounded border-gray-300 w-5 h-5"
               />
-              <span className="text-sm text-gray-700">Published</span>
+              <span className="font-semibold text-gray-800">Published</span>
             </label>
-            <p className="text-xs text-gray-400">Published posts show on the home screen and /blog. If &quot;Published at&quot; is empty, we use current time when you save.</p>
             <div>
               <label className="block text-sm font-medium text-gray-700 mb-1">Published at (optional)</label>
               <input
                 type="datetime-local"
                 name="published_at"
-                value={formData.published_at}
-                onChange={handleChange}
+                value={form.published_at}
+                onChange={handleInputChange}
                 className="px-3 py-2 border border-gray-300 rounded-lg"
               />
             </div>
           </div>
+
           <div>
-            <label className="block text-sm font-medium text-gray-700 mb-1">
-              <span className="flex items-center gap-1">
-                FAQ <span className="text-gray-400 font-normal">(optional)</span>
-              </span>
-            </label>
-            <p className="text-xs text-gray-500 mb-2">
-              Add questions and answers that match your post. They can be shown on the page and help Google show rich results in search. Leave blank if you don’t need them.
-            </p>
-            {faqItems.map((item, index) => (
-              <div key={index} className="mb-3 p-3 border border-gray-200 rounded-lg bg-gray-50/50">
+            <label className="block text-sm font-medium text-gray-700 mb-1">FAQ (optional)</label>
+            <p className="text-xs text-gray-500 mb-2">Q&A pairs for the post and search.</p>
+            {faq.map((item, i) => (
+              <div key={i} className="mb-3 p-3 border border-gray-200 rounded-lg bg-gray-50/50">
                 <div className="flex justify-between items-center mb-2">
-                  <span className="text-xs font-medium text-gray-500">Q&A #{index + 1}</span>
-                  <button
-                    type="button"
-                    onClick={() => removeFaqItem(index)}
-                    className="text-xs text-red-600 hover:underline"
-                  >
+                  <span className="text-xs font-medium text-gray-500">#{i + 1}</span>
+                  <button type="button" onClick={() => removeFaq(i)} className="text-xs text-red-600 hover:underline">
                     Remove
                   </button>
                 </div>
                 <input
                   type="text"
                   value={item.question}
-                  onChange={(e) => updateFaqItem(index, 'question', e.target.value)}
+                  onChange={(e) => setFaqEntry(i, 'question', e.target.value)}
                   className="w-full px-3 py-2 border border-gray-300 rounded-lg mb-2 text-sm"
                   placeholder="Question"
                 />
                 <textarea
                   value={item.answer}
-                  onChange={(e) => updateFaqItem(index, 'answer', e.target.value)}
+                  onChange={(e) => setFaqEntry(i, 'answer', e.target.value)}
                   rows={2}
                   className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm"
                   placeholder="Answer"
                 />
               </div>
             ))}
-            <button
-              type="button"
-              onClick={addFaqItem}
-              className="text-sm text-[#309605] hover:underline flex items-center gap-1"
-            >
-              <Plus className="w-4 h-4" />
-              Add another Q&A
+            <button type="button" onClick={addFaq} className="text-sm text-[#309605] hover:underline flex items-center gap-1">
+              <Plus className="w-4 h-4" /> Add Q&A
             </button>
           </div>
+
           <button
             type="submit"
-            disabled={isSubmitting}
+            disabled={submitting}
             className="flex items-center gap-2 px-4 py-2 bg-[#309605] text-white rounded-lg hover:bg-[#3ba208] disabled:opacity-50"
           >
-            {isSubmitting && <Loader2 className="w-4 h-4 animate-spin" />}
-            {editingPost ? 'Update post' : 'Create post'}
+            {submitting && <Loader2 className="w-4 h-4 animate-spin" />}
+            {editing ? 'Update post' : 'Create post'}
           </button>
         </form>
       )}
 
-      {isLoading ? (
+      {loading ? (
         <div className="flex items-center gap-3 text-gray-600">
           <LoadingLogo variant="pulse" size={32} />
           <span>Loading posts...</span>
@@ -558,12 +592,30 @@ export const BlogManagementSection = (): JSX.Element => {
                       {post.is_published ? 'Published' : 'Draft'}
                     </span>
                   </td>
-                  <td className="p-3 text-gray-500 text-sm">{post.updated_at ? new Date(post.updated_at).toLocaleDateString() : '—'}</td>
+                  <td className="p-3 text-gray-500 text-sm">
+                    {post.updated_at ? new Date(post.updated_at).toLocaleDateString() : '—'}
+                  </td>
                   <td className="p-3">
-                    <div className="flex gap-2">
+                    <div className="flex flex-wrap gap-2 items-center">
+                      {!post.is_published && (
+                        <button
+                          type="button"
+                          onClick={() => publishPost(post.id)}
+                          disabled={publishingId === post.id}
+                          className="px-2 py-1.5 text-sm font-medium text-white bg-[#309605] hover:bg-[#3ba208] rounded-lg disabled:opacity-60"
+                        >
+                          {publishingId === post.id ? (
+                            <span className="inline-flex items-center gap-1">
+                              <Loader2 className="w-4 h-4 animate-spin" /> Publishing…
+                            </span>
+                          ) : (
+                            'Publish'
+                          )}
+                        </button>
+                      )}
                       <button
                         type="button"
-                        onClick={() => setEditingPost(post)}
+                        onClick={() => setEditing(post)}
                         className="p-2 text-gray-600 hover:bg-gray-200 rounded-lg"
                         aria-label="Edit"
                       >
@@ -571,7 +623,7 @@ export const BlogManagementSection = (): JSX.Element => {
                       </button>
                       <button
                         type="button"
-                        onClick={() => handleDelete(post.id)}
+                        onClick={() => deletePost(post.id)}
                         className="p-2 text-red-600 hover:bg-red-50 rounded-lg"
                         aria-label="Delete"
                       >
