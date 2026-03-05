@@ -30,8 +30,8 @@ export const AdSafetyCapsSection = (): JSX.Element => {
     max_rewarded_ads_per_day: 50,
     min_playback_duration_seconds: 65,
     pending_balance_unlock_hours: 168,
-    artist_revenue_percentage: 60.00,
-    platform_revenue_percentage: 40.00,
+    artist_revenue_percentage: 50.00,
+    platform_revenue_percentage: 50.00,
   });
 
   useEffect(() => {
@@ -213,7 +213,7 @@ export const AdSafetyCapsSection = (): JSX.Element => {
             <div className="flex-1">
               <p className="text-sm font-semibold text-gray-900 mb-1.5">AdMob-Compliant Monetization Model</p>
               <div className="space-y-1 text-xs text-gray-600">
-                <p className="flex items-center gap-1.5"><span className="w-1.5 h-1.5 bg-green-600 rounded-full flex-shrink-0"></span><strong>Ad Revenue Split:</strong> 60% Creators | 0% Listeners | 40% Platform</p>
+                <p className="flex items-center gap-1.5"><span className="w-1.5 h-1.5 bg-green-600 rounded-full flex-shrink-0"></span><strong>Ad Revenue Split:</strong> 50% Creators | 0% Listeners | 50% Platform</p>
                 <p className="flex items-center gap-1.5"><span className="w-1.5 h-1.5 bg-green-600 rounded-full flex-shrink-0"></span><strong>Listener Earnings:</strong> Through Contribution Rewards (separate from ad revenue)</p>
                 <p className="flex items-center gap-1.5"><span className="w-1.5 h-1.5 bg-green-600 rounded-full flex-shrink-0"></span><strong>Compliance:</strong> Meets AdMob policies (creators get 60% minimum)</p>
               </div>
