@@ -117,6 +117,7 @@ export const AdRevenueSection = (): JSX.Element => {
   const [processingResult, setProcessingResult] = useState<any>(null);
   const [isDistributingCreatorPool, setIsDistributingCreatorPool] = useState(false);
   const [creatorPoolDistributionResult, setCreatorPoolDistributionResult] = useState<any>(null);
+  const [lockingRevenueEntryId, setLockingRevenueEntryId] = useState<string | null>(null);
   const [expandedSection, setExpandedSection] = useState<string | null>('overview');
 
   const [dailyRevenueInputs, setDailyRevenueInputs] = useState<DailyRevenueInput[]>([]);
@@ -664,6 +665,10 @@ export const AdRevenueSection = (): JSX.Element => {
     }
 
     try {
+      setLockingRevenueEntryId(id);
+      setError(null);
+      setSuccess(null);
+
       const { error } = await supabase
         .from('ad_daily_revenue_input')
         .update({ is_locked: true, locked_at: new Date().toISOString() })
@@ -675,7 +680,9 @@ export const AdRevenueSection = (): JSX.Element => {
       fetchDailyRevenueInputs();
     } catch (err) {
       console.error('Error locking revenue entry:', err);
-      setError('Failed to lock revenue entry');
+      setError(err instanceof Error ? err.message : 'Failed to lock revenue entry');
+    } finally {
+      setLockingRevenueEntryId(null);
     }
   };
 
@@ -1485,16 +1492,25 @@ export const AdRevenueSection = (): JSX.Element => {
                           <td className="p-3">
                             {!input.is_locked && (
                               <button
-                                onClick={() => handleLockRevenueEntry(input.id, input.revenue_date)}
-                                className="text-sm text-blue-600 hover:text-blue-800 flex items-center gap-1"
+                                onClick={(e) => {
+                                  e.preventDefault();
+                                  e.stopPropagation();
+                                  handleLockRevenueEntry(input.id, input.revenue_date);
+                                }}
+                                disabled={lockingRevenueEntryId === input.id}
+                                className="text-sm text-blue-600 hover:text-blue-800 flex items-center gap-1 disabled:opacity-50 disabled:cursor-not-allowed"
                               >
                                 <Lock className="w-3 h-3" />
-                                Lock
+                                {lockingRevenueEntryId === input.id ? 'Locking…' : 'Lock'}
                               </button>
                             )}
                             {input.is_locked && (
                               <button
-                                onClick={() => handleDistributeCreatorPool(input.revenue_date)}
+                                onClick={(e) => {
+                                  e.preventDefault();
+                                  e.stopPropagation();
+                                  handleDistributeCreatorPool(input.revenue_date);
+                                }}
                                 disabled={isDistributingCreatorPool}
                                 className="text-sm text-green-700 hover:text-green-900 flex items-center gap-1 disabled:opacity-50 disabled:cursor-not-allowed"
                               >
