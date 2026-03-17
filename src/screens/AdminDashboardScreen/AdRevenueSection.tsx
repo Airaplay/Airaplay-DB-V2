@@ -115,6 +115,8 @@ export const AdRevenueSection = (): JSX.Element => {
   const [timeRange, setTimeRange] = useState<'7d' | '30d' | '90d'>('30d');
   const [isProcessing, setIsProcessing] = useState(false);
   const [processingResult, setProcessingResult] = useState<any>(null);
+  const [isDistributingCreatorPool, setIsDistributingCreatorPool] = useState(false);
+  const [creatorPoolDistributionResult, setCreatorPoolDistributionResult] = useState<any>(null);
   const [expandedSection, setExpandedSection] = useState<string | null>('overview');
 
   const [dailyRevenueInputs, setDailyRevenueInputs] = useState<DailyRevenueInput[]>([]);
@@ -568,6 +570,30 @@ export const AdRevenueSection = (): JSX.Element => {
     }
   };
 
+  const handleRunAdmobReconciliation = async () => {
+    setIsProcessing(true);
+    setProcessingResult(null);
+    setError(null);
+    setSuccess(null);
+
+    try {
+      const { data, error } = await supabase.rpc('admin_reconcile_daily_admob_revenue', {
+        p_revenue_date: null,
+      });
+
+      if (error) throw error;
+
+      const count = Array.isArray(data) ? data.length : 0;
+      setSuccess(`Reconciliation complete. ${count} day(s) updated in the Reconciliation Log.`);
+      fetchReconciliationLogs();
+    } catch (err) {
+      console.error('Error running AdMob reconciliation:', err);
+      setError(err instanceof Error ? err.message : 'Failed to run AdMob reconciliation');
+    } finally {
+      setIsProcessing(false);
+    }
+  };
+
   const handleSubmitDailyRevenue = async (e: React.FormEvent) => {
     e.preventDefault();
     setIsSubmittingInput(true);
@@ -650,6 +676,45 @@ export const AdRevenueSection = (): JSX.Element => {
     } catch (err) {
       console.error('Error locking revenue entry:', err);
       setError('Failed to lock revenue entry');
+    }
+  };
+
+  const handleDistributeCreatorPool = async (date: string) => {
+    if (!confirm(`Distribute the Creator Pool for ${date}? This will credit creator earnings based on weighted impressions for that day.`)) {
+      return;
+    }
+
+    setIsDistributingCreatorPool(true);
+    setError(null);
+    setSuccess(null);
+    setCreatorPoolDistributionResult(null);
+
+    try {
+      const { data, error: rpcError } = await supabase.rpc('admin_distribute_creator_pool_for_date', {
+        p_revenue_date: date
+      });
+
+      if (rpcError) throw rpcError;
+
+      setCreatorPoolDistributionResult(data);
+
+      if (data?.ok) {
+        setSuccess(
+          `Creator pool distribution: ${data.status} for ${date}` +
+            (data.creator_pool_usd !== undefined ? ` (Pool: $${Number(data.creator_pool_usd).toFixed(6)})` : '')
+        );
+      } else {
+        setError(data?.message || `Creator pool distribution failed for ${date}`);
+      }
+
+      // Refresh summary + events so admin sees updated earnings and latest activity
+      fetchRevenueData();
+      fetchDailyRevenueInputs();
+    } catch (err) {
+      console.error('Error distributing creator pool:', err);
+      setError(err instanceof Error ? err.message : 'Failed to distribute creator pool');
+    } finally {
+      setIsDistributingCreatorPool(false);
     }
   };
 
@@ -1427,11 +1492,81 @@ export const AdRevenueSection = (): JSX.Element => {
                                 Lock
                               </button>
                             )}
+                            {input.is_locked && (
+                              <button
+                                onClick={() => handleDistributeCreatorPool(input.revenue_date)}
+                                disabled={isDistributingCreatorPool}
+                                className="text-sm text-green-700 hover:text-green-900 flex items-center gap-1 disabled:opacity-50 disabled:cursor-not-allowed"
+                              >
+                                <DollarSign className="w-3 h-3" />
+                                {isDistributingCreatorPool ? 'Distributing…' : 'Distribute Creator Pool'}
+                              </button>
+                            )}
                           </td>
                         </tr>
                       ))}
                     </tbody>
                   </table>
+
+                  {creatorPoolDistributionResult && (
+                    <div className="mt-4 p-4 rounded-lg border border-gray-200 bg-gray-50">
+                      <div className="flex items-start justify-between gap-4">
+                        <div>
+                          <p className="text-sm font-semibold text-gray-900">Creator Pool Distribution Result</p>
+                          <p className="text-xs text-gray-600 mt-0.5">
+                            Status: <span className="font-medium">{String(creatorPoolDistributionResult.status || 'unknown')}</span>
+                          </p>
+                        </div>
+                        <div className="text-xs text-gray-600 text-right">
+                          {creatorPoolDistributionResult.revenue_date && (
+                            <div>Date: <span className="font-medium">{String(creatorPoolDistributionResult.revenue_date)}</span></div>
+                          )}
+                        </div>
+                      </div>
+
+                      <div className="mt-3 grid grid-cols-2 sm:grid-cols-4 gap-3">
+                        <div className="p-2 bg-white rounded border border-gray-100">
+                          <div className="text-[11px] text-gray-500">Creator Pool</div>
+                          <div className="text-sm font-semibold text-gray-900">
+                            {creatorPoolDistributionResult.creator_pool_usd !== undefined
+                              ? formatCurrency(Number(creatorPoolDistributionResult.creator_pool_usd))
+                              : '—'}
+                          </div>
+                        </div>
+                        <div className="p-2 bg-white rounded border border-gray-100">
+                          <div className="text-[11px] text-gray-500">Total Weight</div>
+                          <div className="text-sm font-semibold text-gray-900">
+                            {creatorPoolDistributionResult.total_weight !== undefined
+                              ? Number(creatorPoolDistributionResult.total_weight).toFixed(6)
+                              : '—'}
+                          </div>
+                        </div>
+                        <div className="p-2 bg-white rounded border border-gray-100">
+                          <div className="text-[11px] text-gray-500">Artists Paid</div>
+                          <div className="text-sm font-semibold text-gray-900">
+                            {creatorPoolDistributionResult.artists_paid !== undefined
+                              ? String(creatorPoolDistributionResult.artists_paid)
+                              : '—'}
+                          </div>
+                        </div>
+                        <div className="p-2 bg-white rounded border border-gray-100">
+                          <div className="text-[11px] text-gray-500">Users Credited</div>
+                          <div className="text-sm font-semibold text-gray-900">
+                            {creatorPoolDistributionResult.users_credited !== undefined
+                              ? String(creatorPoolDistributionResult.users_credited)
+                              : '—'}
+                          </div>
+                        </div>
+                      </div>
+
+                      <details className="mt-3">
+                        <summary className="text-xs text-gray-600 cursor-pointer select-none">Show raw response</summary>
+                        <pre className="mt-2 text-[11px] bg-white border border-gray-200 rounded p-3 overflow-auto max-h-56">
+{JSON.stringify(creatorPoolDistributionResult, null, 2)}
+                        </pre>
+                      </details>
+                    </div>
+                  )}
                 </div>
               ) : (
                 <div className="p-4 bg-gray-100 rounded-lg text-center">
@@ -1451,11 +1586,24 @@ export const AdRevenueSection = (): JSX.Element => {
               <Activity className="w-5 h-5 mr-2 text-green-600" />
               Reconciliation Log
             </h3>
-            {expandedSection === 'reconciliation' ? (
-              <ChevronUp className="w-5 h-5 text-gray-500" />
-            ) : (
-              <ChevronDown className="w-5 h-5 text-gray-500" />
-            )}
+            <div className="flex items-center gap-3">
+              <button
+                type="button"
+                onClick={(e) => {
+                  e.stopPropagation();
+                  handleRunAdmobReconciliation();
+                }}
+                disabled={isProcessing}
+                className="px-3 py-1.5 text-xs bg-[#309605] hover:bg-[#3ba208] text-white rounded-full disabled:opacity-50 disabled:cursor-not-allowed"
+              >
+                {isProcessing ? 'Reconciling…' : 'Run AdMob Reconciliation'}
+              </button>
+              {expandedSection === 'reconciliation' ? (
+                <ChevronUp className="w-5 h-5 text-gray-500" />
+              ) : (
+                <ChevronDown className="w-5 h-5 text-gray-500" />
+              )}
+            </div>
           </div>
 
           {expandedSection === 'reconciliation' && (
