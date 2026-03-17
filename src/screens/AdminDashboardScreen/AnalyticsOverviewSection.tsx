@@ -1,5 +1,5 @@
 import { useState, useEffect } from 'react';
-import { Users, Music, Play, DollarSign, TrendingUp, AlertTriangle, ArrowUpRight, ArrowDownRight, Coins } from 'lucide-react';
+import { Users, Music, Play, DollarSign, TrendingUp, AlertTriangle, ArrowUpRight, Coins } from 'lucide-react';
 import { supabase } from '../../lib/supabase';
 import { format } from 'date-fns';
 import {
@@ -17,12 +17,6 @@ import {
   Cell,
   Legend,
 } from 'recharts';
-
-const BRAND_COLORS = {
-  primary: '#309605',
-  primaryLight: '#f0fdf4',
-  primaryMid: '#3ba208',
-};
 
 const CHART_COLORS = ['#309605', '#60a5fa', '#f472b6', '#facc15', '#fb923c', '#a3e635'];
 
@@ -73,47 +67,40 @@ export const AnalyticsOverviewSection = (): JSX.Element => {
         { count: newUsersToday },
         { count: totalContent },
         { count: newContentToday },
-        { data: playsData },
-        { data: videoPlaysData },
+        { data: overviewTotals },
         { count: songPlaysToday },
         { count: videoPlaysToday },
-        { data: earningsData },
-        { data: withdrawalsData },
-        { data: treatWalletsData },
-        { data: treatPaymentsData },
-        { data: curatorEarningsData },
       ] = await Promise.all([
         supabase.from('users').select('*', { count: 'exact', head: true }),
         supabase.from('users').select('*', { count: 'exact', head: true }).gte('created_at', todayStr),
         supabase.from('content_uploads').select('*', { count: 'exact', head: true }),
         supabase.from('content_uploads').select('*', { count: 'exact', head: true }).gte('created_at', todayStr),
-        supabase.from('songs').select('play_count'),
-        supabase.from('content_uploads').select('play_count').in('content_type', ['video', 'short_clip']),
+        supabase.rpc('admin_get_analytics_overview_totals'),
         supabase.from('listening_history').select('*', { count: 'exact', head: true }).gte('listened_at', todayStr),
         supabase.from('video_playback_history').select('*', { count: 'exact', head: true }).gte('watched_at', todayStr),
-        supabase.from('users').select('total_earnings'),
-        supabase.from('withdrawal_requests').select('amount').in('status', ['approved', 'completed']),
-        supabase.from('treat_wallets').select('total_earned, balance'),
-        supabase.from('treat_payments').select('amount_usd').eq('status', 'completed'),
-        supabase.from('curator_earnings').select('amount'),
       ]);
 
-      const songPlays = playsData?.reduce((s, r) => s + (r.play_count || 0), 0) || 0;
-      const videoPlays = videoPlaysData?.reduce((s, r) => s + (r.play_count || 0), 0) || 0;
-      const netEarningsUSD = earningsData?.reduce((s, r) => s + (r.total_earnings || 0), 0) || 0;
-      const totalWithdrawnUSD = withdrawalsData?.reduce((s, r) => s + (r.amount || 0), 0) || 0;
+      if (overviewTotals?.error) throw new Error(overviewTotals.error);
+
+      const songPlays = Number(overviewTotals?.song_plays || 0);
+      const videoPlays = Number(overviewTotals?.video_plays || 0);
+
+      const usdEarnings = overviewTotals?.usd_earnings || {};
+      const netEarningsUSD = Number(usdEarnings.net_usd || 0);
+      const totalWithdrawnUSD = Number(usdEarnings.withdrawn_usd || 0);
+      const totalEarningsUSD = Number(usdEarnings.gross_usd || (netEarningsUSD + totalWithdrawnUSD));
 
       setStats({
         totalUsers: totalUsers || 0,
         totalContent: totalContent || 0,
         totalPlays: songPlays + videoPlays,
-        totalEarningsUSD: netEarningsUSD + totalWithdrawnUSD,
+        totalEarningsUSD,
         totalWithdrawnUSD,
         netEarningsUSD,
-        totalTreatEarnings: treatWalletsData?.reduce((s, r) => s + (r.total_earned || 0), 0) || 0,
-        totalTreatRevenueUSD: treatPaymentsData?.reduce((s, r) => s + (r.amount_usd || 0), 0) || 0,
-        treatWalletBalance: treatWalletsData?.reduce((s, r) => s + (r.balance || 0), 0) || 0,
-        curatorEarnings: curatorEarningsData?.reduce((s, r) => s + (r.amount || 0), 0) || 0,
+        totalTreatEarnings: Number(overviewTotals?.total_treat_earnings || 0),
+        totalTreatRevenueUSD: Number(overviewTotals?.total_treat_revenue_usd || 0),
+        treatWalletBalance: Number(overviewTotals?.treat_wallet_balance || 0),
+        curatorEarnings: Number(overviewTotals?.curator_earnings || 0),
         newUsersToday: newUsersToday || 0,
         newContentToday: newContentToday || 0,
         playsToday: (songPlaysToday || 0) + (videoPlaysToday || 0),
@@ -379,7 +366,6 @@ export const AnalyticsOverviewSection = (): JSX.Element => {
           icon={DollarSign}
           iconBg="bg-amber-50"
           iconColor="text-amber-500"
-          sub={"Total earned by users"}
         />
       </div>
 
@@ -402,7 +388,6 @@ export const AnalyticsOverviewSection = (): JSX.Element => {
           icon={TrendingUp}
           iconBg="bg-red-50"
           iconColor="text-red-400"
-          sub={"Paid out to users"}
         />
         <StatCard
           title="Treat Revenue (USD)"
@@ -411,7 +396,6 @@ export const AnalyticsOverviewSection = (): JSX.Element => {
           icon={DollarSign}
           iconBg="bg-sky-50"
           iconColor="text-sky-500"
-          sub={"From Treat purchases"}
         />
         <StatCard
           title="Treat Balance"
@@ -420,7 +404,6 @@ export const AnalyticsOverviewSection = (): JSX.Element => {
           icon={Coins}
           iconBg="bg-orange-50"
           iconColor="text-orange-500"
-          sub={"Across all wallets"}
         />
       </div>
 
