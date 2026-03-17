@@ -1,5 +1,5 @@
 import { useState, useEffect } from 'react';
-import { Plus, Trash2, Edit2, Eye, EyeOff, ExternalLink, TrendingUp, CreditCard } from 'lucide-react';
+import { Plus, Trash2, Edit2, Eye, EyeOff, ExternalLink, TrendingUp, CreditCard, Upload, X } from 'lucide-react';
 import { supabase } from '../../lib/supabase';
 import type { NativeAdCard } from '../../lib/nativeAdService';
 import { LoadingLogo } from '../../components/LoadingLogo';
@@ -12,6 +12,8 @@ export const NativeAdsSection = (): JSX.Element => {
   const [editingAd, setEditingAd] = useState<NativeAdCard | null>(null);
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [formSuccess, setFormSuccess] = useState<string | null>(null);
+  const [selectedFile, setSelectedFile] = useState<File | null>(null);
+  const [previewUrl, setPreviewUrl] = useState<string | null>(null);
 
   const [formData, setFormData] = useState({
     title: '',
@@ -52,6 +54,60 @@ export const NativeAdsSection = (): JSX.Element => {
     }
   };
 
+  const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+
+    const allowedTypes = ['image/jpeg', 'image/png', 'image/webp', 'image/jpg', 'video/mp4', 'video/webm', 'video/quicktime'];
+    if (!allowedTypes.includes(file.type)) {
+      setError('Please select a JPEG, PNG, WebP image or MP4/WebM video (max 20MB)');
+      return;
+    }
+
+    if (file.size > 20 * 1024 * 1024) {
+      setError('File size must be less than 20MB');
+      return;
+    }
+
+    setSelectedFile(file);
+    setError(null);
+    if (previewUrl && previewUrl.startsWith('blob:')) {
+      URL.revokeObjectURL(previewUrl);
+    }
+    setPreviewUrl(URL.createObjectURL(file));
+  };
+
+  const uploadMedia = async (): Promise<string> => {
+    if (!selectedFile) {
+      if (editingAd?.image_url) return editingAd.image_url;
+      throw new Error('Ad media file is required');
+    }
+
+    const { data: { session }, error: sessionError } = await supabase.auth.getSession();
+    if (sessionError || !session) {
+      throw new Error('Authentication session expired. Please sign in again.');
+    }
+
+    const userId = session.user.id;
+    const ext = selectedFile.name.split('.').pop() || 'bin';
+    const path = `${userId}/native-ads/ad-${Date.now()}.${ext}`;
+
+    const { error: uploadError } = await supabase.storage
+      .from('thumbnails')
+      .upload(path, selectedFile, {
+        cacheControl: '3600',
+        upsert: false,
+        duplex: 'half'
+      });
+
+    if (uploadError) {
+      throw new Error(`Failed to upload media: ${uploadError.message}`);
+    }
+
+    const { data: { publicUrl } } = supabase.storage.from('thumbnails').getPublicUrl(path);
+    return publicUrl;
+  };
+
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setIsSubmitting(true);
@@ -59,10 +115,12 @@ export const NativeAdsSection = (): JSX.Element => {
     setError(null);
 
     try {
+      const mediaUrl = await uploadMedia();
+
       const adData = {
         title: formData.title,
         description: formData.description || null,
-        image_url: formData.image_url,
+        image_url: mediaUrl,
         click_url: formData.click_url,
         advertiser_name: formData.advertiser_name,
         placement_type: formData.placement_type,
@@ -123,6 +181,8 @@ export const NativeAdsSection = (): JSX.Element => {
       expires_at: ad.expires_at ? new Date(ad.expires_at).toISOString().split('T')[0] : ''
     });
     setShowForm(true);
+    setSelectedFile(null);
+    setPreviewUrl(ad.image_url);
   };
 
   const handleToggleActive = async (ad: NativeAdCard) => {
@@ -175,6 +235,11 @@ export const NativeAdsSection = (): JSX.Element => {
     setShowForm(false);
     setFormSuccess(null);
     setError(null);
+    setSelectedFile(null);
+    if (previewUrl && previewUrl.startsWith('blob:')) {
+      URL.revokeObjectURL(previewUrl);
+    }
+    setPreviewUrl(null);
   };
 
   const calculateCTR = (ad: NativeAdCard): string => {
@@ -227,74 +292,122 @@ export const NativeAdsSection = (): JSX.Element => {
 
       {/* Form */}
       {showForm && (
-        <form onSubmit={handleSubmit} className="bg-white/5 rounded-lg p-6 space-y-4">
-          <h3 className="text-lg font-semibold text-white mb-4">
+        <form onSubmit={handleSubmit} className="bg-white rounded-lg p-6 space-y-4 border border-gray-100 shadow-sm">
+          <h3 className="text-lg font-semibold text-gray-900 mb-1">
             {editingAd ? 'Edit Native Ad' : 'Create Native Ad'}
           </h3>
+          <p className="text-xs text-gray-500 mb-3">
+            Upload creative, set targeting and choose where this card appears.
+          </p>
 
           <div className="grid grid-cols-2 gap-4">
             <div>
-              <label className="block text-sm font-medium text-gray-300 mb-2">
+              <label className="block text-sm font-medium text-gray-700 mb-2">
                 Ad Title *
               </label>
               <input
                 type="text"
                 value={formData.title}
                 onChange={(e) => setFormData({ ...formData, title: e.target.value })}
-                className="w-full px-3 py-2 bg-white/10 border border-white/20 rounded-lg text-white"
+                className="w-full px-3 py-2 bg-white border border-gray-200 rounded-lg text-sm text-gray-900 focus:outline-none focus:ring-2 focus:ring-[#309605]/70 focus:border-[#309605]"
                 required
               />
             </div>
 
             <div>
-              <label className="block text-sm font-medium text-gray-300 mb-2">
+              <label className="block text-sm font-medium text-gray-700 mb-2">
                 Advertiser Name *
               </label>
               <input
                 type="text"
                 value={formData.advertiser_name}
                 onChange={(e) => setFormData({ ...formData, advertiser_name: e.target.value })}
-                className="w-full px-3 py-2 bg-white/10 border border-white/20 rounded-lg text-white"
+                className="w-full px-3 py-2 bg-white border border-gray-200 rounded-lg text-sm text-gray-900 focus:outline-none focus:ring-2 focus:ring-[#309605]/70 focus:border-[#309605]"
                 required
               />
             </div>
           </div>
 
           <div>
-            <label className="block text-sm font-medium text-gray-300 mb-2">
+            <label className="block text-sm font-medium text-gray-700 mb-2">
               Description
             </label>
             <textarea
               value={formData.description}
               onChange={(e) => setFormData({ ...formData, description: e.target.value })}
-              className="w-full px-3 py-2 bg-white/10 border border-white/20 rounded-lg text-white"
+              className="w-full px-3 py-2 bg-white border border-gray-200 rounded-lg text-sm text-gray-900 focus:outline-none focus:ring-2 focus:ring-[#309605]/70 focus:border-[#309605]"
               rows={2}
             />
           </div>
 
           <div className="grid grid-cols-2 gap-4">
             <div>
-              <label className="block text-sm font-medium text-gray-300 mb-2">
-                Image URL *
+              <label className="block text-sm font-medium text-gray-700 mb-2">
+                Ad Media (image or 10s video) *
               </label>
-              <input
-                type="url"
-                value={formData.image_url}
-                onChange={(e) => setFormData({ ...formData, image_url: e.target.value })}
-                className="w-full px-3 py-2 bg-white/10 border border-white/20 rounded-lg text-white"
-                required
-              />
+              {previewUrl ? (
+                <div className="space-y-2">
+                  <div className="relative rounded-lg overflow-hidden bg-white/10 h-32">
+                    {previewUrl.match(/\.(mp4|webm|mov)$/i) ? (
+                      <video
+                        src={previewUrl}
+                        className="w-full h-full object-cover"
+                        muted
+                        autoPlay
+                        loop
+                      />
+                    ) : (
+                      <img
+                        src={previewUrl}
+                        alt="Ad preview"
+                        className="w-full h-full object-cover"
+                      />
+                    )}
+                    <button
+                      type="button"
+                      className="absolute top-2 right-2 w-7 h-7 rounded-full bg-black/60 flex items-center justify-center"
+                      onClick={() => {
+                        setSelectedFile(null);
+                        if (previewUrl && previewUrl.startsWith('blob:')) {
+                          URL.revokeObjectURL(previewUrl);
+                        }
+                        setPreviewUrl(editingAd?.image_url ?? null);
+                      }}
+                    >
+                      <X className="w-4 h-4 text-white" />
+                    </button>
+                  </div>
+                </div>
+              ) : (
+                <div className="relative">
+                  <input
+                    id="native-ad-media"
+                    type="file"
+                    accept="image/jpeg,image/png,image/webp,image/jpg,video/mp4,video/webm,video/quicktime"
+                    className="hidden"
+                    onChange={handleFileChange}
+                  />
+                  <label
+                    htmlFor="native-ad-media"
+                    className="flex flex-col items-center justify-center w-full h-32 bg-gray-50 border border-dashed border-gray-300 rounded-lg cursor-pointer hover:border-gray-400 transition"
+                  >
+                    <Upload className="w-5 h-5 text-gray-600 mb-1" />
+                    <span className="text-xs text-gray-800">Upload image or 10s video</span>
+                    <span className="text-[11px] text-gray-500 mt-0.5">Max 20MB · MP4/WebM or JPG/PNG/WebP</span>
+                  </label>
+                </div>
+              )}
             </div>
 
             <div>
-              <label className="block text-sm font-medium text-gray-300 mb-2">
+              <label className="block text-sm font-medium text-gray-700 mb-2">
                 Click URL *
               </label>
               <input
                 type="url"
                 value={formData.click_url}
                 onChange={(e) => setFormData({ ...formData, click_url: e.target.value })}
-                className="w-full px-3 py-2 bg-white/10 border border-white/20 rounded-lg text-white"
+                className="w-full px-3 py-2 bg-white border border-gray-200 rounded-lg text-sm text-gray-900 focus:outline-none focus:ring-2 focus:ring-[#309605]/70 focus:border-[#309605]"
                 required
               />
             </div>
@@ -302,18 +415,19 @@ export const NativeAdsSection = (): JSX.Element => {
 
           <div className="grid grid-cols-3 xl:grid-cols-4 gap-4">
             <div>
-              <label className="block text-sm font-medium text-gray-300 mb-2">
+              <label className="block text-sm font-medium text-gray-700 mb-2">
                 Placement Type *
               </label>
               <select
                 value={formData.placement_type}
                 onChange={(e) => setFormData({ ...formData, placement_type: e.target.value })}
-                className="w-full px-3 py-2 bg-white/10 border border-white/20 rounded-lg text-white"
+                className="w-full px-3 py-2 bg-white border border-gray-200 rounded-lg text-sm text-gray-900 focus:outline-none focus:ring-2 focus:ring-[#309605]/70 focus:border-[#309605]"
                 required
               >
                 <option value="trending_near_you_grid">Trending Near You</option>
                 <option value="explore_grid">Explore Grid</option>
                 <option value="home_grid">Home Grid</option>
+                <option value="home_featured_banner">Home Featured Banner</option>
                 <option value="music_player">Music Player Screen</option>
                 <option value="album_player">Album Player Screen</option>
                 <option value="playlist_player">Playlist Player Screen</option>
@@ -321,7 +435,7 @@ export const NativeAdsSection = (): JSX.Element => {
             </div>
 
             <div>
-              <label className="block text-sm font-medium text-gray-300 mb-2">
+              <label className="block text-sm font-medium text-gray-700 mb-2">
                 Priority (1-10) *
               </label>
               <input
@@ -330,27 +444,27 @@ export const NativeAdsSection = (): JSX.Element => {
                 max="10"
                 value={formData.priority}
                 onChange={(e) => setFormData({ ...formData, priority: parseInt(e.target.value) })}
-                className="w-full px-3 py-2 bg-white/10 border border-white/20 rounded-lg text-white"
+                className="w-full px-3 py-2 bg-white border border-gray-200 rounded-lg text-sm text-gray-900 focus:outline-none focus:ring-2 focus:ring-[#309605]/70 focus:border-[#309605]"
                 required
               />
             </div>
 
             <div>
-              <label className="block text-sm font-medium text-gray-300 mb-2">
+              <label className="block text-sm font-medium text-gray-700 mb-2">
                 Expires At
               </label>
               <input
                 type="date"
                 value={formData.expires_at}
                 onChange={(e) => setFormData({ ...formData, expires_at: e.target.value })}
-                className="w-full px-3 py-2 bg-white/10 border border-white/20 rounded-lg text-white"
+                className="w-full px-3 py-2 bg-white border border-gray-200 rounded-lg text-sm text-gray-900 focus:outline-none focus:ring-2 focus:ring-[#309605]/70 focus:border-[#309605]"
               />
             </div>
           </div>
 
           <div className="grid grid-cols-2 gap-4">
             <div>
-              <label className="block text-sm font-medium text-gray-300 mb-2">
+              <label className="block text-sm font-medium text-gray-700 mb-2">
                 Target Countries (comma-separated codes)
               </label>
               <input
@@ -358,12 +472,12 @@ export const NativeAdsSection = (): JSX.Element => {
                 value={formData.target_countries}
                 onChange={(e) => setFormData({ ...formData, target_countries: e.target.value })}
                 placeholder="e.g., NG, US, GB"
-                className="w-full px-3 py-2 bg-white/10 border border-white/20 rounded-lg text-white"
+                className="w-full px-3 py-2 bg-white border border-gray-200 rounded-lg text-sm text-gray-900 focus:outline-none focus:ring-2 focus:ring-[#309605]/70 focus:border-[#309605]"
               />
             </div>
 
             <div>
-              <label className="block text-sm font-medium text-gray-300 mb-2">
+              <label className="block text-sm font-medium text-gray-700 mb-2">
                 Target Genres (comma-separated IDs)
               </label>
               <input
@@ -371,7 +485,7 @@ export const NativeAdsSection = (): JSX.Element => {
                 value={formData.target_genres}
                 onChange={(e) => setFormData({ ...formData, target_genres: e.target.value })}
                 placeholder="Leave empty for all genres"
-                className="w-full px-3 py-2 bg-white/10 border border-white/20 rounded-lg text-white"
+                className="w-full px-3 py-2 bg-white border border-gray-200 rounded-lg text-sm text-gray-900 focus:outline-none focus:ring-2 focus:ring-[#309605]/70 focus:border-[#309605]"
               />
             </div>
           </div>
@@ -384,7 +498,7 @@ export const NativeAdsSection = (): JSX.Element => {
               onChange={(e) => setFormData({ ...formData, is_active: e.target.checked })}
               className="w-4 h-4"
             />
-            <label htmlFor="is_active" className="text-sm text-gray-300">
+            <label htmlFor="is_active" className="text-sm text-gray-700">
               Active (show this ad)
             </label>
           </div>
@@ -393,14 +507,14 @@ export const NativeAdsSection = (): JSX.Element => {
             <button
               type="submit"
               disabled={isSubmitting}
-              className="px-6 py-2 bg-[#309605] hover:bg-[#3ba208] text-white rounded-lg transition-colors disabled:opacity-50"
+              className="px-6 py-2 bg-[#309605] hover:bg-[#3ba208] text-white rounded-lg transition-colors disabled:opacity-50 text-sm font-medium"
             >
               {isSubmitting ? 'Saving...' : editingAd ? 'Update Ad' : 'Create Ad'}
             </button>
             <button
               type="button"
               onClick={resetForm}
-              className="px-6 py-2 bg-white/10 hover:bg-white/20 text-white rounded-lg transition-colors"
+              className="px-6 py-2 bg-gray-100 hover:bg-gray-200 text-gray-800 rounded-lg transition-colors text-sm font-medium"
             >
               Cancel
             </button>
