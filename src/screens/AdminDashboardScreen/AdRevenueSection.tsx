@@ -73,6 +73,7 @@ interface AdMobApiConfig {
   account_name: string | null;
   auth_type: 'service_account' | 'oauth2';
   service_account_email: string | null;
+  credentials_encrypted?: string | null;
   auto_sync_enabled: boolean;
   sync_frequency_hours: number;
   last_sync_at: string | null;
@@ -140,7 +141,7 @@ export const AdRevenueSection = (): JSX.Element => {
 
   const [admobConfig, setAdmobConfig] = useState<AdMobApiConfig | null>(null);
   const [admobSyncHistory, setAdmobSyncHistory] = useState<AdMobSyncHistory[]>([]);
-  const [isLoadingAdmob, setIsLoadingAdmob] = useState(false);
+  const [_isLoadingAdmob, setIsLoadingAdmob] = useState(false);
   const [showAdmobSetup, setShowAdmobSetup] = useState(false);
   const [isSavingAdmob, setIsSavingAdmob] = useState(false);
   const [isSyncing, setIsSyncing] = useState(false);
@@ -669,18 +670,22 @@ export const AdRevenueSection = (): JSX.Element => {
       setError(null);
       setSuccess(null);
 
-      const { error } = await supabase
-        .from('ad_daily_revenue_input')
-        .update({ is_locked: true, locked_at: new Date().toISOString() })
-        .eq('id', id);
+      const { data, error } = await supabase.rpc('admin_lock_daily_revenue_entry', {
+        p_entry_id: id
+      });
 
       if (error) throw error;
 
-      setSuccess(`Revenue entry for ${date} has been locked`);
+      if (!data?.ok) {
+        setError(`Failed to lock revenue entry: ${data?.status || 'unknown_error'}`);
+        return;
+      }
+
+      setSuccess(`Revenue entry for ${date} has been locked (${data.status})`);
       fetchDailyRevenueInputs();
     } catch (err) {
       console.error('Error locking revenue entry:', err);
-      setError(err instanceof Error ? err.message : 'Failed to lock revenue entry');
+      setError((err as any)?.message || 'Failed to lock revenue entry');
     } finally {
       setLockingRevenueEntryId(null);
     }
