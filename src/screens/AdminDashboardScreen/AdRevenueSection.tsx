@@ -107,6 +107,20 @@ interface AdMobSyncHistory {
   created_at: string;
 }
 
+interface CreatorPoolPayoutHistoryRow {
+  revenue_date: string;
+  artist_id: string;
+  stage_name: string | null;
+  user_id: string;
+  user_display_name: string | null;
+  user_email: string | null;
+  impressions_attributed: number;
+  weight: number;
+  payout_usd: number;
+  balance_before_usd: number;
+  balance_after_usd: number;
+}
+
 export const AdRevenueSection = (): JSX.Element => {
   const [isLoading, setIsLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -125,6 +139,10 @@ export const AdRevenueSection = (): JSX.Element => {
   const [reconciliationLogs, setReconciliationLogs] = useState<ReconciliationLog[]>([]);
   const [isLoadingInputs, setIsLoadingInputs] = useState(false);
   const [isLoadingReconciliation, setIsLoadingReconciliation] = useState(false);
+
+  const [creatorPayoutTimeRange, setCreatorPayoutTimeRange] = useState<'today' | 'yesterday' | '7d' | '30d'>('7d');
+  const [isLoadingCreatorPayoutHistory, setIsLoadingCreatorPayoutHistory] = useState(false);
+  const [creatorPayoutHistory, setCreatorPayoutHistory] = useState<CreatorPoolPayoutHistoryRow[]>([]);
 
   const [showInputForm, setShowInputForm] = useState(false);
   const [isSubmittingInput, setIsSubmittingInput] = useState(false);
@@ -166,6 +184,10 @@ export const AdRevenueSection = (): JSX.Element => {
     fetchReconciliationLogs();
     fetchAdmobConfig();
   }, [timeRange]);
+
+  useEffect(() => {
+    fetchCreatorPayoutHistory();
+  }, [creatorPayoutTimeRange]);
 
   const fetchRevenueData = async () => {
     setIsLoading(true);
@@ -297,6 +319,59 @@ export const AdRevenueSection = (): JSX.Element => {
       console.error('Error fetching reconciliation logs:', err);
     } finally {
       setIsLoadingReconciliation(false);
+    }
+  };
+
+  const getDateRangeForCreatorHistory = (): { start: Date; end: Date } => {
+    const end = new Date();
+    const start = new Date(end);
+
+    // Use local dates but convert to YYYY-MM-DD (date columns are date-only)
+    switch (creatorPayoutTimeRange) {
+      case 'today':
+        // start = today
+        break;
+      case 'yesterday':
+        start.setDate(start.getDate() - 1);
+        end.setDate(end.getDate() - 1);
+        break;
+      case '7d':
+        start.setDate(start.getDate() - 6);
+        break;
+      case '30d':
+        start.setDate(start.getDate() - 29);
+        break;
+    }
+
+    start.setHours(0, 0, 0, 0);
+    end.setHours(0, 0, 0, 0);
+    return { start, end };
+  };
+
+  const toDateOnly = (d: Date): string => {
+    const yyyy = d.getFullYear();
+    const mm = String(d.getMonth() + 1).padStart(2, '0');
+    const dd = String(d.getDate()).padStart(2, '0');
+    return `${yyyy}-${mm}-${dd}`;
+  };
+
+  const fetchCreatorPayoutHistory = async () => {
+    setIsLoadingCreatorPayoutHistory(true);
+    try {
+      const { start, end } = getDateRangeForCreatorHistory();
+      const { data, error } = await supabase.rpc('admin_get_creator_pool_payout_history', {
+        p_start_date: toDateOnly(start),
+        p_end_date: toDateOnly(end)
+      });
+
+      if (error) throw error;
+      setCreatorPayoutHistory((data || []) as CreatorPoolPayoutHistoryRow[]);
+    } catch (err) {
+      console.error('Error fetching creator payout history:', err);
+      // Keep existing error UX patterns: show message but don't block the rest of the dashboard
+      setError(err instanceof Error ? err.message : 'Failed to load creator payout history');
+    } finally {
+      setIsLoadingCreatorPayoutHistory(false);
     }
   };
 
@@ -1592,6 +1667,111 @@ export const AdRevenueSection = (): JSX.Element => {
               ) : (
                 <div className="p-4 bg-gray-100 rounded-lg text-center">
                   <p className="text-gray-700">No daily revenue inputs recorded yet</p>
+                </div>
+              )}
+            </div>
+          )}
+        </div>
+
+        <div className="bg-white rounded-lg shadow overflow-hidden">
+          <div
+            className="flex items-center justify-between p-6 cursor-pointer"
+            onClick={() => setExpandedSection(expandedSection === 'creator_payouts' ? null : 'creator_payouts')}
+          >
+            <h3 className="text-lg font-semibold text-gray-900 flex items-center">
+              <DollarSign className="w-5 h-5 mr-2 text-purple-600" />
+              Creator Pool Payout History
+            </h3>
+            <div className="flex items-center gap-3">
+              <div className="flex bg-white rounded-lg shadow-sm p-1 border border-gray-200">
+                <button
+                  type="button"
+                  onClick={(e) => { e.stopPropagation(); setCreatorPayoutTimeRange('today'); }}
+                  className={`px-3 py-1 rounded-md text-xs ${
+                    creatorPayoutTimeRange === 'today' ? 'bg-[#309605] text-white' : 'text-gray-700 hover:bg-gray-100'
+                  }`}
+                >
+                  Today
+                </button>
+                <button
+                  type="button"
+                  onClick={(e) => { e.stopPropagation(); setCreatorPayoutTimeRange('yesterday'); }}
+                  className={`px-3 py-1 rounded-md text-xs ${
+                    creatorPayoutTimeRange === 'yesterday' ? 'bg-[#309605] text-white' : 'text-gray-700 hover:bg-gray-100'
+                  }`}
+                >
+                  Yesterday
+                </button>
+                <button
+                  type="button"
+                  onClick={(e) => { e.stopPropagation(); setCreatorPayoutTimeRange('7d'); }}
+                  className={`px-3 py-1 rounded-md text-xs ${
+                    creatorPayoutTimeRange === '7d' ? 'bg-[#309605] text-white' : 'text-gray-700 hover:bg-gray-100'
+                  }`}
+                >
+                  7 Days
+                </button>
+                <button
+                  type="button"
+                  onClick={(e) => { e.stopPropagation(); setCreatorPayoutTimeRange('30d'); }}
+                  className={`px-3 py-1 rounded-md text-xs ${
+                    creatorPayoutTimeRange === '30d' ? 'bg-[#309605] text-white' : 'text-gray-700 hover:bg-gray-100'
+                  }`}
+                >
+                  30 Days
+                </button>
+              </div>
+              {expandedSection === 'creator_payouts' ? (
+                <ChevronUp className="w-5 h-5 text-gray-500" />
+              ) : (
+                <ChevronDown className="w-5 h-5 text-gray-500" />
+              )}
+            </div>
+          </div>
+
+          {expandedSection === 'creator_payouts' && (
+            <div className="p-6 pt-0 border-t border-gray-100">
+              {isLoadingCreatorPayoutHistory ? (
+                <div className="flex items-center justify-center py-8">
+                  {null}
+                </div>
+              ) : creatorPayoutHistory.length > 0 ? (
+                <div className="overflow-x-auto">
+                  <table className="w-full border-collapse">
+                    <thead>
+                      <tr className="bg-gray-100 text-left">
+                        <th className="p-3 text-gray-700 font-medium">Date</th>
+                        <th className="p-3 text-gray-700 font-medium">Artist</th>
+                        <th className="p-3 text-gray-700 font-medium">Impressions</th>
+                        <th className="p-3 text-gray-700 font-medium">Weight</th>
+                        <th className="p-3 text-gray-700 font-medium">Payout</th>
+                        <th className="p-3 text-gray-700 font-medium">Balance Before</th>
+                        <th className="p-3 text-gray-700 font-medium">Balance After</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {creatorPayoutHistory.map((row, idx) => (
+                        <tr key={`${row.revenue_date}-${row.artist_id}-${row.user_id}-${idx}`} className="border-b border-gray-200 hover:bg-gray-50">
+                          <td className="p-3 text-gray-700 font-medium">{formatDate(row.revenue_date)}</td>
+                          <td className="p-3 text-gray-900">
+                            <div className="flex flex-col">
+                              <span className="font-medium">{row.stage_name || 'Unknown Artist'}</span>
+                              <span className="text-xs text-gray-500">{row.user_display_name || row.user_email || row.user_id}</span>
+                            </div>
+                          </td>
+                          <td className="p-3 text-gray-700">{row.impressions_attributed ?? 0}</td>
+                          <td className="p-3 text-gray-700">{Number(row.weight || 0).toFixed(6)}</td>
+                          <td className="p-3 text-green-700 font-semibold">{formatCurrency(Number(row.payout_usd || 0))}</td>
+                          <td className="p-3 text-gray-700">{formatCurrency(Number(row.balance_before_usd || 0))}</td>
+                          <td className="p-3 text-gray-900 font-medium">{formatCurrency(Number(row.balance_after_usd || 0))}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              ) : (
+                <div className="p-4 bg-gray-100 rounded-lg text-center">
+                  <p className="text-gray-700">No creator payouts found for this period</p>
                 </div>
               )}
             </div>
