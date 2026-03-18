@@ -1,18 +1,18 @@
-import { StrictMode, useState, useEffect } from "react";
+import React, { StrictMode, useState, useEffect, useRef } from "react";
 import { createRoot } from "react-dom/client";
-import { BrowserRouter, Routes, Route, useLocation, useNavigate, Navigate } from "react-router-dom";
+import { BrowserRouter, Routes, Route, useLocation, useNavigate } from "react-router-dom";
 import { lazy, Suspense } from "react";
 import "./index.css";
 import "./lib/preloader";
 import { supabase, refreshSessionIfNeeded } from "./lib/supabase";
+import { logger } from "./lib/logger";
 import { admobService } from "./lib/admobService";
 import { appInitializer } from "./lib/appInitializer";
+import { shouldSkipBackgroundPrefetch } from "./lib/networkAwareConfig";
+import { applyStatusBarTheme, subscribeStatusBarToSystemTheme } from "./lib/statusBarTheme";
 import { App as CapacitorApp } from "@capacitor/app";
 import { Capacitor } from "@capacitor/core";
-import { BUILD_TARGET, isWebTarget } from "./lib/buildTarget";
-import { webAdService } from "./lib/webAdService";
-import { WebAdBanner } from "./components/WebAdBanner";
-import { WebAdSidebar } from "./components/WebAdSidebar";
+import { BUILD_TARGET } from "./lib/buildTarget";
 import { HomePlayer } from "./screens/HomePlayer";
 import { NavigationBarSection } from "./screens/HomePlayer/sections/NavigationBarSection/NavigationBarSection";
 import { AuthModal } from "./components/AuthModal";
@@ -26,6 +26,10 @@ import { UploadProvider } from "./contexts/UploadContext";
 import { AuthProvider, useAuth } from "./contexts/AuthContext";
 import { SplashScreen } from "./components/SplashScreen";
 import UploadProgressModal from "./components/UploadProgressModal";
+import { VideoPlayerErrorBoundary } from "./components/VideoPlayerErrorBoundary";
+import { ScreenErrorBoundary } from "./components/ScreenErrorBoundary";
+import { useAdPlacement } from "./hooks/useAdPlacement";
+import { BannerAdPosition } from "@capacitor-community/admob";
 
 // Lazy load screens for better performance
 const ExploreScreen = lazy(() => import("./screens/ExploreScreen").then(module => ({ default: module.ExploreScreen })));
@@ -36,20 +40,9 @@ const TreatScreen = lazy(() => import("./screens/TreatScreen").then(module => ({
 const PublicProfileScreen = lazy(() => import("./screens/PublicProfileScreen").then(module => ({ default: module.PublicProfileScreen })));
 const AlbumPlayerScreen = lazy(() => import("./screens/AlbumPlayerScreen").then(module => ({ default: module.AlbumPlayerScreen })));
 
-// Admin screens - Always load for web environment (check at runtime, not build time)
-const AdminDashboardScreen = lazy(() => import("./screens/AdminDashboardScreen"));
-const AdminLoginScreen = lazy(() => import("./screens/AdminLoginScreen").then(module => ({ default: module.AdminLoginScreen })));
-
-// Root redirect component - redirects to admin for web builds, shows HomePlayer for mobile
-const RootRedirect = ({ onOpenMusicPlayer, onFormVisibilityChange }: { onOpenMusicPlayer: any; onFormVisibilityChange: any }) => {
-  const isWebBuild = BUILD_TARGET === 'web' || !Capacitor.isNativePlatform();
-
-  if (isWebBuild) {
-    return <Navigate to="/admin" replace />;
-  }
-
-  return <HomePlayer onOpenMusicPlayer={onOpenMusicPlayer} onFormVisibilityChange={onFormVisibilityChange} />;
-};
+// Admin screens - Only load for web builds
+const AdminDashboardScreen = BUILD_TARGET === 'web' ? lazy(() => import("./screens/AdminDashboardScreen")) : null;
+const AdminLoginScreen = BUILD_TARGET === 'web' ? lazy(() => import("./screens/AdminLoginScreen").then(module => ({ default: module.AdminLoginScreen }))) : null;
 
 const TrendingViewAllScreen = lazy(() => import("./screens/TrendingViewAllScreen").then(module => ({ default: module.TrendingViewAllScreen })));
 const TrendingNearYouViewAllScreen = lazy(() => import("./screens/TrendingNearYouViewAllScreen").then(module => ({ default: module.TrendingNearYouViewAllScreen })));
@@ -80,6 +73,44 @@ const MoodDiscoveryScreen = lazy(() => import("./screens/MoodDiscoveryScreen").t
 const GenreSongsScreen = lazy(() => import("./screens/GenreSongsScreen").then(module => ({ default: module.GenreSongsScreen })));
 const CollaborateScreen = lazy(() => import("./screens/CollaborateScreen").then(module => ({ default: module.CollaborateScreen })));
 const CollaborationInboxScreen = lazy(() => import("./screens/CollaborationInboxScreen").then(module => ({ default: module.CollaborationInboxScreen })));
+const AuthCallbackScreen = lazy(() => import("./screens/AuthCallbackScreen/AuthCallbackScreen").then(module => ({ default: module.AuthCallbackScreen })));
+const ResetPasswordScreen = lazy(() => import("./screens/ResetPasswordScreen/ResetPasswordScreen").then(module => ({ default: module.ResetPasswordScreen })));
+const BlogIndexScreen = lazy(() => import("./screens/BlogIndexScreen/BlogIndexScreen").then(module => ({ default: module.BlogIndexScreen })));
+const BlogPostScreen = lazy(() => import("./screens/BlogPostScreen/BlogPostScreen").then(module => ({ default: module.BlogPostScreen })));
+
+// Root error boundary: if the app tree throws after splash, show a visible screen instead of black
+class RootErrorBoundary extends React.Component<{ children: React.ReactNode }, { hasError: boolean; error?: Error }> {
+  state = { hasError: false as boolean, error: undefined as Error | undefined };
+
+  static getDerivedStateFromError(error: Error) {
+    return { hasError: true, error };
+  }
+
+  componentDidCatch(error: Error, errorInfo: React.ErrorInfo) {
+    logger.error('RootErrorBoundary: app tree error', error, errorInfo);
+  }
+
+  render() {
+    if (this.state.hasError) {
+      return (
+        <div className="fixed inset-0 z-[9999] flex flex-col items-center justify-center bg-gradient-to-b from-[#0a0a0a] via-[#0d0d0d] to-[#111111] text-white p-6">
+          <h1 className="text-xl font-semibold mb-2">Something went wrong</h1>
+          <p className="text-white/70 text-sm text-center max-w-sm mb-6">
+            {this.state.error?.message ?? 'The app encountered an error.'}
+          </p>
+          <button
+            type="button"
+            onClick={() => window.location.reload()}
+            className="px-6 py-3 bg-[#309605] hover:bg-[#3ba208] rounded-xl font-medium text-white"
+          >
+            Reload app
+          </button>
+        </div>
+      );
+    }
+    return this.props.children;
+  }
+}
 
 // Loading component for lazy-loaded screens - uses splash screen for consistency
 const ScreenLoader = () => (
@@ -91,7 +122,7 @@ const ScreenLoader = () => (
         className="w-32 h-32 object-contain drop-shadow-2xl"
         style={{ animation: 'breathe 3s ease-in-out infinite' }}
       />
-      <div className="absolute inset-0 -z-10 blur-3xl opacity-30 bg-[#00ad74] scale-75 animate-pulse" />
+      <div className="absolute inset-0 -z-10 blur-3xl opacity-30 bg-white scale-75 animate-pulse" />
     </div>
     <style>{`
       @keyframes breathe {
@@ -138,6 +169,48 @@ function App() {
   
   const location = useLocation();
   const navigate = useNavigate();
+  const { showBanner, hideBanner, removeBanner, showInterstitial } = useAdPlacement('App');
+  const adCallbacksRef = useRef({ showBanner, hideBanner, removeBanner });
+  adCallbacksRef.current = { showBanner, hideBanner, removeBanner };
+
+  // Refresh main banner periodically so new ad creatives load more frequently (AdMob allows 30–60s).
+  const BANNER_REFRESH_INTERVAL_MS = 45 * 1000;
+  const hasTriggeredAppOpenAdRef = useRef(false);
+  const has15MinAdTriggeredRef = useRef(false);
+
+  // App-open interstitial (policy-safe): show once shortly after first screen, non-rewarded, respects global cooldown.
+  useEffect(() => {
+    if (!Capacitor.isNativePlatform() || hasTriggeredAppOpenAdRef.current) return;
+    const isHome = location.pathname === '/' || location.pathname === '' || location.pathname === '/home';
+    hasTriggeredAppOpenAdRef.current = true;
+    // Allow Home to rely on its own timing if needed; otherwise show a single interstitial on first open.
+    const shouldShow = true;
+    if (!shouldShow) return;
+
+    const t = setTimeout(() => {
+      showInterstitial('app_open_interstitial', {
+        contentType: 'general',
+      }).catch(() => {});
+    }, 2200); // After splash minDisplayTime so first screen is visible
+
+    return () => clearTimeout(t);
+  }, [showInterstitial, location.pathname]);
+
+  // Trigger additional interstitial after 15 minutes of app usage (AdMob policy-safe, non-rewarded).
+  useEffect(() => {
+    if (!Capacitor.isNativePlatform()) return;
+    if (has15MinAdTriggeredRef.current) return;
+
+    const timer = setTimeout(() => {
+      has15MinAdTriggeredRef.current = true;
+      showInterstitial('app_15min_interstitial', {
+        contentType: 'general',
+      }).catch(() => {});
+    }, 15 * 60 * 1000); // 15 minutes
+
+    return () => clearTimeout(timer);
+  }, [showInterstitial]);
+
   const isAdminRoute = location.pathname.startsWith('/admin');
   const isVideoRoute = location.pathname.startsWith('/video/');
   const isArtistRegistrationRoute = location.pathname === '/become-artist';
@@ -146,18 +219,24 @@ function App() {
   const isTermsRoute = location.pathname.startsWith('/terms/');
   const isSingleUploadRoute = location.pathname === '/upload/single';
   const isAlbumUploadRoute = location.pathname === '/upload/album';
+  // Full-screen player routes
+  const isAlbumPlayerRoute = location.pathname.startsWith('/album/');
+  const isPlaylistPlayerRoute = location.pathname.startsWith('/playlist/');
+  const isDailyMixPlayerRoute = location.pathname.startsWith('/daily-mix/');
 
-  // Restore playback state on app initialization
+  // Clear upload-modal flag when entering dedicated upload routes so it doesn’t stay true after going back (nav bar reappears)
   useEffect(() => {
-    const restoreState = async () => {
-      const { data: { session } } = await supabase.auth.getSession();
-      if (session?.user) {
-        await restorePlaybackState();
-      }
-    };
+    const onUploadRoute = location.pathname === '/upload/single' || location.pathname === '/upload/album';
+    const onCreateWithForm = location.pathname === '/create';
+    if (onUploadRoute) {
+      setIsUploadModalVisible(false);
+    } else if (!onCreateWithForm) {
+      setIsUploadModalVisible(false);
+    }
+  }, [location.pathname]);
 
-    restoreState();
-  }, []);
+  // On app initialization, do NOT auto-restore prior playback into the mini player.
+  // The mini player will remain hidden until the user actively plays a new song in this session.
 
   // Handle app lifecycle events to refresh session when app comes to foreground
   useEffect(() => {
@@ -172,13 +251,16 @@ function App() {
       try {
         // Listen for app state changes (foreground/background)
         appStateListener = await CapacitorApp.addListener('appStateChange', async ({ isActive }) => {
-          if (isActive) {
-            // App came to foreground - refresh session if needed
-            console.log('[App] App came to foreground, checking session...');
+            if (isActive) {
+            // Re-apply status bar visibility/style only (no setOverlaysWebView) so no layout reflow = no black band
+            setTimeout(() => {
+              applyStatusBarTheme({ onResume: true }).catch(() => {});
+            }, 100);
+            // Refresh session if needed
             try {
               await refreshSessionIfNeeded();
             } catch (error) {
-              console.error('[App] Error refreshing session on foreground:', error);
+              logger.error('App: Error refreshing session on foreground', error);
             }
           }
         });
@@ -188,11 +270,11 @@ function App() {
           try {
             await refreshSessionIfNeeded();
           } catch (error) {
-            console.error('[App] Error in periodic session refresh:', error);
+            logger.error('App: Error in periodic session refresh', error);
           }
         }, 10 * 60 * 1000); // 10 minutes
       } catch (error) {
-        console.error('[App] Error setting up app lifecycle listener:', error);
+        logger.error('App: Error setting up app lifecycle listener', error);
       }
     };
 
@@ -217,16 +299,12 @@ function App() {
 
       if (paymentStatus && reference && provider === 'flutterwave') {
         if (paymentStatus === 'success') {
-          console.log('Flutterwave payment callback received:', reference);
-          
           // Clear URL parameters
           window.history.replaceState({}, document.title, window.location.pathname);
           
           // Redirect to home screen
           navigate('/', { replace: true });
         } else if (paymentStatus === 'failed') {
-          console.log('Flutterwave payment failed:', reference);
-          
           // Clear URL parameters
           window.history.replaceState({}, document.title, window.location.pathname);
           
@@ -245,9 +323,41 @@ function App() {
       return;
     }
 
+    // Allowed origins for auth deep links (prevent open redirect / token leakage)
+    const authAllowedOrigins: string[] = (() => {
+      const list: string[] = [];
+      try {
+        const base = import.meta.env.VITE_PUBLIC_WEB_URL;
+        if (typeof base === 'string' && base.trim()) list.push(new URL(base.trim()).origin);
+      } catch {
+        // ignore invalid env URL
+      }
+      if (typeof window !== 'undefined' && window.location?.origin) list.push(window.location.origin);
+      return list;
+    })();
+
     // Process deep link URLs
     const handleDeepLink = (url: string) => {
       try {
+        // For auth-related flows we must preserve the full URL (including hash)
+        // so Supabase can read the token and create the correct session.
+        // Only allow our own origin to prevent redirecting to attacker-controlled URLs.
+        if (url.includes('/auth/callback') || url.includes('/reset-password')) {
+          try {
+            const parsed = new URL(url);
+            if (!authAllowedOrigins.length || !authAllowedOrigins.includes(parsed.origin)) {
+              logger.warn('Deep link auth URL rejected: origin not allowed', { origin: parsed.origin });
+              navigate('/', { replace: true });
+              return;
+            }
+          } catch {
+            navigate('/', { replace: true });
+            return;
+          }
+          window.location.href = url;
+          return;
+        }
+
         const urlObj = new URL(url);
 
         // Handle payment callbacks
@@ -258,8 +368,6 @@ function App() {
           const reference = params.get('ref') || params.get('reference');
 
           if (reference && provider === 'flutterwave') {
-            console.log(`Flutterwave payment ${paymentStatus}:`, reference);
-
             // Navigate to home - payment monitoring will detect completion
             navigate('/', { replace: true });
           }
@@ -278,7 +386,6 @@ function App() {
         for (const { pattern, route } of contentPatterns) {
           const match = urlObj.pathname.match(pattern);
           if (match && match[1]) {
-            console.log(`Deep link: Opening ${route}${match[1]}`);
             navigate(`${route}${match[1]}`, { replace: true });
             return;
           }
@@ -287,16 +394,14 @@ function App() {
         // Handle referral links
         const refParam = urlObj.searchParams.get('ref');
         if (refParam) {
-          console.log('Deep link: Opening referral link');
           navigate(`/?ref=${refParam}`, { replace: true });
           return;
         }
 
         // Default: navigate to home
-        console.log('Deep link: No specific handler, navigating to home');
         navigate('/', { replace: true });
       } catch (error) {
-        console.error('Error handling deep link:', error);
+        logger.error('Error handling deep link', error);
         navigate('/', { replace: true });
       }
     };
@@ -330,6 +435,7 @@ function App() {
   useEffect(() => {
     const params = new URLSearchParams(window.location.search);
     const refCode = params.get('ref');
+    const authMode = params.get('auth');
 
     if (refCode) {
       // Check if user is already logged in
@@ -343,6 +449,13 @@ function App() {
       };
 
       checkAuth();
+    }
+
+    if (authMode === 'login') {
+      // Explicit request to show the login modal (e.g. after email confirmation)
+      setShowGlobalAuthModal(true);
+      // Optional: clean the query param from the URL
+      window.history.replaceState({}, document.title, window.location.pathname);
     }
   }, [location.search]);
   
@@ -384,29 +497,39 @@ function App() {
     }
   }, [isVideoRoute, hideMiniPlayer]);
 
-  // Check if any form is currently active based on URL or form state
+  // Check if any form is active based on URL or form state,
+  // or if a full-screen player experience is active (music, album, playlist, video, daily-mix).
+  // On these screens we hide the bottom navigation bar so the dedicated UI + banner can use full height.
   const shouldHideNavigation = isArtistRegistrationRoute ||
                               isTransactionHistoryRoute ||
                               isTreatAnalyticsRoute ||
                               isTermsRoute ||
-                              isSingleUploadRoute ||
-                              isAlbumUploadRoute ||
                               showGlobalAuthModal ||
                               isUploadModalVisible ||
-                              isTippingModalVisible;
+                              isTippingModalVisible ||
+                              isFullPlayerVisible ||
+                              isAlbumPlayerActive ||
+                              isPlaylistPlayerActive ||
+                              isVideoRoute ||
+                              isAlbumPlayerRoute ||
+                              isPlaylistPlayerRoute ||
+                              isDailyMixPlayerRoute;
 
   // Determine when to hide mini player
-  // Hide when: video player is active OR treat modals are open OR genre modal is open OR any full player screen is active OR financial screens
+  // Hide when: video player is active OR treat modals are open OR genre modal is open OR any full player screen is active OR financial screens OR artist registration OR single upload form
   const shouldHideMiniPlayer = isVideoRoute ||
                               isTreatModalVisible ||
                               isGenreModalVisible ||
                               isFullPlayerVisible ||
                               isAlbumPlayerActive ||
                               isPlaylistPlayerActive ||
+                              isDailyMixPlayerRoute ||
                               isTreatAnalyticsModalVisible ||
                               isTreatTransactionsModalVisible ||
                               isTransactionHistoryRoute ||
-                              isTreatAnalyticsRoute;
+                              isTreatAnalyticsRoute ||
+                              isArtistRegistrationRoute ||
+                              isSingleUploadRoute;
 
   // Update body class when mini player visibility changes
   useEffect(() => {
@@ -421,19 +544,136 @@ function App() {
     };
   }, [isMiniPlayerVisible, shouldHideMiniPlayer]);
 
+  // Global bottom banner:
+  // - Show on main tab screens (when nav is visible and not in a full-screen player route).
+  // - Also show on ANY screen while music is actively playing (mini/full/album/playlist), per product requirement.
+  const isHome = location.pathname === '/' || location.pathname === '' || location.pathname === '/home';
+  const isExplore = location.pathname === '/explore';
+  const isLibrary = location.pathname === '/library';
+  const isCreate = location.pathname === '/create';
+  const isProfile = location.pathname === '/profile';
+  const isOnMessageThread = location.pathname.startsWith('/messages/');
+  const isBlogRoute = location.pathname === '/blog' || location.pathname.startsWith('/blog/');
+  const navVisible = !shouldHideNavigation && !isAdminRoute;
+  const fullScreenPlayerOpen =
+    isFullPlayerVisible ||
+    isAlbumPlayerActive ||
+    isPlaylistPlayerActive ||
+    isVideoRoute ||
+    isAlbumPlayerRoute ||
+    isPlaylistPlayerRoute ||
+    isDailyMixPlayerRoute;
+  const bannerDisabledByEnv = import.meta.env.VITE_DISABLE_BOTTOM_BANNER === 'true' || import.meta.env.VITE_DISABLE_BOTTOM_BANNER === '1';
+
+  // Banner never requires music to be playing.
+  // Full-screen players (music/album/playlist/video/daily-mix) use their own screen-level banners that show on mount.
+  const showMainBanner =
+    !bannerDisabledByEnv &&
+    !isOnMessageThread &&
+    !isBlogRoute &&
+    !isAdminRoute &&
+    !isVideoRoute &&
+    (navVisible && !fullScreenPlayerOpen);
+
+  // Approximate heights (in dp) for bottom navigation and mini player,
+  // used to position the native banner so it sits directly above them.
+  // Kept tight to avoid visible gap between banner and mini player.
+  const NAV_HEIGHT_DP = 64;
+  const MINI_PLAYER_HEIGHT_DP = 70;
+
+  // Only hide when we navigate TO a no-banner screen; never hide in cleanup so banner continues
+  // when moving between two banner screens (e.g. Explore → Library).
+  useEffect(() => {
+    const { showBanner: sb, hideBanner: hb } = adCallbacksRef.current;
+    try {
+      const isHome = location.pathname === '/' || location.pathname === '' || location.pathname === '/home';
+      const isBlog = location.pathname === '/blog' || location.pathname.startsWith('/blog/');
+      const isFullScreenPlayerRoute =
+        isFullPlayerVisible ||
+        isAlbumPlayerActive ||
+        isPlaylistPlayerActive ||
+        isVideoRoute ||
+        isAlbumPlayerRoute ||
+        isPlaylistPlayerRoute ||
+        isDailyMixPlayerRoute;
+
+      // Only hide when we're ON a no-banner screen (blog, or non-player route with no main banner).
+      if (isBlog) {
+        hb?.();
+        return;
+      }
+      if (!showMainBanner) {
+        if (!isFullScreenPlayerRoute) {
+          hb?.();
+        }
+        return;
+      }
+
+      // Show or refresh main banner; if already visible, native layer no-ops so banner continues displaying.
+      const margin =
+        navVisible
+          ? NAV_HEIGHT_DP + (isMiniPlayerVisible && !shouldHideMiniPlayer ? MINI_PLAYER_HEIGHT_DP : 0)
+          : 0;
+      sb?.('main_app_bottom_banner', BannerAdPosition.BOTTOM_CENTER, undefined, margin)?.catch(() => {});
+    } catch (_) {
+      // Banner logic must never crash the app
+    }
+    // No cleanup hide: when navigating between two banner screens we keep the banner visible.
+  }, [showMainBanner, location.pathname, fullScreenPlayerOpen]);
+
+  // When the mini player visibility changes while a main banner is active (e.g. on Home/Create/Library/Profile),
+  // re-position the banner so it always sits directly above nav+mini (if mini is showing) or just above nav
+  // when the mini player is closed.
+  const miniActiveForBanner = isMiniPlayerVisible && !shouldHideMiniPlayer;
+  useEffect(() => {
+    if (bannerDisabledByEnv) return;
+    if (!navVisible || !showMainBanner) return;
+    if (fullScreenPlayerOpen) return;
+
+    const { showBanner: sb, hideBanner: hb } = adCallbacksRef.current;
+    try {
+      const margin =
+        navVisible
+          ? NAV_HEIGHT_DP + (miniActiveForBanner ? MINI_PLAYER_HEIGHT_DP : 0)
+          : 0;
+      // Hide and immediately re-show so the native layer picks up the new margin safely.
+      hb?.();
+      sb?.('main_app_bottom_banner', BannerAdPosition.BOTTOM_CENTER, undefined, margin)?.catch(() => {});
+    } catch (_) {
+      // Reposition logic must never crash the app
+    }
+  }, [miniActiveForBanner, navVisible, showMainBanner, fullScreenPlayerOpen, bannerDisabledByEnv]);
+
+  // Refresh the main banner on an interval so new ad creatives display more frequently.
+  useEffect(() => {
+    if (!showMainBanner || fullScreenPlayerOpen || bannerDisabledByEnv) return;
+
+    const { showBanner: sb, removeBanner: rb } = adCallbacksRef.current;
+    const refresh = () => {
+      const margin =
+        navVisible
+          ? NAV_HEIGHT_DP + (miniActiveForBanner ? MINI_PLAYER_HEIGHT_DP : 0)
+          : 0;
+      rb?.();
+      // Small delay so native layer tears down before we re-show (avoids overlap).
+      setTimeout(() => {
+        sb?.('main_app_bottom_banner', BannerAdPosition.BOTTOM_CENTER, undefined, margin)?.catch(() => {});
+      }, 150);
+    };
+
+    const interval = setInterval(refresh, BANNER_REFRESH_INTERVAL_MS);
+    return () => clearInterval(interval);
+  }, [showMainBanner, fullScreenPlayerOpen, bannerDisabledByEnv, navVisible, miniActiveForBanner]);
+
   // Listen for auth state changes globally to clear any cached data
   // IMPORTANT: Callback must NOT be async to avoid deadlocks (per Supabase docs)
   useEffect(() => {
     const { data: { subscription } } = supabase.auth.onAuthStateChange((event, session) => {
-      console.log('[Auth] Global auth state change:', event, session ? 'has session' : 'no session');
-
       if (event === 'TOKEN_REFRESHED') {
-        console.log('[Auth] Token refreshed successfully');
         return;
       }
 
       if (event === 'SIGNED_OUT') {
-        console.log('[Auth] User signed out, clearing cached data');
         hideMiniPlayer();
         hideFullPlayer();
 
@@ -442,37 +682,32 @@ function App() {
           try {
             localStorage.removeItem(key);
           } catch (error) {
-            console.warn(`Failed to remove ${key} from localStorage:`, error);
+            logger.warn(`Failed to remove ${key} from localStorage`, error);
           }
         });
       } else if (event === 'SIGNED_IN' && session) {
-        console.log('[Auth] User signed in');
+        import('./lib/prefetchOnLogin').then(({ prefetchOnLogin: prefetch }) => prefetch(session.user.id));
 
         if (session.user.app_metadata?.provider === 'google') {
           (async () => {
             try {
-              const { data: _existingUser, error: userError } = await supabase
+              const { error: upsertError } = await supabase
                 .from('users')
-                .select('id')
-                .eq('id', session.user.id)
-                .single();
-
-              if (userError && userError.code === 'PGRST116') {
-                const { error: insertError } = await supabase
-                  .from('users')
-                  .insert({
+                .upsert(
+                  {
                     id: session.user.id,
                     email: session.user.email || '',
                     display_name: session.user.user_metadata?.full_name || session.user.user_metadata?.name || null,
                     role: 'listener',
-                  });
+                  },
+                  { onConflict: 'id', ignoreDuplicates: false }
+                );
 
-                if (insertError) {
-                  console.error('[Auth] Error creating user record for Google auth:', insertError);
-                }
+              if (upsertError) {
+                logger.error('Auth: Error creating/updating user record for Google auth', upsertError);
               }
             } catch (error) {
-              console.error('[Auth] Error handling Google sign-in:', error);
+              logger.error('Auth: Error handling Google sign-in', error);
             }
           })();
         }
@@ -492,37 +727,46 @@ function App() {
 
   const handleOpenMusicPlayer = (song: any, playlist: any[] = [], context: string = 'unknown') => {
     const songIndex = playlist.findIndex(s => s.id === song.id);
-    const currentIndex = songIndex !== -1 ? songIndex : 0;
-    playSong(song, false, playlist, currentIndex, context, null);
+    const nextIndex = songIndex !== -1 ? songIndex : 0;
+    playSong(song, false, playlist, nextIndex, context, null);
+  };
+
+  const handleOpenMusicPlayerFromHome = (song: any, playlist: any[] = [], context: string = 'unknown') => {
+    const songIndex = playlist.findIndex(s => s.id === song.id);
+    const nextIndex = songIndex !== -1 ? songIndex : 0;
+
+    // 1) Immediately open full MusicPlayerScreen and start playback
+    playSong(song, true, playlist, nextIndex, context, null);
+
+    // 2) Fire-and-forget interstitial when opening from Home.
+    //    Important: we do NOT mute app audio here so the song keeps playing under the ad.
+    showInterstitial('home_song_open_interstitial', {
+      contentId: song.id,
+      contentType: 'song',
+    }, { muteAppAudio: false }).catch(() => {
+      // Ad failures or cooldown skips must never affect playback
+    });
   };
 
   return (
-    <div className="bg-gradient-to-b from-[#0a0a0a] via-[#0d0d0d] to-[#111111] flex flex-col w-full min-h-screen min-h-[100dvh]">
-      {isWebTarget() && (
-        <WebAdBanner
-          placement="banner_top"
-          className="w-full"
-          style={{ minHeight: '90px' }}
-        />
-      )}
-
-      <div className="flex flex-row justify-center w-full flex-1">
-      {isAdminRoute ? (
-        // Admin routes - Full width for admin dashboard
+    <div className="bg-gradient-to-b from-[#0a0a0a] via-[#0d0d0d] to-[#111111] flex flex-row justify-center w-full min-h-screen min-h-[100dvh]">
+      {isAdminRoute && BUILD_TARGET === 'web' ? (
+        // Admin routes - Only available in web build
         <Suspense fallback={<ScreenLoader />}>
           <Routes>
-            <Route path="/admin" element={<AdminDashboardScreen />} />
-            <Route path="/admin/login" element={<AdminLoginScreen />} />
+            <Route path="/admin" element={AdminDashboardScreen ? <AdminDashboardScreen /> : <div>Admin not available</div>} />
+            <Route path="/admin/login" element={AdminLoginScreen ? <AdminLoginScreen /> : <div>Admin not available</div>} />
           </Routes>
         </Suspense>
       ) : (
-        <>
-          <WebAdSidebar side="left" />
-          {/* App routes - constrained width */}
-          <div className="bg-transparent w-full max-w-[390px] relative min-h-screen min-h-[100dvh]">
-          <Suspense fallback={<ScreenLoader />}>
-            <Routes>
-              <Route path="/" element={<RootRedirect onOpenMusicPlayer={handleOpenMusicPlayer} onFormVisibilityChange={setIsUploadModalVisible} />} />
+        // App routes - constrained width; fixed height so inner content can scroll
+        <div className="flex flex-col bg-transparent w-full max-w-[390px] relative h-[100dvh] min-h-0">
+          <div className="flex-1 flex flex-col min-h-0 overflow-hidden">
+            <Suspense fallback={<ScreenLoader />}>
+              <Routes>
+              <Route path="/" element={<HomePlayer onOpenMusicPlayer={handleOpenMusicPlayerFromHome} onFormVisibilityChange={setIsUploadModalVisible} />} />
+              <Route path="/auth/callback" element={<AuthCallbackScreen />} />
+              <Route path="/reset-password" element={<ResetPasswordScreen />} />
               <Route path="/explore" element={<ExploreScreen onFormVisibilityChange={setIsUploadModalVisible} onOpenMusicPlayer={handleOpenMusicPlayer} onModalVisibilityChange={setIsGenreModalVisible} />} />
               <Route path="/library" element={<LibraryScreen onFormVisibilityChange={setIsUploadModalVisible} onOpenMusicPlayer={handleOpenMusicPlayer} />} />
               <Route path="/create" element={<CreateScreen onFormVisibilityChange={setIsUploadModalVisible} />} />
@@ -533,6 +777,7 @@ function App() {
               <Route path="/playlist/:playlistId" element={<PlaylistPlayerScreen onPlayerVisibilityChange={setIsPlaylistPlayerActive} onOpenMusicPlayer={handleOpenMusicPlayer} />} />
               <Route path="/playlist-detail/:playlistId" element={<PlaylistDetailScreen />} />
               <Route path="/daily-mix/:mixId" element={<DailyMixPlayerScreen />} />
+              <Route path="/daily-mix/global/:mixId" element={<DailyMixPlayerScreen />} />
               <Route path="/treats" element={<TreatScreen onFormVisibilityChange={setIsTreatModalVisible} />} />
               <Route path="/promotion-center" element={<PromotionCenterScreen />} />
               <Route path="/daily-checkin" element={<DailyCheckinScreen />} />
@@ -542,14 +787,16 @@ function App() {
               <Route path="/must-watch" element={<MustWatchViewAllScreen />} />
               <Route path="/new-releases" element={<NewReleaseViewAllScreen onOpenMusicPlayer={handleOpenMusicPlayer} />} />
               <Route path="/trending-albums" element={<TrendingAlbumsViewAllScreen />} />
-              <Route path="/video/:videoId" element={<VideoPlayerScreen />} />
+              <Route path="/video/:videoId" element={<VideoPlayerErrorBoundary><VideoPlayerScreen /></VideoPlayerErrorBoundary>} />
               <Route path="/notifications" element={<NotificationScreen />} />
               <Route path="/withdraw-earnings" element={<WithdrawEarningsScreen />} />
               <Route path="/edit-profile" element={<EditProfileScreen />} />
               <Route path="/become-artist" element={<ArtistRegistrationScreen />} />
               <Route path="/transaction-history" element={<TransactionHistoryScreen />} />
               <Route path="/treat-analytics" element={<TreatAnalyticsScreen />} />
-              <Route path="/terms/:type" element={<TermsAndConditionsScreen />} />
+              <Route path="/terms/:type" element={<ScreenErrorBoundary fallbackMessage="The terms screen encountered an error. Use the back button to return."><TermsAndConditionsScreen /></ScreenErrorBoundary>} />
+              <Route path="/blog" element={<BlogIndexScreen />} />
+              <Route path="/blog/:slug" element={<BlogPostScreen />} />
               <Route path="/messages" element={<MessagesScreen />} />
               <Route path="/messages/:threadId" element={<MessageThreadScreen />} />
               <Route path="/upload/single" element={<SingleUploadScreen />} />
@@ -559,13 +806,11 @@ function App() {
               <Route path="/genre/:genreId" element={<GenreSongsScreen />} />
               <Route path="/collaborate" element={<CollaborateScreen />} />
               <Route path="/collaboration-inbox" element={<CollaborationInboxScreen />} />
-            </Routes>
-          </Suspense>
+              </Routes>
+            </Suspense>
+          </div>
         </div>
-          <WebAdSidebar side="right" />
-        </>
       )}
-      </div>
 
       {/* Bottom Navigation Bar - Positioned outside container for edge-to-edge rendering */}
       {!shouldHideNavigation && !isAdminRoute && <NavigationBarSection />}
@@ -579,7 +824,7 @@ function App() {
             song={currentSong}
             isVisible={isMiniPlayerVisible}
             isPlaying={isPlaying}
-            currentTime={currentTime}
+            oldCurrentTime={currentTime} // Use a different prop name to avoid confusion with internal state
             duration={duration}
             error={playerError}
             albumId={albumId}
@@ -623,14 +868,6 @@ function App() {
 
       {/* Upload Progress Modal */}
       <UploadProgressModal />
-
-      {isWebTarget() && (
-        <WebAdBanner
-          placement="banner_bottom"
-          className="w-full"
-          style={{ minHeight: '90px' }}
-        />
-      )}
     </div>
   );
 }
@@ -640,114 +877,160 @@ function AppWithRouter() {
   const [isAppReady, setIsAppReady] = useState(false);
 
   useEffect(() => {
-    console.log('[App] Component mounted, starting initialization...');
-
-    // Initialize app services in background
     const initializeApp = async () => {
       try {
         await appInitializer.initialize();
-        console.log('[App] Initialization complete');
       } catch (err) {
-        console.error('[App] Initialization error:', err);
-      }
-
-      // Initialize AdMob (native/app builds only)
-      try {
-        await admobService.initialize({
-          bannerAdId: import.meta.env.MODE === 'development' ? 'ca-app-pub-3940256099942544/6300978111' : undefined,
-          interstitialAdId: import.meta.env.MODE === 'development' ? 'ca-app-pub-3940256099942544/1033173712' : undefined,
-          rewardedAdId: import.meta.env.MODE === 'development' ? 'ca-app-pub-3940256099942544/5224354917' : undefined,
-          testMode: import.meta.env.MODE === 'development',
-        });
-        console.log('[App] AdMob initialized');
-      } catch (err) {
-        console.error('[App] AdMob initialization error:', err);
-      }
-
-      // Initialize web ads (web build only - Google AdSense + Monetag web)
-      if (isWebTarget()) {
-        try {
-          await webAdService.initialize();
-          console.log('[App] Web ads initialized');
-        } catch (err) {
-          console.warn('[App] Web ad initialization error:', err);
-        }
+        logger.error('App: Initialization error', err);
       }
 
       setIsAppReady(true);
+
+      // Defer AdMob init so the app UI shows first; if the native plugin crashes, the app has already rendered
+      const initAdMob = () => {
+        try {
+          admobService.initialize({
+            bannerAdId: import.meta.env.MODE === 'development' ? 'ca-app-pub-3940256099942544/6300978111' : import.meta.env.VITE_ADMOB_BANNER_ID,
+            interstitialAdId: import.meta.env.MODE === 'development' ? 'ca-app-pub-3940256099942544/1033173712' : import.meta.env.VITE_ADMOB_INTERSTITIAL_ID,
+            rewardedAdId: import.meta.env.MODE === 'development' ? 'ca-app-pub-3940256099942544/5224354917' : import.meta.env.VITE_ADMOB_REWARDED_ID,
+            testMode: import.meta.env.MODE === 'development',
+          }).catch((err) => {
+            logger.error('App: AdMob initialization error', err);
+          });
+        } catch (err) {
+          logger.error('App: AdMob initialization error (sync)', err);
+        }
+      };
+      if (typeof requestIdleCallback !== 'undefined') {
+        requestIdleCallback(initAdMob, { timeout: 1500 });
+      } else {
+        setTimeout(initAdMob, 400);
+      }
     };
 
     initializeApp();
   }, []);
 
+  // Mark native builds so CSS can apply safe-area tweaks
+  useEffect(() => {
+    try {
+      if (Capacitor.isNativePlatform()) {
+        document.body.classList.add('is-native');
+        return () => document.body.classList.remove('is-native');
+      }
+    } catch {
+      // ignore
+    }
+    return;
+  }, []);
+
+  // Apply status bar (white icons, visible) as soon as app mounts on native — don't wait for isAppReady
+  useEffect(() => {
+    try {
+      applyStatusBarTheme();
+    } catch (_) {
+      // Must not crash app if status bar API fails on some devices
+    }
+  }, []);
+
   const handleSplashFinished = () => {
     setShowSplash(false);
+    // Re-apply status bar after splash hides — Android can reset it; ensures white icons always
+    applyStatusBarTheme({ onResume: true }).catch(() => {});
   };
 
-  console.log('[App] Rendering full app...');
+  // Subscribe to system theme changes for status bar (native only)
+  useEffect(() => {
+    if (!isAppReady) return;
+    const unsubscribe = subscribeStatusBarToSystemTheme();
+    return unsubscribe;
+  }, [isAppReady]);
+
+  // Prefetch main tab screens when app is ready (skip on 2G to avoid competing with critical requests)
+  useEffect(() => {
+    if (!isAppReady || shouldSkipBackgroundPrefetch()) return;
+    const prefetchTabs = () => {
+      import("./screens/ExploreScreen").catch(() => {});
+      import("./screens/LibraryScreen").catch(() => {});
+      import("./screens/CreateScreen").catch(() => {});
+      import("./screens/ProfileScreen").catch(() => {});
+    };
+    const prefetchDetailScreens = () => {
+      import("./screens/AlbumPlayerScreen").catch(() => {});
+      import("./screens/PlaylistPlayerScreen").catch(() => {});
+      import("./screens/VideoPlayerScreen").catch(() => {});
+    };
+    if (typeof requestIdleCallback !== "undefined") {
+      requestIdleCallback(prefetchTabs, { timeout: 2500 });
+      requestIdleCallback(prefetchDetailScreens, { timeout: 5000 });
+    } else {
+      setTimeout(prefetchTabs, 1500);
+      setTimeout(prefetchDetailScreens, 4000);
+    }
+  }, [isAppReady]);
 
   return (
     <>
-      {showSplash && <SplashScreen onFinished={handleSplashFinished} minDisplayTime={4000} />}
+      {showSplash && <SplashScreen onFinished={handleSplashFinished} minDisplayTime={2000} appReady={isAppReady} />}
       <BrowserRouter>
-        <AuthProvider>
-          <AlertProvider>
-            <ConfirmProvider>
-              <HomeScreenDataProvider>
+        <RootErrorBoundary>
+          <AuthProvider>
+            <AlertProvider>
+              <ConfirmProvider>
+                <HomeScreenDataProvider>
                 <MusicPlayerProvider>
                   <UploadProvider>
                     <App />
                   </UploadProvider>
                 </MusicPlayerProvider>
               </HomeScreenDataProvider>
-            </ConfirmProvider>
-          </AlertProvider>
-        </AuthProvider>
+              </ConfirmProvider>
+            </AlertProvider>
+          </AuthProvider>
+        </RootErrorBoundary>
       </BrowserRouter>
     </>
   );
 }
 
-// Global error handler
+// Global error handlers — log and, where possible, prevent process exit
 window.addEventListener('error', (event) => {
-  console.error('[Global Error]', event.error);
-  console.error('[Global Error] Message:', event.message);
-  console.error('[Global Error] Stack:', event.error?.stack);
+  logger.error('Global error', event.error ?? event.message);
 });
 
 window.addEventListener('unhandledrejection', (event) => {
-  console.error('[Unhandled Promise Rejection]', event.reason);
+  logger.error('Unhandled promise rejection', event.reason);
+  event.preventDefault?.();
 });
 
-const appElement = document.getElementById("app") as HTMLElement;
+const appElement = document.getElementById("app");
 
-console.log('[Index] Script loaded, starting app mount...');
-console.log('[Index] Environment check:');
-console.log('[Index] - VITE_SUPABASE_URL:', import.meta.env.VITE_SUPABASE_URL ? 'set' : 'MISSING');
-console.log('[Index] - VITE_SUPABASE_ANON_KEY:', import.meta.env.VITE_SUPABASE_ANON_KEY ? 'set' : 'MISSING');
-
-try {
-  // Mount React app first - loader will be removed when app is ready
-  console.log('[Index] Mounting React app...');
-  createRoot(appElement).render(
-    <StrictMode>
-      <AppWithRouter />
-    </StrictMode>
-  );
-
-  console.log('[Index] React app mounted successfully');
-} catch (error) {
-  console.error('[Index] FATAL ERROR during app mount:', error);
-
-  // Show error to user
-  appElement.innerHTML = `
-    <div style="min-height: 100vh; display: flex; align-items: center; justify-content: center; flex-direction: column; background: #0a0a0a; color: white; padding: 20px; text-align: center;">
-      <h1 style="font-size: 24px; margin-bottom: 20px; color: #ff4444;">App Failed to Load</h1>
-      <p style="margin-bottom: 10px;">Error: ${error instanceof Error ? error.message : 'Unknown error'}</p>
-      <p style="color: #666; font-size: 14px;">Check the browser console (F12) for more details</p>
-      <button onclick="location.reload()" style="margin-top: 20px; padding: 10px 20px; background: #309605; color: white; border: none; border-radius: 8px; cursor: pointer; font-size: 16px;">
-        Reload Page
-      </button>
-    </div>
-  `;
+if (!appElement) {
+  document.body.innerHTML = '<div style="min-height:100vh;display:flex;align-items:center;justify-content:center;background:#0a0a0a;color:#fff;font-family:sans-serif;padding:20px;text-align:center;"><div><h1>App failed to start</h1><p>Root element #app not found.</p><button onclick="location.reload()" style="margin-top:16px;padding:10px 20px;background:#309605;color:#fff;border:none;border-radius:8px;cursor:pointer;">Reload</button></div></div>';
+} else {
+  try {
+    createRoot(appElement).render(
+      <StrictMode>
+        <AppWithRouter />
+      </StrictMode>
+    );
+  } catch (error) {
+    logger.error('FATAL: App mount failed', error);
+    const errMsg = error instanceof Error ? error.message : 'Unknown error';
+    const escaped = String(errMsg)
+      .replace(/&/g, '&amp;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;')
+      .replace(/"/g, '&quot;');
+    (appElement as HTMLElement).innerHTML = `
+      <div style="min-height: 100vh; display: flex; align-items: center; justify-content: center; flex-direction: column; background: #0a0a0a; color: white; padding: 20px; text-align: center;">
+        <h1 style="font-size: 24px; margin-bottom: 20px; color: #ff4444;">App Failed to Load</h1>
+        <p style="margin-bottom: 10px;">Error: ${escaped}</p>
+        <p style="color: #666; font-size: 14px;">Check the browser console (F12) for more details</p>
+        <button onclick="location.reload()" style="margin-top: 20px; padding: 10px 20px; background: #309605; color: white; border: none; border-radius: 8px; cursor: pointer; font-size: 16px;">
+          Reload Page
+        </button>
+      </div>
+    `;
+  }
 }
