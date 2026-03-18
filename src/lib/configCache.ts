@@ -148,6 +148,7 @@ export const CACHE_TTL = {
 // Cache keys
 export const CACHE_KEYS = {
   DAILY_MIX_CONFIG: 'daily_mix_config',
+  GLOBAL_DAILY_MIXES: 'global_daily_mixes',
   EXCHANGE_RATES: 'withdrawal_exchange_rates',
   MOOD_CATEGORIES: 'mood_categories',
   PAYMENT_CHANNELS: 'payment_channels',
