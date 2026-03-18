@@ -157,27 +157,18 @@ export const DailyMixManagerSection: React.FC = () => {
     setSuccessMessage(null);
 
     try {
-      const { data: { session } } = await supabase.auth.getSession();
-      if (!session) throw new Error('Not authenticated');
+      const { data, error } = await supabase.rpc('admin_enqueue_daily_mix_generation_now', {
+        p_force_refresh: true,
+      });
 
-      const response = await fetch(
-        `${import.meta.env.VITE_SUPABASE_URL}/functions/v1/generate-daily-mixes`,
-        {
-          method: 'POST',
-          headers: {
-            'Authorization': `Bearer ${session.access_token}`,
-            'Content-Type': 'application/json',
-          },
-        }
-      );
-
-      if (!response.ok) {
-        const errorData = await response.json();
-        throw new Error(errorData.error || 'Failed to generate mixes');
+      if (error) throw error;
+      if (!data?.ok) {
+        throw new Error(data?.error || 'Failed to enqueue daily mix generation');
       }
 
-      const result = await response.json();
-      setSuccessMessage(`Generated mixes for ${result.successful} users (${result.failed} failed)`);
+      setSuccessMessage(
+        `Enqueued ${data.enqueued_jobs || 0} daily mix generation job(s). Generation will run via the queue processor shortly.`
+      );
       await loadStats();
     } catch (err) {
       console.error('Error generating mixes:', err);
