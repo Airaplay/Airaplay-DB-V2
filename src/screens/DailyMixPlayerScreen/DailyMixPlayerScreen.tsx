@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useMemo } from 'react';
+import React, { useState, useEffect, useMemo, useRef } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import { ArrowLeft, Play, Music, Sparkles } from 'lucide-react';
 import { supabase } from '../../lib/supabase';
@@ -6,6 +6,11 @@ import { useAuth } from '../../contexts/AuthContext';
 import { useMusicPlayer } from '../../contexts/MusicPlayerContext';
 import { LazyImage } from '../../components/LazyImage';
 import { recordMixPlay } from '../../lib/dailyMixGenerator';
+import { getCreativeMixTitle } from '../../lib/dailyMixTitles';
+import { useAdPlacement } from '../../hooks/useAdPlacement';
+import { BannerAdPosition } from '@capacitor-community/admob';
+import { getNativeAdsForPlacement, NativeAdCard } from '../../lib/nativeAdService';
+import { PlayerStaticAdBanner } from '../../components/PlayerStaticAdBanner';
 
 interface DailyMix {
   id: string;
@@ -51,26 +56,42 @@ export const DailyMixPlayerScreen: React.FC = () => {
   const { mixId } = useParams<{ mixId: string }>();
   const navigate = useNavigate();
   const { user } = useAuth();
-  const { playSong, currentSong, isPlaying: contextIsPlaying } = useMusicPlayer();
+  const { playSong, currentSong, isPlaying: contextIsPlaying, playlistContext } = useMusicPlayer();
 
   const [mix, setMix] = useState<DailyMix | null>(null);
   const [isLoading, setIsLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [songs, setSongs] = useState<SongWithArtist[]>([]);
   const [isMiniPlayerActive, setIsMiniPlayerActive] = useState(false);
+  const [isGlobalMix, setIsGlobalMix] = useState(false);
+  const { showBanner, hideBanner, removeBanner, showRewarded, showInterstitial } = useAdPlacement('DailyMixPlayerScreen');
+  const hasShownBannerRef = useRef(false);
+  const bannerRetryTimeoutRef = useRef<number | null>(null);
+  const [showSongBonusPrompt, setShowSongBonusPrompt] = useState(false);
+  const [inlineAd, setInlineAd] = useState<NativeAdCard | null>(null);
+  const [showInlineAd, setShowInlineAd] = useState(false);
+  const nativeAdTimersRef = useRef<{ show?: number; hide?: number }>({});
+  const songsPlayedSinceInterstitialRef = useRef(0);
+  const interstitialTimeoutRef = useRef<number | null>(null);
 
   const displayTitle = useMemo(() => {
     if (!mix) return '';
+    let title = mix.title?.trim() || '';
+    // Replace legacy "Daily Mix N" or "Daily Mix N: ..." with creative title
+    if (/^Daily Mix \d+(:\s*.*)?$/i.test(title)) {
+      title = mix.genre_focus && mix.genre_focus !== 'Discovery'
+        ? `Your ${mix.genre_focus} Mix`
+        : getCreativeMixTitle(mix.mix_number);
+    }
+    if (title) return title;
     if (mix.genre_focus && mix.genre_focus !== 'Discovery') {
       return `Your ${mix.genre_focus} Mix`;
     }
-    if (mix.mood_focus) {
-      return `${mix.mood_focus} Vibes`;
-    }
+    if (mix.mood_focus) return `${mix.mood_focus} Vibes`;
     const uniqueArtists = [...new Set(songs.map(s => s.artist).filter(a => a && a !== 'Unknown Artist'))];
     if (uniqueArtists.length === 1) return `${uniqueArtists[0]} Radio`;
     if (uniqueArtists.length === 2) return `${uniqueArtists[0]} & ${uniqueArtists[1]}`;
-    if (uniqueArtists.length > 2) return `${uniqueArtists[0]} & Friends`;
+    if (uniqueArtists.length > 2) return getCreativeMixTitle(mix.mix_number);
     const hour = new Date().getHours();
     if (hour >= 5 && hour < 12) return 'Morning Mix';
     if (hour >= 12 && hour < 17) return 'Afternoon Mix';
@@ -79,10 +100,13 @@ export const DailyMixPlayerScreen: React.FC = () => {
   }, [mix, songs]);
 
   useEffect(() => {
-    if (mixId && user) {
-      loadMix();
+    if (mixId) {
+      // Check if this is a global mix route
+      const isGlobal = window.location.pathname.includes('/daily-mix/global/');
+      setIsGlobalMix(isGlobal);
+      loadMix(isGlobal);
     }
-  }, [mixId, user]);
+  }, [mixId]);
 
   useEffect(() => {
     const checkMiniPlayer = () => {
@@ -100,123 +124,371 @@ export const DailyMixPlayerScreen: React.FC = () => {
     return () => observer.disconnect();
   }, []);
 
-  const loadMix = async () => {
-    if (!mixId || !user) return;
+  // Bottom banner: shows on its own when DailyMixPlayer is open (no mini player or nav).
+  // Guarded by ref so StrictMode / re-renders don't spam the native plugin.
+  useEffect(() => {
+    if (hasShownBannerRef.current) return;
+    hasShownBannerRef.current = true;
+    const tryShow = () => {
+      showBanner('daily_mix_player_bottom_banner', BannerAdPosition.BOTTOM_CENTER, {
+        contentType: 'playlist',
+      }, 0).catch(() => {
+        if (bannerRetryTimeoutRef.current != null) return;
+        bannerRetryTimeoutRef.current = window.setTimeout(() => {
+          showBanner('daily_mix_player_bottom_banner', BannerAdPosition.BOTTOM_CENTER, {
+            contentType: 'playlist',
+          }, 0).catch(() => {});
+        }, 1200);
+      });
+    };
+    tryShow();
+    return () => {
+      hideBanner();
+      if (bannerRetryTimeoutRef.current != null) {
+        clearTimeout(bannerRetryTimeoutRef.current);
+        bannerRetryTimeoutRef.current = null;
+      }
+    };
+  }, [showBanner, hideBanner]);
+
+  // Auto interstitial: every 2 songs played in Daily Mix (trigger mid-way through the 2nd song).
+  useEffect(() => {
+    if (!mixId) return;
+    if (playlistContext !== `daily-mix-${mixId}`) return;
+    const s = currentSong;
+    if (!s?.id) return;
+
+    songsPlayedSinceInterstitialRef.current += 1;
+    const shouldTrigger = songsPlayedSinceInterstitialRef.current >= 2;
+    if (!shouldTrigger) return;
+    songsPlayedSinceInterstitialRef.current = 0;
+
+    if (interstitialTimeoutRef.current != null) {
+      window.clearTimeout(interstitialTimeoutRef.current);
+      interstitialTimeoutRef.current = null;
+    }
+
+    const durationSeconds = typeof s.duration === 'number' && s.duration > 0 ? s.duration : undefined;
+    const midMs = durationSeconds ? Math.max(12_000, Math.floor((durationSeconds * 1000) / 2)) : 30_000;
+
+    interstitialTimeoutRef.current = window.setTimeout(() => {
+      showInterstitial('daily_mix_midplay_interstitial', {
+        contentId: s.id,
+        contentType: 'song',
+      }, { muteAppAudio: true }).catch(() => {});
+    }, midMs);
+
+    return () => {
+      if (interstitialTimeoutRef.current != null) {
+        window.clearTimeout(interstitialTimeoutRef.current);
+        interstitialTimeoutRef.current = null;
+      }
+    };
+  }, [currentSong?.id, currentSong?.duration, mixId, playlistContext, showInterstitial]);
+
+  // Refresh banner in full-screen player so new ad creatives load more frequently.
+  const BANNER_REFRESH_MS = 30 * 1000;
+  useEffect(() => {
+    const refresh = () => {
+      removeBanner?.();
+      setTimeout(() => {
+        showBanner('daily_mix_player_bottom_banner', BannerAdPosition.BOTTOM_CENTER, {
+          contentType: 'playlist',
+        }, 0).catch(() => {});
+      }, 150);
+    };
+    const interval = setInterval(refresh, BANNER_REFRESH_MS);
+    return () => clearInterval(interval);
+  }, [showBanner, removeBanner]);
+
+  // Listen for global bonus events and surface a small user-initiated prompt.
+  useEffect(() => {
+    const handler = () => {
+      setShowSongBonusPrompt(true);
+    };
+    window.addEventListener('globalSongBonusAvailable', handler as EventListener);
+    return () => {
+      window.removeEventListener('globalSongBonusAvailable', handler as EventListener);
+    };
+  }, []);
+
+  // Load a single inline native ad for Daily Mix player
+  useEffect(() => {
+    let mounted = true;
+    (async () => {
+      try {
+        const ads = await getNativeAdsForPlacement('daily_mix_player', null, null, 1);
+        if (!mounted) return;
+        setInlineAd(ads[0] ?? null);
+      } catch {
+        if (!mounted) return;
+        setInlineAd(null);
+      }
+    })();
+    return () => {
+      mounted = false;
+    };
+  }, [mixId]);
+
+  // Delay-show the native ad (up to ~60s), then auto-hide after 30s.
+  useEffect(() => {
+    setShowInlineAd(false);
+    if (nativeAdTimersRef.current.show) window.clearTimeout(nativeAdTimersRef.current.show);
+    if (nativeAdTimersRef.current.hide) window.clearTimeout(nativeAdTimersRef.current.hide);
+    nativeAdTimersRef.current = {};
+
+    if (!inlineAd) return;
+
+    const minDelayMs = 5_000;
+    const maxDelayMs = 60_000;
+    const delayMs = Math.floor(minDelayMs + Math.random() * (maxDelayMs - minDelayMs));
+
+    nativeAdTimersRef.current.show = window.setTimeout(() => {
+      setShowInlineAd(true);
+      nativeAdTimersRef.current.hide = window.setTimeout(() => {
+        setShowInlineAd(false);
+      }, 30_000);
+    }, delayMs);
+
+    return () => {
+      if (nativeAdTimersRef.current.show) window.clearTimeout(nativeAdTimersRef.current.show);
+      if (nativeAdTimersRef.current.hide) window.clearTimeout(nativeAdTimersRef.current.hide);
+      nativeAdTimersRef.current = {};
+    };
+  }, [inlineAd, mixId]);
+
+  const loadMix = async (isGlobal: boolean) => {
+    if (!mixId) return;
 
     try {
       setIsLoading(true);
       setError(null);
 
-      const { data: mixData, error: mixError } = await supabase
-        .from('daily_mix_playlists')
-        .select('*')
-        .eq('id', mixId)
-        .eq('user_id', user.id)
-        .single();
+      if (isGlobal) {
+        // Load global mix (no auth required)
+        const { data: mixData, error: mixError } = await supabase
+          .from('global_daily_mix_playlists')
+          .select('*')
+          .eq('id', mixId)
+          .single();
 
-      if (mixError) throw mixError;
+        if (mixError) throw mixError;
 
-      // Use raw SQL to get tracks with artist names in one query
-      const { data: tracksData, error: tracksError } = await supabase.rpc('get_daily_mix_tracks_with_artists', {
-        p_mix_id: mixId
-      });
+        // Use raw SQL to get tracks with artist names in one query
+        const { data: tracksData, error: tracksError } = await supabase.rpc('get_global_daily_mix_tracks_with_artists', {
+          p_mix_id: mixId
+        });
 
-      if (tracksError) {
-        // Fallback to original method if function doesn't exist
-        console.log('Using fallback query method');
-        const { data: fallbackTracks, error: fallbackError } = await supabase
-          .from('daily_mix_tracks')
-          .select(`
-            song_id,
-            position,
-            explanation,
-            recommendation_type,
-            is_familiar,
-            songs (
-              id,
-              title,
-              artist_id,
-              cover_image_url,
-              duration_seconds,
-              audio_url,
-              play_count
-            )
-          `)
-          .eq('mix_id', mixId)
-          .order('position');
+        if (tracksError) {
+          // Fallback to original method if function doesn't exist
+          console.log('Using fallback query method for global mix');
+          const { data: fallbackTracks, error: fallbackError } = await supabase
+            .from('global_daily_mix_tracks')
+            .select(`
+              song_id,
+              position,
+              explanation,
+              songs (
+                id,
+                title,
+                artist_id,
+                cover_image_url,
+                duration_seconds,
+                audio_url,
+                play_count
+              )
+            `)
+            .eq('mix_id', mixId)
+            .order('position');
 
-        if (fallbackError) throw fallbackError;
+          if (fallbackError) throw fallbackError;
+
+          setMix({
+            ...mixData,
+            tracks: fallbackTracks || []
+          });
+
+          // Fetch artist names from artists table
+          const artistIds = [...new Set(fallbackTracks?.map(t => t.songs.artist_id).filter(Boolean) || [])];
+          const artistNames = new Map<string, string>();
+
+          if (artistIds.length > 0) {
+            const { data: artists } = await supabase
+              .from('artists')
+              .select('id, name')
+              .in('id', artistIds);
+
+            if (artists) {
+              artists.forEach(a => {
+                if (a.name) {
+                  artistNames.set(a.id, a.name);
+                }
+              });
+            }
+          }
+
+          const songsWithArtists: SongWithArtist[] = (fallbackTracks || []).map(t => {
+            const artistName = t.songs.artist_id
+              ? (artistNames.get(t.songs.artist_id) || 'Unknown Artist')
+              : 'Unknown Artist';
+
+            return {
+              id: t.songs.id,
+              title: t.songs.title,
+              artist: artistName,
+              artistId: t.songs.artist_id,
+              coverImageUrl: t.songs.cover_image_url,
+              audioUrl: t.songs.audio_url,
+              duration: t.songs.duration_seconds,
+              playCount: t.songs.play_count || 0,
+              position: t.position,
+              explanation: t.explanation,
+              isFamiliar: false
+            };
+          });
+
+          setSongs(songsWithArtists);
+          return;
+        }
 
         setMix({
           ...mixData,
-          tracks: fallbackTracks || []
+          tracks: tracksData || []
         });
 
-        // Fetch artist names from artists table
-        const artistIds = [...new Set(fallbackTracks?.map(t => t.songs.artist_id).filter(Boolean) || [])];
-        const artistNames = new Map<string, string>();
-
-        if (artistIds.length > 0) {
-          const { data: artists } = await supabase
-            .from('artists')
-            .select('id, name')
-            .in('id', artistIds);
-
-          if (artists) {
-            artists.forEach(a => {
-              if (a.name) {
-                artistNames.set(a.id, a.name);
-              }
-            });
-          }
-        }
-
-        const songsWithArtists: SongWithArtist[] = (fallbackTracks || []).map(t => {
-          const artistName = t.songs.artist_id
-            ? (artistNames.get(t.songs.artist_id) || 'Unknown Artist')
-            : 'Unknown Artist';
-
-          return {
-            id: t.songs.id,
-            title: t.songs.title,
-            artist: artistName,
-            artistId: t.songs.artist_id,
-            coverImageUrl: t.songs.cover_image_url,
-            audioUrl: t.songs.audio_url,
-            duration: t.songs.duration_seconds,
-            playCount: t.songs.play_count || 0,
-            position: t.position,
-            explanation: t.explanation,
-            isFamiliar: t.is_familiar
-          };
-        });
+        const songsWithArtists: SongWithArtist[] = (tracksData || []).map((t: any) => ({
+          id: t.song_id,
+          title: t.title,
+          artist: t.artist_name,
+          artistId: t.artist_id,
+          coverImageUrl: t.cover_image_url,
+          audioUrl: t.audio_url,
+          duration: t.duration_seconds,
+          playCount: t.play_count || 0,
+          position: t.track_position,
+          explanation: t.explanation,
+          isFamiliar: false
+        }));
 
         setSongs(songsWithArtists);
-        return;
+      } else {
+        // Load personal mix (requires auth)
+        if (!user) {
+          setError('Please sign in to view personal mixes');
+          return;
+        }
+
+        const { data: mixData, error: mixError } = await supabase
+          .from('daily_mix_playlists')
+          .select('*')
+          .eq('id', mixId)
+          .eq('user_id', user.id)
+          .single();
+
+        if (mixError) throw mixError;
+
+        // Use raw SQL to get tracks with artist names in one query
+        const { data: tracksData, error: tracksError } = await supabase.rpc('get_daily_mix_tracks_with_artists', {
+          p_mix_id: mixId
+        });
+
+        if (tracksError) {
+          // Fallback to original method if function doesn't exist
+          console.log('Using fallback query method');
+          const { data: fallbackTracks, error: fallbackError } = await supabase
+            .from('daily_mix_tracks')
+            .select(`
+              song_id,
+              position,
+              explanation,
+              recommendation_type,
+              is_familiar,
+              songs (
+                id,
+                title,
+                artist_id,
+                cover_image_url,
+                duration_seconds,
+                audio_url,
+                play_count
+              )
+            `)
+            .eq('mix_id', mixId)
+            .order('position');
+
+          if (fallbackError) throw fallbackError;
+
+          setMix({
+            ...mixData,
+            tracks: fallbackTracks || []
+          });
+
+          // Fetch artist names from artists table
+          const artistIds = [...new Set(fallbackTracks?.map(t => t.songs.artist_id).filter(Boolean) || [])];
+          const artistNames = new Map<string, string>();
+
+          if (artistIds.length > 0) {
+            const { data: artists } = await supabase
+              .from('artists')
+              .select('id, name')
+              .in('id', artistIds);
+
+            if (artists) {
+              artists.forEach(a => {
+                if (a.name) {
+                  artistNames.set(a.id, a.name);
+                }
+              });
+            }
+          }
+
+          const songsWithArtists: SongWithArtist[] = (fallbackTracks || []).map(t => {
+            const artistName = t.songs.artist_id
+              ? (artistNames.get(t.songs.artist_id) || 'Unknown Artist')
+              : 'Unknown Artist';
+
+            return {
+              id: t.songs.id,
+              title: t.songs.title,
+              artist: artistName,
+              artistId: t.songs.artist_id,
+              coverImageUrl: t.songs.cover_image_url,
+              audioUrl: t.songs.audio_url,
+              duration: t.songs.duration_seconds,
+              playCount: t.songs.play_count || 0,
+              position: t.position,
+              explanation: t.explanation,
+              isFamiliar: t.is_familiar
+            };
+          });
+
+          setSongs(songsWithArtists);
+          return;
+        }
+
+        setMix({
+          ...mixData,
+          tracks: tracksData || []
+        });
+
+        const songsWithArtists: SongWithArtist[] = (tracksData || []).map((t: any) => ({
+          id: t.song_id,
+          title: t.title,
+          artist: t.artist_name,
+          artistId: t.artist_id,
+          coverImageUrl: t.cover_image_url,
+          audioUrl: t.audio_url,
+          duration: t.duration_seconds,
+          playCount: t.play_count || 0,
+          position: t.track_position,
+          explanation: t.explanation,
+          isFamiliar: t.is_familiar
+        }));
+
+        setSongs(songsWithArtists);
+
+        recordMixPlay(user.id, mixData.mix_number).catch(console.error);
       }
-
-      setMix({
-        ...mixData,
-        tracks: tracksData || []
-      });
-
-      const songsWithArtists: SongWithArtist[] = (tracksData || []).map((t: any) => ({
-        id: t.song_id,
-        title: t.title,
-        artist: t.artist_name,
-        artistId: t.artist_id,
-        coverImageUrl: t.cover_image_url,
-        audioUrl: t.audio_url,
-        duration: t.duration_seconds,
-        playCount: t.play_count || 0,
-        position: t.track_position,
-        explanation: t.explanation,
-        isFamiliar: t.is_familiar
-      }));
-
-      setSongs(songsWithArtists);
-
-      recordMixPlay(user.id, mixData.mix_number).catch(console.error);
     } catch (err) {
       console.error('Error loading mix:', err);
       setError('Failed to load daily mix');
@@ -245,7 +517,7 @@ export const DailyMixPlayerScreen: React.FC = () => {
       false,
       playlist,
       0,
-      `Daily Mix ${mix?.mix_number || ''}`,
+      `AI Daily Mix ${mix?.mix_number || ''}`,
       null
     );
   };
@@ -267,7 +539,7 @@ export const DailyMixPlayerScreen: React.FC = () => {
       false,
       playlist,
       index,
-      `Daily Mix ${mix?.mix_number || ''}`,
+      `AI Daily Mix ${mix?.mix_number || ''}`,
       null
     );
   };
@@ -286,18 +558,18 @@ export const DailyMixPlayerScreen: React.FC = () => {
 
   return (
     <div className="flex flex-col min-h-screen bg-gradient-to-b from-[#0a0a0a] via-[#0d0d0d] to-[#111111]">
-      {/* Header - Fixed at top */}
-      <div className="sticky top-0 z-10 bg-gradient-to-b from-[#0a0a0a] to-transparent backdrop-blur-md">
-        <div className="flex items-center justify-between p-4 pt-[calc(env(safe-area-inset-top,0px)+1rem)]">
+      {/* Header - Solid so scroll content doesn't show through */}
+      <div className="sticky top-0 z-10 bg-[#0d0d0d]/95 backdrop-blur-md border-b border-white/[0.04]" style={{ paddingTop: 'calc(1.25rem + env(safe-area-inset-top, 0px) * 0.25)', paddingBottom: '1.25rem' }}>
+        <div className="flex items-center justify-between px-4 pt-2 pb-3">
           <button
-            onClick={() => navigate(-1)}
+            onClick={() => (window.history.length > 1 ? navigate(-1) : navigate('/'))}
             className="min-w-[44px] min-h-[44px] flex items-center justify-center bg-white/10 hover:bg-white/20 active:bg-white/30 rounded-full transition-all active:scale-95"
             aria-label="Go back"
           >
             <ArrowLeft className="w-6 h-6 text-white" strokeWidth={2.5} />
           </button>
           <h1 className="font-['Inter',sans-serif] font-bold text-white text-xl">
-            Daily Mix
+            AI Daily Mix
           </h1>
           <div className="w-[44px]" />
         </div>
@@ -308,8 +580,8 @@ export const DailyMixPlayerScreen: React.FC = () => {
         className="flex-1 overflow-y-auto px-4 pb-4"
         style={{
           paddingBottom: isMiniPlayerActive
-            ? 'calc(8.5rem + env(safe-area-inset-bottom, 0px))'
-            : 'calc(4rem + env(safe-area-inset-bottom, 0px))'
+            ? 'calc(12.5rem + env(safe-area-inset-bottom, 0px))'
+            : 'calc(8rem + env(safe-area-inset-bottom, 0px))'
         }}
       >
         {isLoading ? (
@@ -344,6 +616,14 @@ export const DailyMixPlayerScreen: React.FC = () => {
           </div>
         ) : (
           <div className="flex flex-col gap-6 py-4">
+            {/* Inline native ad above mix header */}
+            {inlineAd && showInlineAd && (
+              <PlayerStaticAdBanner
+                ad={inlineAd}
+                className="mb-2 rounded-2xl max-w-[480px] mx-auto"
+              />
+            )}
+
             {/* Mix Header Card */}
             <div className="relative overflow-hidden rounded-2xl">
               {/* Background: Artist image collage */}
@@ -392,6 +672,31 @@ export const DailyMixPlayerScreen: React.FC = () => {
                 </div>
               </div>
             </div>
+
+            {/* Optional bonus reward prompt (after every 6 songs globally) */}
+            {showSongBonusPrompt && (
+              <div className="mx-1 mt-1 mb-2 flex items-center justify-between gap-3 rounded-2xl bg-white/10 border border-white/15 px-3 py-2 shadow-lg">
+                <div className="flex flex-col">
+                  <span className="text-xs font-semibold text-white">Get bonus score</span>
+                  <span className="text-[11px] text-white/70">Watch a short ad to earn extra treats.</span>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setShowSongBonusPrompt(false);
+                    const songId = currentSong?.id;
+                    if (!songId) return;
+                    showRewarded('song_bonus_rewarded', {
+                      contentId: songId,
+                      contentType: 'song',
+                    }).catch(() => {});
+                  }}
+                  className="px-3 py-1.5 rounded-full bg-white text-xs font-semibold text-black active:scale-95 hover:opacity-90 transition-all"
+                >
+                  Claim
+                </button>
+              </div>
+            )}
 
             {/* Track List */}
             <div className="flex flex-col gap-2">
