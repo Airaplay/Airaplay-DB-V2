@@ -37,8 +37,9 @@ import { AdminNotificationBell } from '../../components/AdminNotificationBell';
 import { SupportTicketsSection } from './SupportTicketsSection';
 import { WebAdsSection } from './WebAdsSection';
 import { BlogManagementSection } from './BlogManagementSection';
+import { AccountingSection } from './AccountingSection';
 
-type SectionType = 'users' | 'content' | 'faqs' | 'analytics' | 'country_performance' | 'settings' | 'earnings' | 'analysis' | 'announcements' | 'admin_settings' | 'ad_management' | 'native_ads' | 'web_ads' | 'feature_banners' | 'treat_manager' | 'daily_checkin' | 'referral_management' | 'promotion_manager' | 'reports' | 'featured_artists' | 'mix_manager' | 'daily_mix_manager' | 'genre_manager' | 'payment_monitoring' | 'mood_analysis' | 'listener_curations' | 'contribution_rewards' | 'content_thresholds' | 'financial_controls' | 'promotional_credits' | 'support' | 'blog';
+type SectionType = 'users' | 'content' | 'faqs' | 'analytics' | 'country_performance' | 'settings' | 'earnings' | 'analysis' | 'announcements' | 'admin_settings' | 'ad_management' | 'native_ads' | 'web_ads' | 'feature_banners' | 'treat_manager' | 'daily_checkin' | 'referral_management' | 'promotion_manager' | 'reports' | 'featured_artists' | 'mix_manager' | 'daily_mix_manager' | 'genre_manager' | 'payment_monitoring' | 'mood_analysis' | 'listener_curations' | 'contribution_rewards' | 'content_thresholds' | 'financial_controls' | 'promotional_credits' | 'support' | 'blog' | 'accounting';
 
 const ADMIN_ROLES = ['admin', 'manager', 'editor', 'account'];
 
@@ -82,6 +83,7 @@ const getSectionLabel = (section: SectionType): string => {
     announcements: 'Announcements',
     faqs: 'FAQs',
     blog: 'Blog',
+      accounting: 'Accounting',
     mood_analysis: 'Mood Analysis',
     promotional_credits: 'Promo Credits',
     settings: 'Settings',
@@ -176,7 +178,7 @@ export const AdminDashboardScreen = (): JSX.Element => {
       setError(null);
 
       const { data: { session }, error: authError } = await supabase.auth.getSession();
-
+      
       if (authError || !session) {
         if (authError) console.error('Authentication error:', authError);
         setError('You must be signed in to access this page');
@@ -250,7 +252,7 @@ export const AdminDashboardScreen = (): JSX.Element => {
       return ['content', 'faqs', 'blog'].includes(section);
     }
     if (userRole === 'account') {
-      return ['analytics', 'earnings', 'support', 'payment_monitoring', 'financial_controls', 'promotional_credits', 'treat_manager', 'country_performance'].includes(section);
+      return ['analytics', 'earnings', 'support', 'payment_monitoring', 'financial_controls', 'promotional_credits', 'treat_manager', 'country_performance', 'accounting'].includes(section);
     }
     return false;
   };
@@ -293,6 +295,7 @@ export const AdminDashboardScreen = (): JSX.Element => {
         case 'content_thresholds': return <ContentSectionThresholdsManager />;
         case 'financial_controls': return <FinancialControlsSection />;
         case 'promotional_credits': return <PromotionalCreditsSection />;
+        case 'accounting': return <AccountingSection />;
         case 'settings':
           return (
             <div className="p-6 bg-white rounded-xl border border-gray-100 shadow-sm">
@@ -451,6 +454,7 @@ export const AdminDashboardScreen = (): JSX.Element => {
             <NavItem section="support" icon={<Wallet className="w-4 h-4" />} label="Support & Withdrawals" />
             <NavItem section="payment_monitoring" icon={<Activity className="w-4 h-4" />} label="Payment Monitoring" />
             <NavItem section="financial_controls" icon={<Shield className="w-4 h-4" />} label="Financial Controls" />
+            <NavItem section="accounting" icon={<BookOpen className="w-4 h-4" />} label="Accounting" />
             <NavItem section="treat_manager" icon={<Coins className="w-4 h-4" />} label="Treat Manager" />
             <NavItem section="promotional_credits" icon={<Gift className="w-4 h-4" />} label="Promo Credits" />
           </NavGroup>
@@ -535,7 +539,7 @@ export const AdminDashboardScreen = (): JSX.Element => {
               <div>
                 <h1 className="text-base font-semibold text-gray-900 leading-tight">
                   {getSectionLabel(activeSection)}
-                </h1>
+              </h1>
                 <p className="text-xs text-gray-400 leading-tight">Airaplay Admin</p>
               </div>
             </div>
@@ -548,30 +552,30 @@ export const AdminDashboardScreen = (): JSX.Element => {
         {/* Content Area */}
         <main className="flex-1 overflow-auto">
           <div className="p-6 w-full min-h-full">
-            {renderError ? (
+          {renderError ? (
               <div className="p-6 bg-white rounded-xl border border-gray-100 shadow-sm">
-                <div className="flex items-center gap-3 mb-4">
+              <div className="flex items-center gap-3 mb-4">
                   <div className="w-10 h-10 bg-red-50 rounded-xl flex items-center justify-center">
-                    <span className="text-red-500 font-bold">!</span>
+                  <span className="text-red-500 font-bold">!</span>
                   </div>
                   <h2 className="text-lg font-bold text-gray-900">Section Error</h2>
                 </div>
                 <p className="text-gray-500 mb-4 text-sm">{renderError}</p>
-                <button
+              <button
                   onClick={() => { setRenderError(null); handleSectionChange('analytics'); }}
                   className="px-4 py-2 bg-[#309605] text-white rounded-lg hover:bg-[#3ba208] transition-colors text-sm font-medium"
-                >
-                  Go to Dashboard
-                </button>
-              </div>
-            ) : (
-              <ErrorBoundary
-                key={activeSection}
-                fallback={(error, resetError) => (
+              >
+                Go to Dashboard
+              </button>
+            </div>
+          ) : (
+            <ErrorBoundary
+              key={activeSection}
+              fallback={(error, resetError) => (
                   <div className="p-6 bg-white rounded-xl border border-gray-100 shadow-sm">
-                    <div className="flex items-center gap-3 mb-4">
+                  <div className="flex items-center gap-3 mb-4">
                       <div className="w-10 h-10 bg-red-50 rounded-xl flex items-center justify-center">
-                        <span className="text-red-500 font-bold">!</span>
+                      <span className="text-red-500 font-bold">!</span>
                       </div>
                       <h2 className="text-lg font-bold text-gray-900">Section Error</h2>
                     </div>
@@ -580,18 +584,18 @@ export const AdminDashboardScreen = (): JSX.Element => {
                     </p>
                     <div className="flex gap-2">
                       <button onClick={resetError} className="px-4 py-2 bg-gray-100 text-gray-700 rounded-lg hover:bg-gray-200 transition-colors text-sm font-medium">
-                        Try Again
-                      </button>
+                      Try Again
+                    </button>
                       <button onClick={() => handleSectionChange('analytics')} className="px-4 py-2 bg-[#309605] text-white rounded-lg hover:bg-[#3ba208] transition-colors text-sm font-medium">
-                        Go to Dashboard
-                      </button>
-                    </div>
+                      Go to Dashboard
+                    </button>
                   </div>
-                )}
-              >
-                {renderSection()}
-              </ErrorBoundary>
-            )}
+                </div>
+              )}
+            >
+              {renderSection()}
+            </ErrorBoundary>
+          )}
           </div>
         </main>
       </div>
