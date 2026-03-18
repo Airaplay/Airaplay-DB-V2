@@ -428,9 +428,11 @@ export const NativeAdsSection = (): JSX.Element => {
                 <option value="explore_grid">Explore Grid</option>
                 <option value="home_grid">Home Grid</option>
                 <option value="home_featured_banner">Home Featured Banner</option>
+                <option value="home_featured_banner_secondary">Home Featured Banner 2</option>
                 <option value="music_player">Music Player Screen</option>
                 <option value="album_player">Album Player Screen</option>
                 <option value="playlist_player">Playlist Player Screen</option>
+                <option value="daily_mix_player">Daily Mix Player Screen</option>
               </select>
             </div>
 
