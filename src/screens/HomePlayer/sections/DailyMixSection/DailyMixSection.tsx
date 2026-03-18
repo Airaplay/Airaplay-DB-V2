@@ -4,6 +4,7 @@ import { useNavigate } from 'react-router-dom';
 import { supabase } from '../../../../lib/supabase';
 import { useAuth } from '../../../../contexts/AuthContext';
 import { ScrollArea, ScrollBar } from '../../../../components/ui/scroll-area';
+import { getGlobalDailyMixes } from '../../../../lib/globalDailyMixGenerator';
 
 interface DailyMix {
   id: string;
@@ -17,6 +18,7 @@ interface DailyMix {
   generated_at: string;
   artist_images?: string[];
   display_title?: string;
+  is_global?: boolean;
 }
 
 export const DailyMixSection: React.FC = () => {
@@ -28,167 +30,195 @@ export const DailyMixSection: React.FC = () => {
   const refreshIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
   const loadDailyMixes = useCallback(async (autoGenerate = true) => {
-    if (!user) return;
-
     try {
       setIsLoading(true);
-      const { data: mixesData, error } = await supabase
-        .from('daily_mix_playlists')
-        .select('id, mix_number, title, description, genre_focus, mood_focus, cover_image_url, track_count, generated_at')
-        .eq('user_id', user.id)
-        .gt('expires_at', new Date().toISOString())
-        .order('mix_number');
+      
+      // If user is authenticated, try to load personal mixes
+      if (user) {
+        const { data: mixesData, error } = await supabase
+          .from('daily_mix_playlists')
+          .select('id, mix_number, title, description, genre_focus, mood_focus, cover_image_url, track_count, generated_at')
+          .eq('user_id', user.id)
+          .gt('expires_at', new Date().toISOString())
+          .order('mix_number');
 
-      if (error) throw error;
+        if (error) throw error;
 
-      if (!mixesData || mixesData.length === 0) {
-        setMixes([]);
-        // Automatically generate mixes in the background if none exist
+        // If user has personal mixes, enrich and use them
+        if (mixesData && mixesData.length > 0) {
+          const enrichedMixes = await enrichMixes(mixesData, false);
+          setMixes(enrichedMixes);
+          return;
+        }
+
+        // No personal mixes - try to auto-generate for authenticated users
         if (autoGenerate && !isGenerating) {
           setIsGenerating(true);
           try {
             const { generateDailyMixesForUser } = await import('../../../../lib/dailyMixGenerator');
             await generateDailyMixesForUser(user.id, true);
-            // Reload without auto-generation to prevent infinite loop
             await loadDailyMixes(false);
           } catch (genError) {
-            console.error('Error generating mixes:', genError);
+            console.error('Error generating personal mixes, falling back to global:', genError);
+            // Fall through to load global mixes
           } finally {
             setIsGenerating(false);
           }
         }
-        return;
       }
 
-      // Fetch artist images and names for each mix
-      const enrichedMixes = await Promise.all(
-        mixesData.map(async (mix) => {
-          try {
-            // Get songs in this mix with artist info, genres, and moods
-            const { data: mixTracks, error: tracksError } = await supabase
-              .from('daily_mix_tracks')
-              .select(`
-                song_id,
-                songs!inner(
-                  id,
-                  title,
-                  artist_id,
-                  cover_image_url,
-                  artists:artist_id(
-                    id,
-                    display_name,
-                    avatar_url,
-                    artist_profiles(
-                      stage_name,
-                      profile_image_url
-                    )
-                  )
-                )
-              `)
-              .eq('mix_id', mix.id)
-              .limit(10);
-
-            const artistImages: string[] = [];
-            const artistNames: string[] = [];
-            const songImages: string[] = [];
-
-            if (mixTracks && mixTracks.length > 0) {
-              mixTracks.forEach((track: any) => {
-                const song = track.songs;
-                if (song) {
-                  // Collect artist images and names
-                  if (song.artists) {
-                    const artist = song.artists;
-                    const profile = artist.artist_profiles?.[0];
-                    const imageUrl = profile?.profile_image_url || artist.avatar_url;
-                    const artistName = profile?.stage_name || artist.display_name;
-
-                    if (imageUrl && !artistImages.includes(imageUrl)) {
-                      artistImages.push(imageUrl);
-                    }
-                    if (artistName && !artistNames.includes(artistName)) {
-                      artistNames.push(artistName);
-                    }
-                  }
-
-                  // Also collect song cover images as fallback
-                  if (song.cover_image_url && !songImages.includes(song.cover_image_url)) {
-                    songImages.push(song.cover_image_url);
-                  }
-                }
-              });
-            }
-
-            // Use artist images if available, otherwise fall back to song cover images
-            const displayImages = artistImages.length > 0 ? artistImages : songImages;
-
-            let displayTitle = '';
-
-            if (mix.genre_focus && mix.genre_focus !== 'Discovery') {
-              displayTitle = `Your ${mix.genre_focus} Mix`;
-            } else if (mix.mood_focus) {
-              displayTitle = `${mix.mood_focus} Vibes`;
-            } else if (artistNames.length > 0) {
-              if (artistNames.length === 1) {
-                displayTitle = `${artistNames[0]} Radio`;
-              } else if (artistNames.length === 2) {
-                displayTitle = `${artistNames[0]} & ${artistNames[1]}`;
-              } else {
-                displayTitle = `${artistNames[0]} & Friends`;
-              }
-            } else {
-              const hour = new Date().getHours();
-              if (hour >= 5 && hour < 12) {
-                displayTitle = 'Morning Mix';
-              } else if (hour >= 12 && hour < 17) {
-                displayTitle = 'Afternoon Mix';
-              } else if (hour >= 17 && hour < 21) {
-                displayTitle = 'Evening Mix';
-              } else {
-                displayTitle = 'Night Mix';
-              }
-            }
-
-            return {
-              ...mix,
-              artist_images: displayImages.slice(0, 4),
-              display_title: displayTitle
-            };
-          } catch (err) {
-            console.error('Error enriching mix:', err);
-            return {
-              ...mix,
-              artist_images: [],
-              display_title: mix.genre_focus || mix.mood_focus || 'Your Mix'
-            };
-          }
-        })
-      );
-
-      setMixes(enrichedMixes);
+      // Load global mixes for non-auth users or when personal mixes unavailable
+      const globalMixes = await getGlobalDailyMixes();
+      if (globalMixes && globalMixes.length > 0) {
+        const enrichedMixes = await enrichMixes(globalMixes, true);
+        setMixes(enrichedMixes);
+      } else {
+        setMixes([]);
+      }
     } catch (error) {
       console.error('Error loading daily mixes:', error);
+      setMixes([]);
     } finally {
       setIsLoading(false);
     }
   }, [user, isGenerating]);
 
+  /**
+   * Enrich mixes with artist images and display titles
+   */
+  const enrichMixes = async (mixesData: any[], isGlobal: boolean): Promise<DailyMix[]> => {
+    return Promise.all(
+      mixesData.map(async (mix) => {
+        try {
+          // Determine which table to query
+          const tracksTable = isGlobal ? 'global_daily_mix_tracks' : 'daily_mix_tracks';
+          
+          // Get songs in this mix with artist info, genres, and moods
+          const { data: mixTracks, error: tracksError } = await supabase
+            .from(tracksTable)
+            .select(`
+              song_id,
+              songs!inner(
+                id,
+                title,
+                artist_id,
+                cover_image_url,
+                artists:artist_id(
+                  id,
+                  display_name,
+                  avatar_url,
+                  artist_profiles(
+                    stage_name,
+                    profile_image_url
+                  )
+                )
+              )
+            `)
+            .eq('mix_id', mix.id)
+            .limit(10);
+
+          const artistImages: string[] = [];
+          const artistNames: string[] = [];
+          const songImages: string[] = [];
+
+          if (mixTracks && mixTracks.length > 0) {
+            mixTracks.forEach((track: any) => {
+              const song = track.songs;
+              if (song) {
+                // Collect artist images and names
+                if (song.artists) {
+                  const artist = song.artists;
+                  const profile = artist.artist_profiles?.[0];
+                  const imageUrl = profile?.profile_image_url || artist.avatar_url;
+                  const artistName = profile?.stage_name || artist.display_name;
+
+                  if (imageUrl && !artistImages.includes(imageUrl)) {
+                    artistImages.push(imageUrl);
+                  }
+                  if (artistName && !artistNames.includes(artistName)) {
+                    artistNames.push(artistName);
+                  }
+                }
+
+                // Also collect song cover images as fallback
+                if (song.cover_image_url && !songImages.includes(song.cover_image_url)) {
+                  songImages.push(song.cover_image_url);
+                }
+              }
+            });
+          }
+
+          // Use artist images if available, otherwise fall back to song cover images, or mix cover
+          let displayImages = artistImages.length > 0 ? artistImages : songImages;
+          if (displayImages.length === 0 && mix.cover_image_url) {
+            displayImages = [mix.cover_image_url];
+          }
+
+          let displayTitle = '';
+
+          if (mix.genre_focus && mix.genre_focus !== 'Discovery') {
+            displayTitle = `Your ${mix.genre_focus} Mix`;
+          } else if (mix.mood_focus) {
+            displayTitle = `${mix.mood_focus} Vibes`;
+          } else if (artistNames.length > 0) {
+            if (artistNames.length === 1) {
+              displayTitle = `${artistNames[0]} Radio`;
+            } else if (artistNames.length === 2) {
+              displayTitle = `${artistNames[0]} & ${artistNames[1]}`;
+            } else {
+              displayTitle = `${artistNames[0]} & Friends`;
+            }
+          } else {
+            const hour = new Date().getHours();
+            if (hour >= 5 && hour < 12) {
+              displayTitle = 'Morning Mix';
+            } else if (hour >= 12 && hour < 17) {
+              displayTitle = 'Afternoon Mix';
+            } else if (hour >= 17 && hour < 21) {
+              displayTitle = 'Evening Mix';
+            } else {
+              displayTitle = 'Night Mix';
+            }
+          }
+
+          return {
+            ...mix,
+            artist_images: displayImages.slice(0, 4),
+            display_title: displayTitle,
+            is_global: isGlobal
+          };
+        } catch (err) {
+          console.error('Error enriching mix:', err);
+          // Ensure we always return something visible
+          return {
+            ...mix,
+            artist_images: mix.cover_image_url ? [mix.cover_image_url] : [],
+            display_title: mix.title || mix.genre_focus || mix.mood_focus || 'Your Mix',
+            is_global: isGlobal
+          };
+        }
+      })
+    );
+  };
+
   useEffect(() => {
-    if (user) {
-      loadDailyMixes();
-    }
+    loadDailyMixes();
 
     refreshIntervalRef.current = setInterval(() => {
-      if (user) loadDailyMixes(false); // Don't auto-generate on interval refreshes
-    }, 5 * 60 * 1000);
+      loadDailyMixes(false); // Don't auto-generate on interval refreshes
+    }, 10 * 60 * 1000); // 10 min (reduces DB/egress)
 
     return () => {
       if (refreshIntervalRef.current) clearInterval(refreshIntervalRef.current);
     };
-  }, [user, loadDailyMixes]);
+  }, [loadDailyMixes]);
 
   const handleMixClick = (mix: DailyMix) => {
-    navigate(`/daily-mix/${mix.id}`);
+    if (mix.is_global) {
+      navigate(`/daily-mix/global/${mix.id}`);
+    } else {
+      navigate(`/daily-mix/${mix.id}`);
+    }
   };
 
   const getGradientColors = (mixNumber: number): string => {
@@ -203,8 +233,9 @@ export const DailyMixSection: React.FC = () => {
     return gradients[(mixNumber - 1) % gradients.length];
   };
 
-  // Hide section entirely if user is not logged in, still loading, or no mixes available
-  if (!user || isLoading || mixes.length === 0) {
+  // Show section for everyone - auth users get personalized, non-auth get global
+  // Only hide if still loading or truly no mixes available
+  if (isLoading || mixes.length === 0) {
     return null;
   }
 
@@ -213,7 +244,7 @@ export const DailyMixSection: React.FC = () => {
       <div className="flex items-center justify-between mb-6">
         <div>
           <h2 className="font-['Inter',sans-serif] font-bold text-white text-xl tracking-tight">
-            Daily Mix
+            Ai Daily Mix
           </h2>
           <p className="font-['Inter',sans-serif] text-white/60 text-xs mt-0.5">
             Personalized playlists just for you
