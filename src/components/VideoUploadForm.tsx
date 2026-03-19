@@ -1,5 +1,10 @@
-import React, { useState } from 'react';
-import { Video, X, FileText, Calendar, Image } from 'lucide-react';
+import React, { useState, useEffect, useRef, useCallback } from 'react';
+import { useNavigate } from 'react-router-dom';
+import {
+  ArrowLeft, Video, Image as ImageIcon, Loader2, Calendar as CalendarIcon,
+  CheckCircle2, FileVideo, ChevronRight, Sparkles, X, Upload,
+} from 'lucide-react';
+import { format } from 'date-fns';
 import { supabase, getArtistProfile } from '../lib/supabase';
 import { bunnyStreamService } from '../lib/bunnyStreamService';
 import { MediaCompression } from '../lib/mediaCompression';
@@ -12,6 +17,11 @@ import {
 import { cache } from '../lib/cache';
 import { smartCache } from '../lib/smartCache';
 import { useUpload } from '../contexts/UploadContext';
+import { useAuth } from '../contexts/AuthContext';
+import { cn } from '../lib/utils';
+
+const STEPS = ['Media', 'Details'] as const;
+type Step = 0 | 1;
 
 interface VideoUploadFormProps {
   onClose: () => void;
@@ -20,180 +30,148 @@ interface VideoUploadFormProps {
 }
 
 export default function VideoUploadForm({ onClose, onSuccess, initialData }: VideoUploadFormProps) {
+  const navigate = useNavigate();
+  const { user } = useAuth();
   const { addUpload, updateUploadProgress, updateUploadStatus } = useUpload();
-  const [formData, setFormData] = useState({
-    title: initialData?.title || '',
-    description: initialData?.description || '',
-    releaseDate: initialData?.metadata?.release_date || '',
+  const mountedRef = useRef(true);
+  const videoInputRef = useRef<HTMLInputElement>(null);
+  const thumbInputRef = useRef<HTMLInputElement>(null);
+
+  const isEditing = !!initialData;
+  const [artistProfile, setArtistProfile] = useState<{ id: string; stage_name: string; artist_id: string | null; bio?: string; profile_photo_url?: string; is_verified?: boolean } | null>(null);
+  const [loadingProfile, setLoadingProfile] = useState(true);
+  const [currentStep, setCurrentStep] = useState<Step>(isEditing ? 1 : 0);
+
+  const [title, setTitle] = useState(initialData?.title ?? '');
+  const [description, setDescription] = useState(initialData?.description ?? '');
+  const [releaseDate, setReleaseDate] = useState<Date | undefined>(
+    initialData?.metadata?.release_date ? new Date(initialData.metadata.release_date) : undefined
+  );
+  const [releaseTime, setReleaseTime] = useState<string>(() => {
+    const rd = initialData?.metadata?.release_date;
+    if (!rd || typeof rd !== 'string' || !rd.includes('T')) return '00:00';
+    const t = rd.split('T')[1];
+    return t ? t.slice(0, 5) : '00:00';
   });
+
   const [selectedVideoFile, setSelectedVideoFile] = useState<File | null>(null);
   const [selectedThumbnailFile, setSelectedThumbnailFile] = useState<File | null>(null);
-  const [thumbnailPreviewUrl, setThumbnailPreviewUrl] = useState<string | null>(null);
+  const [thumbnailPreviewUrl, setThumbnailPreviewUrl] = useState<string | null>(initialData?.metadata?.thumbnail_url ?? null);
   const [thumbnailOption, setThumbnailOption] = useState<'auto' | 'upload'>('auto');
   const [isGeneratingThumbnail, setIsGeneratingThumbnail] = useState(false);
+  const [autoThumbnailGenerated, setAutoThumbnailGenerated] = useState(false);
+
   const [isSubmitting, setIsSubmitting] = useState(false);
+  const [uploadProgress, setUploadProgress] = useState(0);
+  const [uploadStep, setUploadStep] = useState('');
   const [error, setError] = useState<string | null>(null);
   const [success, setSuccess] = useState<string | null>(null);
-  const [uploadProgress, setUploadProgress] = useState<number>(0);
   const [uploadTaskId, setUploadTaskId] = useState<string | null>(null);
 
-  // Cleanup effect for blob URLs
-  React.useEffect(() => {
+  useEffect(() => {
+    mountedRef.current = true;
     return () => {
-      if (thumbnailPreviewUrl && thumbnailPreviewUrl.startsWith('blob:')) {
-        URL.revokeObjectURL(thumbnailPreviewUrl);
-      }
+      mountedRef.current = false;
+      if (thumbnailPreviewUrl && thumbnailPreviewUrl.startsWith('blob:')) URL.revokeObjectURL(thumbnailPreviewUrl);
     };
   }, []);
 
-  // Auto-generate thumbnail when video is selected and auto option is active
-  React.useEffect(() => {
-    if (selectedVideoFile && thumbnailOption === 'auto' && !isGeneratingThumbnail && !thumbnailPreviewUrl) {
-      generateThumbnailFromVideo(selectedVideoFile);
-    }
-  }, [selectedVideoFile, thumbnailOption]);
-
-  const handleInputChange = (e: React.ChangeEvent<HTMLInputElement | HTMLTextAreaElement>) => {
-    const { name, value } = e.target;
-    setFormData(prev => ({
-      ...prev,
-      [name]: value,
-    }));
-  };
-
-  const handleVideoUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
-    if (e.target.files && e.target.files[0]) {
-      const file = e.target.files[0];
-      
-      // Validate video file using security utility
-      const validation = validateVideoFile(file);
-      if (!validation.valid) {
-        setError(validation.error || 'Please upload a valid video file.');
-        setSelectedVideoFile(null);
-        return;
+  useEffect(() => {
+    if (!user) return;
+    (async () => {
+      try {
+        const profile = await getArtistProfile();
+        if (!mountedRef.current) return;
+        if (profile) {
+          setArtistProfile({ id: profile.id, stage_name: profile.stage_name, artist_id: profile.artist_id ?? null, bio: profile.bio, profile_photo_url: profile.profile_photo_url, is_verified: profile.is_verified });
+        } else {
+          const { data } = await supabase.from('artist_profiles').select('id, stage_name, artist_id').eq('user_id', user.id).maybeSingle();
+          if (data) setArtistProfile({ id: data.id, stage_name: data.stage_name, artist_id: data.artist_id ?? null });
+        }
+      } finally {
+        if (mountedRef.current) setLoadingProfile(false);
       }
+    })();
+  }, [user]);
 
-      setSelectedVideoFile(file);
-      setError(null);
-    }
-  };
-
-  const generateThumbnailFromVideo = async (videoFile: File): Promise<void> => {
-    setIsGeneratingThumbnail(true);
-    setError(null);
-
-    try {
+  const generateThumbnailFromVideo = useCallback(async (videoFile: File): Promise<File | null> => {
+    return new Promise((resolve) => {
       const video = document.createElement('video');
       video.preload = 'metadata';
       video.muted = true;
+      video.playsInline = true;
+      const url = URL.createObjectURL(videoFile);
+      video.src = url;
+      video.onloadedmetadata = () => { video.currentTime = Math.min(Math.max(video.duration / 5, 2), 5); };
+      video.onseeked = () => {
+        try {
+          const canvas = document.createElement('canvas');
+          canvas.width = video.videoWidth;
+          canvas.height = video.videoHeight;
+          const ctx = canvas.getContext('2d');
+          if (!ctx) { URL.revokeObjectURL(url); resolve(null); return; }
+          ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+          canvas.toBlob((blob) => {
+            URL.revokeObjectURL(url);
+            resolve(blob ? new File([blob], 'thumbnail.jpg', { type: 'image/jpeg' }) : null);
+          }, 'image/jpeg', 0.85);
+        } catch { URL.revokeObjectURL(url); resolve(null); }
+      };
+      video.onerror = () => { URL.revokeObjectURL(url); resolve(null); };
+    });
+  }, []);
 
-      const videoUrl = URL.createObjectURL(videoFile);
-      video.src = videoUrl;
-
-      await new Promise<void>((resolve, reject) => {
-        video.onloadedmetadata = () => {
-          const thumbnailTime = Math.min(5, Math.max(2, video.duration / 5));
-          video.currentTime = thumbnailTime;
-        };
-
-        video.onseeked = () => {
-          try {
-            const canvas = document.createElement('canvas');
-            canvas.width = video.videoWidth;
-            canvas.height = video.videoHeight;
-
-            const ctx = canvas.getContext('2d');
-            if (!ctx) {
-              throw new Error('Could not get canvas context');
-            }
-
-            ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
-
-            canvas.toBlob((blob) => {
-              if (blob) {
-                const thumbnailFile = new File([blob], `thumbnail-${Date.now()}.jpg`, {
-                  type: 'image/jpeg',
-                  lastModified: Date.now()
-                });
-
-                if (thumbnailPreviewUrl) {
-                  URL.revokeObjectURL(thumbnailPreviewUrl);
-                }
-
-                const thumbnailUrl = URL.createObjectURL(thumbnailFile);
-                setThumbnailPreviewUrl(thumbnailUrl);
-                setSelectedThumbnailFile(thumbnailFile);
-
-                URL.revokeObjectURL(videoUrl);
-                setIsGeneratingThumbnail(false);
-                resolve();
-              } else {
-                throw new Error('Failed to generate thumbnail blob');
-              }
-            }, 'image/jpeg', 0.9);
-          } catch (err) {
-            console.error('Error generating thumbnail:', err);
-            URL.revokeObjectURL(videoUrl);
-            setIsGeneratingThumbnail(false);
-            reject(err);
-          }
-        };
-
-        video.onerror = () => {
-          URL.revokeObjectURL(videoUrl);
-          setIsGeneratingThumbnail(false);
-          reject(new Error('Failed to load video for thumbnail generation'));
-        };
-
-        video.load();
-      });
-    } catch (err) {
-      console.error('Error in generateThumbnailFromVideo:', err);
+  const handleVideoChange = useCallback(async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    const validation = validateVideoFile(file);
+    if (!validation.valid) { setError(validation.error ?? 'Invalid video file.'); return; }
+    setError(null);
+    setSelectedVideoFile(file);
+    setAutoThumbnailGenerated(false);
+    if (thumbnailOption === 'auto') {
+      setIsGeneratingThumbnail(true);
+      const thumb = await generateThumbnailFromVideo(file);
+      if (!mountedRef.current) return;
+      if (thumb) {
+        setSelectedThumbnailFile(thumb);
+        if (thumbnailPreviewUrl?.startsWith('blob:')) URL.revokeObjectURL(thumbnailPreviewUrl);
+        setThumbnailPreviewUrl(URL.createObjectURL(thumb));
+        setAutoThumbnailGenerated(true);
+      }
       setIsGeneratingThumbnail(false);
-      setError('Failed to generate thumbnail from video. You can upload one manually.');
     }
-  };
+  }, [thumbnailOption, generateThumbnailFromVideo, thumbnailPreviewUrl]);
 
-  const handleThumbnailUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
-    if (e.target.files && e.target.files[0]) {
-      const file = e.target.files[0];
-
-      // Validate image file using security utility
-      const validation = validateImageFile(file);
-      if (!validation.valid) {
-        setError(validation.error || 'Please upload a valid image file for the thumbnail.');
-        setSelectedThumbnailFile(null);
-        return;
-      }
-
-      setSelectedThumbnailFile(file);
-      setError(null);
-
-      if (thumbnailPreviewUrl) {
-        URL.revokeObjectURL(thumbnailPreviewUrl);
-      }
-      const url = URL.createObjectURL(file);
-      setThumbnailPreviewUrl(url);
-    }
+  const handleThumbnailChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    const validation = validateImageFile(file);
+    if (!validation.valid) { setError(validation.error ?? 'Invalid image.'); return; }
+    setError(null);
+    if (thumbnailPreviewUrl?.startsWith('blob:')) URL.revokeObjectURL(thumbnailPreviewUrl);
+    setSelectedThumbnailFile(file);
+    setThumbnailPreviewUrl(URL.createObjectURL(file));
   };
 
   const handleThumbnailOptionChange = (option: 'auto' | 'upload') => {
     setThumbnailOption(option);
-
-    // Clear existing thumbnail
-    if (thumbnailPreviewUrl) {
-      URL.revokeObjectURL(thumbnailPreviewUrl);
-      setThumbnailPreviewUrl(null);
-    }
+    if (thumbnailPreviewUrl?.startsWith('blob:')) URL.revokeObjectURL(thumbnailPreviewUrl);
+    setThumbnailPreviewUrl(null);
     setSelectedThumbnailFile(null);
-
-    // Reset file input
-    const thumbnailInput = document.getElementById('thumbnail-upload') as HTMLInputElement;
-    if (thumbnailInput) thumbnailInput.value = '';
-
-    // Auto-generate if switching to auto and video is selected
+    setAutoThumbnailGenerated(false);
+    if (thumbInputRef.current) thumbInputRef.current.value = '';
     if (option === 'auto' && selectedVideoFile) {
-      generateThumbnailFromVideo(selectedVideoFile);
+      setIsGeneratingThumbnail(true);
+      generateThumbnailFromVideo(selectedVideoFile).then((thumb) => {
+        if (!mountedRef.current) return;
+        if (thumb) {
+          setSelectedThumbnailFile(thumb);
+          setThumbnailPreviewUrl(URL.createObjectURL(thumb));
+          setAutoThumbnailGenerated(true);
+        }
+        setIsGeneratingThumbnail(false);
+      });
     }
   };
 
@@ -241,616 +219,370 @@ export default function VideoUploadForm({ onClose, onSuccess, initialData }: Vid
     }
   };
 
-  const handleSubmit = async (e: React.FormEvent) => {
-    e.preventDefault();
+  const handleSubmit = async () => {
     setError(null);
     setSuccess(null);
     setUploadProgress(0);
-
-    const isEditing = !!initialData;
-
-    if (!formData.title.trim()) {
-      setError('Video title is required.');
-      return;
-    }
-    if (!isEditing && !selectedVideoFile) {
-      setError('Video file is required.');
-      return;
-    }
+    if (!title.trim()) { setError('Video title is required.'); return; }
+    if (!isEditing && !selectedVideoFile) { setError('Video file is required.'); return; }
 
     setIsSubmitting(true);
-
     const taskId = `video-${Date.now()}`;
     setUploadTaskId(taskId);
-
-    addUpload({
-      id: taskId,
-      type: 'video',
-      title: formData.title.trim()
-    });
+    addUpload({ id: taskId, type: 'video', title: title.trim() });
 
     try {
-      const { data: { user }, error: authError } = await supabase.auth.getUser();
-      if (authError || !user) {
-        throw new Error('User not authenticated. Please sign in.');
-      }
+      const { data: { session }, error: sessionError } = await supabase.auth.getSession();
+      if (sessionError || !session?.user) throw new Error('User not authenticated.');
+      const authUser = session.user;
 
-      const artistProfile = await getArtistProfile();
-      if (!artistProfile) {
-        throw new Error('Artist profile not found. Please register as an artist first.');
-      }
+      const profile = await getArtistProfile();
+      if (!profile) throw new Error('Artist profile not found. Please register as an artist first.');
 
-      let finalArtistId = artistProfile.artist_id;
+      // Resolve artist_id from fresh DB so we get current value (same as SingleUploadForm)
+      const { data: freshProfileById } = await supabase.from('artist_profiles').select('artist_id, stage_name').eq('id', profile.id).maybeSingle();
+      const { data: freshProfileByUser } = await supabase.from('artist_profiles').select('artist_id, stage_name').eq('user_id', authUser.id).maybeSingle();
+      const freshProfile = freshProfileById || freshProfileByUser;
+      let finalArtistId = freshProfile?.artist_id ?? profile.artist_id ?? null;
+      let stageName = (freshProfile?.stage_name && freshProfile.stage_name.trim()) || (profile.stage_name && String(profile.stage_name).trim()) || authUser?.user_metadata?.display_name || '';
+      if (!stageName) {
+        const { data: userRow } = await supabase.from('users').select('display_name').eq('id', authUser.id).maybeSingle();
+        stageName = (userRow?.display_name || '').trim();
+      } else {
+        stageName = String(stageName).trim();
+      }
 
       if (!finalArtistId) {
-        const { data: existingArtist, error: findError } = await supabase
-          .from('artists')
-          .select('id')
-          .ilike('name', artistProfile.stage_name)
-          .maybeSingle();
-
-        if (!existingArtist && !findError) {
-          const { data: newArtist, error: createError } = await supabase
-            .from('artists')
-            .insert({
-              name: artistProfile.stage_name,
-              bio: artistProfile.bio,
-              image_url: artistProfile.profile_photo_url,
-              verified: artistProfile.is_verified || false
-            })
-            .select()
-            .maybeSingle();
-
-          if (createError) {
-            throw new Error(`Failed to create artist record: ${createError.message}`);
+        if (!stageName) throw new Error('Artist stage name is missing. Please complete your artist profile before uploading.');
+        const { data: existing } = await supabase.from('artists').select('id').ilike('name', stageName).maybeSingle();
+        if (existing) {
+          finalArtistId = existing.id;
+          await supabase.from('artist_profiles').update({ artist_id: finalArtistId }).eq('id', profile.id);
+        } else {
+          const createArtistResponse = await fetch(`${import.meta.env.VITE_SUPABASE_URL}/functions/v1/create-artist`, {
+            method: 'POST',
+            headers: { 'Authorization': `Bearer ${session.access_token}`, 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              name: stageName,
+              bio: profile.bio || null,
+              image_url: profile.profile_photo_url || null,
+              verified: profile.is_verified || false,
+            }),
+          });
+          if (!createArtistResponse.ok) {
+            const errorData = await createArtistResponse.json().catch(() => ({}));
+            throw new Error(`Failed to create artist record: ${errorData.error || 'Unknown error'}`);
           }
-
-          if (!newArtist) {
-            throw new Error('Failed to create artist record: No data returned');
-          }
-
-          finalArtistId = newArtist.id;
-
-          await supabase
-            .from('artist_profiles')
-            .update({ artist_id: finalArtistId })
-            .eq('id', artistProfile.id);
-        } else if (existingArtist) {
-          finalArtistId = existingArtist.id;
-
-          await supabase
-            .from('artist_profiles')
-            .update({ artist_id: finalArtistId })
-            .eq('id', artistProfile.id);
-        } else if (findError) {
-          throw new Error(`Error finding artist: ${findError.message}`);
+          const createResult = await createArtistResponse.json();
+          if (!createResult.success) throw new Error(`Failed to create artist record: ${createResult.error || 'Unknown error'}`);
+          finalArtistId = createResult.artist?.id;
+          if (finalArtistId) await supabase.from('artist_profiles').update({ artist_id: finalArtistId }).eq('id', profile.id);
         }
       }
 
-      let videoUrl = initialData?.metadata?.video_url;
-      let videoGuid = initialData?.metadata?.video_guid;
-      let duration = initialData?.metadata?.duration_seconds || 0;
+      let videoUrl = initialData?.metadata?.video_url ?? '';
+      let videoGuid = initialData?.metadata?.video_guid ?? '';
+      let thumbnailUrl: string | null = initialData?.metadata?.thumbnail_url ?? null;
+      let duration = initialData?.metadata?.duration_seconds ?? 0;
 
-      // Upload new video if provided
       if (selectedVideoFile) {
-        console.log('📤 Starting video upload to Bunny Stream:', {
-          fileName: selectedVideoFile.name,
-          fileSize: `${(selectedVideoFile.size / 1024 / 1024).toFixed(2)} MB`
-        });
-
+        setUploadStep('Uploading…');
         const uploadResult = await bunnyStreamService.uploadVideo(selectedVideoFile, {
-          title: formData.title.trim(),
-          onProgress: (progress) => {
-            setUploadProgress(progress);
-            updateUploadProgress(taskId, progress);
-          },
+          title: title.trim(),
+          onProgress: (p) => { if (mountedRef.current) { setUploadProgress(Math.round(p * 0.7)); updateUploadProgress(taskId, p); } },
         });
-
-        console.log('✅ Upload response received:', {
-          success: uploadResult.success,
-          hasPublicUrl: !!uploadResult.publicUrl,
-          hasVideoGuid: !!uploadResult.videoGuid,
-          error: uploadResult.error
-        });
-
-        if (!uploadResult.success || !uploadResult.publicUrl || !uploadResult.videoGuid) {
-          console.error('❌ Video upload failed:', {
-            uploadResult,
-            errorMessage: uploadResult.error || 'Video upload failed'
-          });
-          throw new Error(uploadResult.error || 'Video upload failed - invalid response from server');
-        }
-
-        // Validate URL format before storing
-        if (!uploadResult.publicUrl.startsWith('https://')) {
-          console.error('❌ Invalid URL protocol:', uploadResult.publicUrl);
-          throw new Error('Invalid video URL: must use HTTPS');
-        }
-
-        if (!uploadResult.publicUrl.includes('.b-cdn.net')) {
-          console.error('❌ Invalid CDN hostname:', uploadResult.publicUrl);
-          throw new Error('Invalid video URL: not from Bunny CDN');
-        }
-
-        if (!uploadResult.publicUrl.includes('/playlist.m3u8')) {
-          console.error('❌ Invalid video URL format:', uploadResult.publicUrl);
-          throw new Error('Invalid video URL: must be HLS playlist format');
-        }
-
-        // Store the HLS playlist URL for immediate playback
+        if (!uploadResult.success || !uploadResult.publicUrl || !uploadResult.videoGuid) throw new Error(uploadResult.error ?? 'Video upload failed');
+        if (!uploadResult.publicUrl.startsWith('https://') || !uploadResult.publicUrl.includes('.b-cdn.net') || !uploadResult.publicUrl.includes('/playlist.m3u8')) throw new Error('Invalid video URL from server');
         videoUrl = uploadResult.publicUrl;
         videoGuid = uploadResult.videoGuid;
-
-        console.log('✅ Video URL validated and ready for storage:', {
-          videoUrl,
-          videoGuid
-        });
-
-        // Try to get duration from the HLS URL
-        try {
-          duration = await bunnyStreamService.getVideoDuration(uploadResult.publicUrl);
-          console.log('✅ Video duration calculated:', duration);
-        } catch (durationError) {
-          console.warn('⚠️ Could not calculate video duration:', durationError);
-          duration = 0;
-        }
+        setUploadProgress(70);
+        try { duration = await bunnyStreamService.getVideoDuration(uploadResult.publicUrl); } catch { /* ignore */ }
       }
 
-      let thumbnailUrl: string | null = initialData?.metadata?.thumbnail_url || null;
       if (selectedThumbnailFile) {
-        const thumbnailPath = createSafeFilePath(user.id, 'thumbnails', selectedThumbnailFile.name, ALLOWED_IMAGE_EXTENSIONS);
-        if (!thumbnailPath) {
-          throw new Error('Invalid thumbnail file. Please upload a valid image file.');
-        }
-        thumbnailUrl = await uploadImageToSupabase(selectedThumbnailFile, thumbnailPath);
+        setUploadStep('Uploading thumbnail…');
+        const path = createSafeFilePath(authUser.id, 'thumbnails', selectedThumbnailFile.name, ALLOWED_IMAGE_EXTENSIONS);
+        if (path) thumbnailUrl = await uploadImageToSupabase(selectedThumbnailFile, path);
+        setUploadProgress(85);
       }
 
+      setUploadStep('Saving…');
+      setUploadProgress(90);
+
+      const metadata: Record<string, any> = {
+        video_url: videoUrl,
+        video_guid: videoGuid,
+        thumbnail_url: thumbnailUrl,
+        duration_seconds: Math.round(duration),
+        release_date: releaseDate ? (releaseTime ? `${format(releaseDate, 'yyyy-MM-dd')}T${releaseTime}:00` : format(releaseDate, 'yyyy-MM-dd')) : null,
+        file_name: selectedVideoFile?.name ?? initialData?.metadata?.file_name ?? null,
+        file_size: selectedVideoFile?.size ?? initialData?.metadata?.file_size ?? null,
+        file_type: selectedVideoFile?.type ?? initialData?.metadata?.file_type ?? null,
+        artist_id: finalArtistId,
+        bunny_stream: true,
+      };
+
       if (isEditing && initialData?.id) {
-        // Update existing content_upload
-        const { error: contentUploadError } = await supabase
-          .from('content_uploads')
-          .update({
-            title: formData.title.trim(),
-            description: formData.description.trim() || null,
-            metadata: {
-              ...initialData.metadata,
-              video_url: videoUrl,
-              video_guid: videoGuid,
-              thumbnail_url: thumbnailUrl,
-              duration_seconds: Math.round(duration),
-              release_date: formData.releaseDate || null,
-              file_name: selectedVideoFile?.name || initialData.metadata?.file_name,
-              file_size: selectedVideoFile?.size || initialData.metadata?.file_size,
-              file_type: selectedVideoFile?.type || initialData.metadata?.file_type,
-              artist_id: finalArtistId,
-              bunny_stream: true,
-            },
-          })
-          .eq('id', initialData.id);
-
-        if (contentUploadError) {
-          throw new Error(`Failed to update video data: ${contentUploadError.message}`);
-        }
-      } else {
-        // Validate that video URL is set for new videos
-        if (!videoUrl) {
-          console.error('❌ Cannot save video: video_url is missing');
-          throw new Error('Video upload failed: no playable URL available');
-        }
-
-        if (!videoGuid) {
-          console.error('❌ Cannot save video: video_guid is missing');
-          throw new Error('Video upload failed: no video GUID available');
-        }
-
-        console.log('💾 Saving new video to database:', {
-          title: formData.title.trim(),
-          videoUrl,
-          videoGuid,
-          hasDescription: !!formData.description.trim()
-        });
-
-        // Insert new content_upload
-        const { error: contentUploadError } = await supabase
-          .from('content_uploads')
-          .insert({
-            user_id: user.id,
-            artist_profile_id: artistProfile.id,
-            content_type: 'video',
-            title: formData.title.trim(),
-            description: formData.description.trim() || null,
-            status: 'approved',
-            metadata: {
-              video_url: videoUrl,
-              video_guid: videoGuid,
-              thumbnail_url: thumbnailUrl,
-              duration_seconds: Math.round(duration),
-              release_date: formData.releaseDate || null,
-              file_name: selectedVideoFile?.name || '',
-              file_size: selectedVideoFile?.size || 0,
-              file_type: selectedVideoFile?.type || 'video/mp4',
-              artist_id: finalArtistId,
-              bunny_stream: true,
-            },
-          });
-
-        if (contentUploadError) {
-          console.error('❌ Database save failed:', contentUploadError);
-          throw new Error(`Failed to save video data: ${contentUploadError.message}`);
-        }
-
-        console.log('✅ Video saved successfully to database');
-      }
-
-      setSuccess(isEditing ? 'Video updated successfully!' : 'Video uploaded successfully!');
-
-      // Update upload status to trigger notification
-      updateUploadStatus(taskId, 'completed');
-
-      // Clear caches when editing to ensure new video URL is used
-      if (isEditing && initialData?.id) {
+        const { error: updateError } = await supabase.from('content_uploads').update({ title: title.trim(), description: description.trim() || null, metadata: { ...initialData.metadata, ...metadata } }).eq('id', initialData.id);
+        if (updateError) throw updateError;
         cache.deletePattern(`video.*${initialData.id}`);
-        cache.deletePattern('must.*watch.*');
-        cache.deletePattern('home.*');
-        cache.deletePattern('new.*release.*');
-        cache.deletePattern('explore.*');
         await smartCache.invalidate(`video.*${initialData.id}`);
-        await smartCache.invalidate('must.*watch.*');
-        await smartCache.invalidate('home.*');
-        await smartCache.invalidate('new.*release.*');
-        await smartCache.invalidate('explore.*');
+      } else {
+        if (!videoUrl || !videoGuid) throw new Error('Video upload failed: no playable URL available');
+        const { error: insertError } = await supabase.from('content_uploads').insert({
+          user_id: authUser.id,
+          artist_profile_id: profile.id,
+          content_type: 'video',
+          title: title.trim(),
+          description: description.trim() || null,
+          status: 'approved',
+          metadata,
+        });
+        if (insertError) throw insertError;
       }
 
-      resetForm();
-
-      setTimeout(() => {
-        onSuccess?.();
-        onClose();
-      }, 2000);
-    } catch (err) {
-      console.error('Upload process failed:', err);
-      const errorMessage = err instanceof Error ? err.message : 'An unexpected error occurred during upload.';
-      setError(errorMessage);
-
-      // Update upload status to trigger error notification
-      updateUploadStatus(taskId, 'error', errorMessage);
+      setUploadProgress(100);
+      setUploadStep('Complete!');
+      updateUploadStatus(taskId, 'completed');
+      setSuccess(isEditing ? 'Video updated successfully!' : 'Video uploaded successfully!');
+      setTimeout(() => { onSuccess?.(); onClose(); }, 800);
+    } catch (err: any) {
+      const msg = err?.message ?? 'An unexpected error occurred.';
+      setError(msg);
+      updateUploadStatus(taskId, 'error', msg);
     } finally {
-      setIsSubmitting(false);
-      setUploadProgress(0);
+      if (mountedRef.current) { setIsSubmitting(false); setUploadStep(''); }
     }
   };
 
-  const resetForm = () => {
-    setFormData({
-      title: '',
-      description: '',
-      releaseDate: '',
-    });
-    setSelectedVideoFile(null);
-    setSelectedThumbnailFile(null);
-    if (thumbnailPreviewUrl) {
-      URL.revokeObjectURL(thumbnailPreviewUrl);
-      setThumbnailPreviewUrl(null);
-    }
-    
-    // Reset file inputs
-    const videoInput = document.getElementById('video-upload') as HTMLInputElement;
-    const thumbnailInput = document.getElementById('thumbnail-upload') as HTMLInputElement;
-    if (videoInput) videoInput.value = '';
-    if (thumbnailInput) thumbnailInput.value = '';
-  };
+  if (!user) { navigate('/'); return null; }
 
-  const removeVideoFile = () => {
-    setSelectedVideoFile(null);
-    const fileInput = document.getElementById('video-upload') as HTMLInputElement;
-    if (fileInput) {
-      fileInput.value = '';
-    }
-  };
+  if (loadingProfile) {
+    return (
+      <div className="flex flex-col min-h-screen min-h-[100dvh] bg-gradient-to-b from-[#1a1a1a] via-[#0d0d0d] to-[#000000] items-center justify-center">
+        <Loader2 className="w-8 h-8 animate-spin text-white" />
+      </div>
+    );
+  }
 
-  const removeThumbnailFile = () => {
-    setSelectedThumbnailFile(null);
-    if (thumbnailPreviewUrl) {
-      URL.revokeObjectURL(thumbnailPreviewUrl);
-      setThumbnailPreviewUrl(null);
-    }
-    const fileInput = document.getElementById('thumbnail-upload') as HTMLInputElement;
-    if (fileInput) {
-      fileInput.value = '';
-    }
-  };
+  if (!artistProfile) {
+    return (
+      <div className="flex flex-col min-h-screen min-h-[100dvh] overflow-y-auto bg-gradient-to-b from-[#1a1a1a] via-[#0d0d0d] to-[#000000] text-white content-with-nav font-['Inter',sans-serif]">
+        <div className="flex-1 flex flex-col items-center justify-center gap-5 px-5">
+          <div className="w-16 h-16 rounded-2xl bg-white/10 flex items-center justify-center">
+            <Video className="w-7 h-7 text-white/60" />
+          </div>
+          <div className="text-center space-y-1.5">
+            <h2 className="text-xl font-semibold tracking-tight text-white">Artist profile required</h2>
+            <p className="text-sm text-white/60 max-w-xs">Register as an artist to upload videos.</p>
+          </div>
+          <button onClick={() => navigate('/become-artist')} className="px-6 py-3 bg-[#00ad74] hover:bg-[#009c68] text-white rounded-full font-medium transition-all active:scale-95">
+            Become a creator
+          </button>
+        </div>
+      </div>
+    );
+  }
+
+  const canProceedStep0 = isEditing || !!selectedVideoFile;
+  const canSubmit = title.trim().length > 0 && canProceedStep0;
+  const progressPct = (currentStep / (STEPS.length - 1)) * 100;
 
   return (
-    <div className="fixed inset-0 bg-black/80 backdrop-blur-sm z-[70] flex items-center justify-center p-4">
-      <div className="bg-white rounded-2xl w-full max-w-md max-h-[90vh] flex flex-col shadow-2xl">
-        {/* Header - Fixed */}
-        <div className="sticky top-0 z-10 bg-gradient-to-b from-white to-transparent backdrop-blur-sm px-6 py-5 border-b border-gray-100 rounded-t-2xl">
-          <div className="flex items-start justify-between">
-            <h2 className="font-['Inter',sans-serif] text-3xl font-black tracking-tight text-gray-900 leading-none">
-              {initialData ? 'Editing' : 'Share your'}<br />
-              <span className="font-light italic text-gray-400">{initialData ? 'video.' : 'visual.'}</span>
-            </h2>
-            <button
-              onClick={onClose}
-              className="mt-1 p-2 hover:bg-gray-100 rounded-full transition-colors duration-200"
-            >
-              <X className="w-5 h-5 text-gray-500" />
-            </button>
-          </div>
+    <div className="flex flex-col min-h-screen min-h-[100dvh] overflow-y-auto bg-gradient-to-b from-[#1a1a1a] via-[#0d0d0d] to-[#000000] text-white content-with-nav font-['Inter',sans-serif]">
+      <header className="w-full py-5 px-5 sticky top-0 z-20 flex-shrink-0 bg-gradient-to-b from-[#1a1a1a] to-transparent backdrop-blur-sm">
+        <div className="flex items-center gap-4">
+          <button type="button" onClick={onClose} className="p-2 -ml-2 hover:bg-white/10 rounded-full transition-all duration-200 touch-manipulation flex-shrink-0" aria-label="Back">
+            <ArrowLeft className="w-6 h-6 text-white" />
+          </button>
+          <h1 className="font-['Inter',sans-serif] text-3xl font-black tracking-tight text-white leading-none">
+            {isEditing ? 'Update your' : 'Share your'}<br />
+            <span className="font-light italic text-white/60">{isEditing ? 'video.' : 'visual.'}</span>
+          </h1>
         </div>
+      </header>
 
-        {/* Scrollable Content */}
-        <div className="flex-1 overflow-y-auto">
-          <div className="p-6">
-            <form onSubmit={handleSubmit} className="space-y-6">
-            {/* Title */}
-            <div>
-              <label className="flex items-center gap-2 text-sm font-medium text-gray-700 mb-2">
-                <FileText className="w-4 h-4" />
-                Video Title *
-              </label>
-              <input
-                type="text"
-                name="title"
-                value={formData.title}
-                onChange={handleInputChange}
-                className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-[#309605]"
-                placeholder="Enter video title"
-                required
-              />
-            </div>
-
-            {/* Description */}
-            <div>
-              <label className="flex items-center gap-2 text-sm font-medium text-gray-700 mb-2">
-                <FileText className="w-4 h-4" />
-                Description
-              </label>
-              <textarea
-                name="description"
-                value={formData.description}
-                onChange={handleInputChange}
-                rows={3}
-                className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-[#309605] resize-none"
-                placeholder="Tell us about your video..."
-              />
-            </div>
-
-            {/* Release Date */}
-            <div>
-              <label className="flex items-center gap-2 text-sm font-medium text-gray-700 mb-2">
-                <Calendar className="w-4 h-4" />
-                Release Date
-              </label>
-              <input
-                type="date"
-                name="releaseDate"
-                value={formData.releaseDate}
-                onChange={handleInputChange}
-                className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-[#309605]"
-              />
-            </div>
-
-            {/* Video File Upload */}
-            <div>
-              <label className="block text-sm font-medium text-gray-700 mb-2">
-                Video File *
-              </label>
-              <div className="border-2 border-dashed border-gray-300 rounded-lg p-6 text-center">
-                <input
-                  type="file"
-                  accept="video/*"
-                  onChange={handleVideoUpload}
-                  className="hidden"
-                  id="video-upload"
-                />
-                <label htmlFor="video-upload" className="cursor-pointer">
-                  <Video className="w-12 h-12 text-gray-400 mx-auto mb-2" />
-                  <p className="text-gray-600">
-                    {selectedVideoFile ? selectedVideoFile.name : 'Click to upload video file'}
-                  </p>
-                  <p className="text-xs text-gray-500 mt-1">
-                    Max size: 500MB • Supported: MP4, MOV, AVI, WebM
-                  </p>
-                </label>
-              </div>
-              {selectedVideoFile && (
-                <div className="flex items-center justify-between bg-gray-50 p-3 rounded-md mt-2">
-                  <div className="flex items-center gap-2">
-                    <Video className="w-4 h-4 text-green-600" />
-                    <span className="text-sm text-gray-700">{selectedVideoFile.name}</span>
+      <div className="flex-1 min-h-0 overflow-y-auto scrollbar-hide px-5 py-5 space-y-8 pb-28 w-full">
+        {!isEditing && (
+          <div>
+            <div className="flex items-center gap-0 mb-3">
+              {STEPS.map((label, i) => {
+                const isActive = i === currentStep;
+                const isDone = i < currentStep;
+                return (
+                  <div key={label} className="flex items-center flex-1 last:flex-none">
+                    <button type="button" onClick={() => i < currentStep && setCurrentStep(i as Step)} disabled={i > currentStep} className={cn('flex items-center gap-2 text-xs font-semibold transition-colors min-h-[44px] touch-manipulation', isActive && 'text-white', isDone && 'text-white cursor-pointer', !isActive && !isDone && 'text-white/30 cursor-default')}>
+                      <span className={cn('w-6 h-6 rounded-full flex items-center justify-center text-[11px] font-bold transition-all', isActive && 'bg-[#00ad74] text-white ring-2 ring-[#00ad74]/30 ring-offset-2 ring-offset-[#0a0a0a]', isDone && 'bg-[#00ad74]/20 text-[#00ad74]', !isActive && !isDone && 'bg-white/10 text-white/30')}>
+                        {isDone ? <CheckCircle2 className="w-3.5 h-3.5" /> : i + 1}
+                      </span>
+                      {label}
+                    </button>
+                    {i < STEPS.length - 1 && <div className={cn('flex-1 h-px mx-3 transition-colors', i < currentStep ? 'bg-[#00ad74]/40' : 'bg-white/10')} />}
                   </div>
-                  <button
-                    type="button"
-                    onClick={removeVideoFile}
-                    className="text-red-500 hover:text-red-700 p-1 rounded-full hover:bg-red-50"
-                  >
-                    <X className="w-4 h-4" />
-                  </button>
+                );
+              })}
+            </div>
+            <div className="h-0.5 bg-white/10 rounded-full overflow-hidden">
+              <div className="h-full bg-[#00ad74] rounded-full transition-all duration-500" style={{ width: `${progressPct}%` }} />
+            </div>
+          </div>
+        )}
+
+        {/* Step 0 — Media */}
+        {currentStep === 0 && !isEditing && (
+          <div className="space-y-6">
+            <div className="space-y-1">
+              <h2 className="text-lg font-semibold tracking-tight text-white">Video file</h2>
+              <p className="text-sm text-white/60">MP4, WebM, MOV, AVI, MKV · Max 500 MB</p>
+            </div>
+            <button type="button" onClick={() => videoInputRef.current?.click()} className={cn('relative w-full rounded-2xl border-2 border-dashed flex flex-col items-center justify-center transition-all overflow-hidden min-h-[160px]', selectedVideoFile ? 'border-[#00ad74]/40 bg-[#00ad74]/5 py-6' : 'border-white/10 hover:border-[#00ad74]/40 hover:bg-[#00ad74]/5 py-12')}>
+              <input ref={videoInputRef} type="file" accept="video/*" className="hidden" onChange={handleVideoChange} />
+              {selectedVideoFile ? (
+                <div className="flex items-center gap-4 px-4 w-full">
+                  {thumbnailPreviewUrl && <img src={thumbnailPreviewUrl} alt="Preview" className="w-20 h-14 rounded-xl object-cover flex-shrink-0 border border-white/10" />}
+                  <div className="text-left min-w-0 flex-1">
+                    <div className="flex items-center gap-2 mb-0.5">
+                      <CheckCircle2 className="w-4 h-4 text-white flex-shrink-0" />
+                      <p className="text-[13px] font-bold text-white truncate">{selectedVideoFile.name}</p>
+                    </div>
+                    <p className="text-[12px] text-white/60">{(selectedVideoFile.size / (1024 * 1024)).toFixed(1)} MB</p>
+                    {isGeneratingThumbnail && <p className="text-[11px] text-white mt-1 flex items-center gap-1"><Loader2 className="w-3 h-3 animate-spin" /> Generating thumbnail…</p>}
+                    {autoThumbnailGenerated && !isGeneratingThumbnail && <p className="text-[11px] text-white mt-1 flex items-center gap-1"><Sparkles className="w-3 h-3" /> Thumbnail auto-generated</p>}
+                  </div>
+                  <span className="text-[11px] font-semibold text-white px-3 py-1.5 rounded-full bg-white/10">Change</span>
                 </div>
+              ) : (
+                <>
+                  <div className="w-14 h-14 rounded-2xl bg-white/10 flex items-center justify-center mb-3">
+                    <FileVideo className="w-7 h-7 text-white/60" />
+                  </div>
+                  <p className="text-sm font-semibold text-white mb-0.5">Tap to select a video</p>
+                  <p className="text-[12px] text-white/60">or drag and drop</p>
+                </>
               )}
-            </div>
-
-            {/* Thumbnail Options */}
-            <div>
-              <label className="block text-sm font-medium text-gray-700 mb-3">
-                Thumbnail Image
-              </label>
-
-              {/* Thumbnail Option Selector */}
-              <div className="flex gap-3 mb-4">
-                <button
-                  type="button"
-                  onClick={() => handleThumbnailOptionChange('auto')}
-                  className={`flex-1 px-4 py-3 rounded-lg border-2 transition-all duration-200 ${
-                    thumbnailOption === 'auto'
-                      ? 'border-[#309605] bg-[#e6f7f1] text-[#309605]'
-                      : 'border-gray-300 bg-white text-gray-600 hover:border-gray-400'
-                  }`}
-                >
-                  <div className="flex items-center justify-center gap-2">
-                    <Video className="w-4 h-4" />
-                    <span className="text-sm font-medium">Auto-Generate</span>
-                  </div>
-                  <p className="text-xs mt-1 opacity-75">From video frame</p>
-                </button>
-
-                <button
-                  type="button"
-                  onClick={() => handleThumbnailOptionChange('upload')}
-                  className={`flex-1 px-4 py-3 rounded-lg border-2 transition-all duration-200 ${
-                    thumbnailOption === 'upload'
-                      ? 'border-[#309605] bg-[#e6f7f1] text-[#309605]'
-                      : 'border-gray-300 bg-white text-gray-600 hover:border-gray-400'
-                  }`}
-                >
-                  <div className="flex items-center justify-center gap-2">
-                    <Image className="w-4 h-4" />
-                    <span className="text-sm font-medium">Upload Image</span>
-                  </div>
-                  <p className="text-xs mt-1 opacity-75">Custom thumbnail</p>
-                </button>
+            </button>
+            <div className="space-y-3">
+              <h2 className="text-base font-semibold text-white">Thumbnail</h2>
+              <p className="text-xs text-white/60">Preview image viewers see before playing</p>
+              <div className="flex gap-2">
+                {(['auto', 'upload'] as const).map((mode) => (
+                  <button key={mode} type="button" onClick={() => handleThumbnailOptionChange(mode)} className={cn('px-4 py-2 rounded-full text-[12px] font-semibold border transition-all', thumbnailOption === mode ? 'bg-[#00ad74] text-white border-transparent' : 'bg-white/5 text-white/60 border-white/10 hover:border-[#00ad74]/30 hover:text-white')}>
+                    {mode === 'auto' ? 'Auto-generate' : 'Upload custom'}
+                  </button>
+                ))}
               </div>
-
-              {/* Thumbnail Preview/Upload Area */}
               {thumbnailOption === 'auto' ? (
-                <div>
-                  {isGeneratingThumbnail ? (
-                    <div className="border-2 border-blue-300 bg-blue-50 rounded-lg p-8 text-center">
-                      <div className="flex items-center justify-center gap-3">
-                        <div className="w-5 h-5 border-2 border-blue-600 border-t-transparent rounded-full animate-spin"></div>
-                        <p className="text-blue-700 text-sm font-medium">Generating thumbnail from video...</p>
+                <div className={cn('rounded-2xl border p-4 flex items-center gap-4 transition-all', thumbnailPreviewUrl && autoThumbnailGenerated ? 'border-[#00ad74]/20 bg-[#00ad74]/5' : 'border-white/10 bg-white/5')}>
+                  {thumbnailPreviewUrl && autoThumbnailGenerated ? (
+                    <>
+                      <img src={thumbnailPreviewUrl} alt="Thumbnail" className="w-20 h-14 rounded-xl object-cover flex-shrink-0 border border-white/10" />
+                      <div>
+                        <p className="text-[13px] font-semibold text-white flex items-center gap-1.5"><Sparkles className="w-3.5 h-3.5 text-white" /> Thumbnail generated</p>
+                        <p className="text-[11px] text-white/60 mt-0.5">From ~20% into your video</p>
                       </div>
-                    </div>
-                  ) : thumbnailPreviewUrl ? (
-                    <div className="relative">
-                      <div className="w-full h-48 rounded-lg overflow-hidden bg-gray-100 mb-2">
-                        <img
-                          src={thumbnailPreviewUrl}
-                          alt="Auto-generated thumbnail"
-                          className="w-full h-full object-cover"
-                        />
-                      </div>
-                      <button
-                        type="button"
-                        onClick={removeThumbnailFile}
-                        className="absolute top-2 right-2 w-8 h-8 bg-red-500 hover:bg-red-600 rounded-full flex items-center justify-center transition-colors duration-200 shadow-lg"
-                      >
-                        <X className="w-4 h-4 text-white" />
-                      </button>
-                      <div className="flex items-center gap-2 p-3 bg-green-50 border border-green-200 rounded-md">
-                        <Video className="w-4 h-4 text-green-600" />
-                        <div className="flex-1">
-                          <p className="text-sm font-medium text-green-800">Thumbnail generated successfully</p>
-                          <p className="text-xs text-green-600">Extracted from video at 2-5 second mark</p>
-                        </div>
-                      </div>
-                    </div>
-                  ) : selectedVideoFile ? (
-                    <div className="border-2 border-yellow-300 bg-yellow-50 rounded-lg p-6 text-center">
-                      <p className="text-yellow-700 text-sm">Upload a video to auto-generate thumbnail</p>
-                    </div>
+                    </>
+                  ) : isGeneratingThumbnail ? (
+                    <p className="text-[12px] text-white/60 flex items-center gap-2"><Loader2 className="w-4 h-4 animate-spin" /> Generating thumbnail…</p>
                   ) : (
-                    <div className="border-2 border-dashed border-gray-300 rounded-lg p-6 text-center">
-                      <Video className="w-12 h-12 text-gray-400 mx-auto mb-2" />
-                      <p className="text-gray-600 text-sm">Upload a video first to generate thumbnail</p>
-                    </div>
+                    <p className="text-[12px] text-white/60">Select a video above to auto-generate a thumbnail.</p>
                   )}
                 </div>
               ) : (
-                <div>
-                  {thumbnailPreviewUrl ? (
-                    <div className="relative">
-                      <div className="w-full h-48 rounded-lg overflow-hidden bg-gray-100 mb-2">
-                        <img
-                          src={thumbnailPreviewUrl}
-                          alt="Uploaded thumbnail"
-                          className="w-full h-full object-cover"
-                        />
+                <button type="button" onClick={() => thumbInputRef.current?.click()} className={cn('w-full flex items-center gap-4 rounded-2xl border-2 border-dashed p-4 transition-all', thumbnailPreviewUrl && thumbnailOption === 'upload' ? 'border-[#00ad74]/30 bg-[#00ad74]/5' : 'border-white/10 hover:border-[#00ad74]/40 hover:bg-[#00ad74]/5')}>
+                  <input ref={thumbInputRef} type="file" accept="image/*" className="hidden" onChange={handleThumbnailChange} />
+                  {thumbnailPreviewUrl && thumbnailOption === 'upload' ? (
+                    <>
+                      <img src={thumbnailPreviewUrl} alt="Thumbnail" className="w-20 h-14 rounded-xl object-cover flex-shrink-0" />
+                      <div className="text-left">
+                        <p className="text-[13px] font-semibold text-white">{selectedThumbnailFile?.name ?? 'Custom thumbnail'}</p>
+                        <p className="text-[11px] text-white/60 mt-0.5">Tap to change</p>
                       </div>
-                      <button
-                        type="button"
-                        onClick={removeThumbnailFile}
-                        className="absolute top-2 right-2 w-8 h-8 bg-red-500 hover:bg-red-600 rounded-full flex items-center justify-center transition-colors duration-200 shadow-lg"
-                      >
-                        <X className="w-4 h-4 text-white" />
-                      </button>
-                      <div className="flex items-center gap-2 p-3 bg-green-50 border border-green-200 rounded-md">
-                        <Image className="w-4 h-4 text-green-600" />
-                        <span className="text-sm text-gray-700">{selectedThumbnailFile?.name}</span>
-                      </div>
-                    </div>
+                    </>
                   ) : (
-                    <div className="border-2 border-dashed border-gray-300 rounded-lg p-6 text-center hover:border-[#309605] hover:bg-gray-50 transition-all duration-200">
-                      <input
-                        type="file"
-                        accept="image/*"
-                        onChange={handleThumbnailUpload}
-                        className="hidden"
-                        id="thumbnail-upload"
-                      />
-                      <label htmlFor="thumbnail-upload" className="cursor-pointer">
-                        <Image className="w-12 h-12 text-gray-400 mx-auto mb-2" />
-                        <p className="text-gray-600 font-medium">
-                          Click to upload thumbnail image
-                        </p>
-                        <p className="text-xs text-gray-500 mt-1">
-                          JPEG, PNG, WebP (max 5MB)
-                        </p>
-                      </label>
-                    </div>
+                    <>
+                      <div className="w-10 h-10 rounded-xl bg-white/10 flex items-center justify-center flex-shrink-0"><ImageIcon className="w-5 h-5 text-white/60" /></div>
+                      <div className="text-left">
+                        <p className="text-[13px] font-semibold text-white">Upload thumbnail</p>
+                        <p className="text-[11px] text-white/60">JPG, PNG, WebP · Max 10 MB · 16:9 recommended</p>
+                      </div>
+                    </>
                   )}
-                </div>
+                </button>
               )}
             </div>
+            <button type="button" onClick={() => canProceedStep0 && setCurrentStep(1)} disabled={!canProceedStep0} className={cn('w-full h-12 rounded-xl font-bold text-sm transition-all flex items-center justify-center gap-2 mt-2', canProceedStep0 ? 'bg-[#00ad74] text-white hover:bg-[#009c68]' : 'bg-white/10 text-white/40 cursor-not-allowed')}>
+              {canProceedStep0 ? <><CheckCircle2 className="w-4 h-4" /> Continue to Details <ChevronRight className="w-4 h-4" /></> : 'Select a video file to continue'}
+            </button>
+          </div>
+        )}
 
-            {uploadProgress > 0 && uploadProgress < 100 && (
-              <div className="p-3 bg-blue-100 border border-blue-200 rounded-lg">
-                <div className="flex items-center justify-between mb-2">
-                  <p className="text-blue-700 text-sm font-medium">Uploading video...</p>
-                  <p className="text-blue-700 text-sm font-medium">{Math.round(uploadProgress)}%</p>
+        {/* Step 1 — Details */}
+        {(currentStep === 1 || isEditing) && (
+          <div className="space-y-6">
+            <div className="space-y-2">
+              <label className="text-xs font-bold uppercase tracking-[0.12em] text-white/60 block">Title <span className="text-[#00ad74]">*</span></label>
+              <input type="text" placeholder={isEditing ? 'Video title' : 'Give your video a title'} value={title} onChange={(e) => setTitle(e.target.value)} className="w-full h-12 bg-white/5 border border-white/10 focus:border-[#00ad74]/30 focus:ring-2 focus:ring-[#00ad74]/20 text-white placeholder:text-white/40 rounded-xl px-4 outline-none transition-all" />
+            </div>
+            <div className="space-y-2">
+              <label className="text-xs font-bold uppercase tracking-[0.12em] text-white/60 block">Description <span className="ml-2 text-[10px] normal-case tracking-normal font-normal text-white/40">optional</span></label>
+              <textarea rows={4} placeholder="Tell viewers about this video…" value={description} onChange={(e) => setDescription(e.target.value)} className="w-full rounded-xl border border-white/10 bg-white/5 px-4 py-3 text-sm text-white placeholder:text-white/40 focus:outline-none focus:ring-2 focus:ring-[#00ad74]/20 focus:border-[#00ad74]/30 resize-none transition-all min-h-[96px]" />
+            </div>
+            <div className="space-y-2">
+              <label className="text-xs font-bold uppercase tracking-[0.12em] text-white/60 block">Release date & time <span className="ml-2 text-[10px] normal-case tracking-normal font-normal text-white/40">optional</span></label>
+              <div className="grid grid-cols-2 gap-3">
+                <input type="date" value={releaseDate ? format(releaseDate, 'yyyy-MM-dd') : ''} onChange={(e) => setReleaseDate(e.target.value ? new Date(e.target.value) : undefined)} className="w-full h-12 bg-white/5 border border-white/10 focus:border-[#00ad74]/30 focus:ring-2 focus:ring-[#00ad74]/20 text-white rounded-xl px-4 outline-none transition-all" />
+                <input type="time" value={releaseTime} onChange={(e) => setReleaseTime(e.target.value || '00:00')} className="w-full h-12 bg-white/5 border border-white/10 focus:border-[#00ad74]/30 focus:ring-2 focus:ring-[#00ad74]/20 text-white rounded-xl px-4 outline-none transition-all" />
+              </div>
+            </div>
+            {isEditing && (
+              <div className="space-y-2">
+                <label className="text-xs font-bold uppercase tracking-[0.12em] text-white/60 block">Thumbnail <span className="text-[10px] normal-case text-white/40">optional</span></label>
+                <button type="button" onClick={() => thumbInputRef.current?.click()} className="w-full flex items-center gap-4 rounded-2xl border-2 border-dashed border-white/10 hover:border-[#00ad74]/40 hover:bg-[#00ad74]/5 p-4 transition-all">
+                  <input ref={thumbInputRef} type="file" accept="image/*" className="hidden" onChange={handleThumbnailChange} />
+                  {thumbnailPreviewUrl ? <img src={thumbnailPreviewUrl} alt="Thumbnail" className="w-20 h-14 rounded-xl object-cover flex-shrink-0" /> : <div className="w-10 h-10 rounded-xl bg-white/10 flex items-center justify-center flex-shrink-0"><ImageIcon className="w-5 h-5 text-white/60" /></div>}
+                  <div className="text-left">
+                    <p className="text-[13px] font-semibold text-white">{selectedThumbnailFile?.name ?? (thumbnailPreviewUrl ? 'Current thumbnail' : 'Upload thumbnail')}</p>
+                    <p className="text-[11px] text-white/60 mt-0.5">JPG, PNG, WebP · 16:9 recommended</p>
+                  </div>
+                </button>
+              </div>
+            )}
+            {isSubmitting && (
+              <div className="space-y-2.5 rounded-2xl border border-white/10 bg-white/5 p-5">
+                <div className="flex justify-between text-[12px]">
+                  <span className="text-white/60 font-medium">{uploadStep || 'Uploading…'}</span>
+                  <span className="font-bold text-white">{uploadProgress}%</span>
                 </div>
-                <div className="w-full bg-blue-200 rounded-full h-2">
-                  <div
-                    className="bg-blue-600 h-2 rounded-full transition-all duration-300"
-                    style={{ width: `${uploadProgress}%` }}
-                  ></div>
+                <div className="h-1.5 bg-white/10 rounded-full overflow-hidden">
+                  <div className="h-full bg-[#00ad74] rounded-full transition-all" style={{ width: `${uploadProgress}%` }} />
+                </div>
+                <p className="text-[11px] text-white/50">Please do not close this page while uploading.</p>
+              </div>
+            )}
+            {error && <div className="rounded-xl border border-red-500/30 bg-red-500/10 px-4 py-3"><p className="text-sm text-red-400">{error}</p></div>}
+            {success && <div className="rounded-xl border border-[#00ad74]/30 bg-[#00ad74]/10 px-4 py-3"><p className="text-sm text-[#00ad74]">{success}</p></div>}
+            {!isSubmitting && !isEditing && selectedVideoFile && (
+              <div className="rounded-2xl border border-white/10 bg-white/5 p-5 space-y-3">
+                <p className="text-[10px] font-bold uppercase tracking-[0.14em] text-white/50">Submission summary</p>
+                <div className="flex items-center gap-3">
+                  {thumbnailPreviewUrl && <img src={thumbnailPreviewUrl} alt="Thumb" className="w-14 h-10 rounded-xl object-cover flex-shrink-0 border border-white/10" />}
+                  <div className="min-w-0 flex-1">
+                    <p className="text-[13px] font-bold text-white truncate">{title || 'Untitled Video'}</p>
+                    <p className="text-[11px] text-white/60">{selectedVideoFile.name} · {(selectedVideoFile.size / (1024 * 1024)).toFixed(1)} MB</p>
+                  </div>
                 </div>
               </div>
             )}
-
-            {error && (
-              <div className="p-3 bg-red-100 border border-red-200 rounded-lg">
-                <p className="text-red-700 text-sm">{error}</p>
-              </div>
-            )}
-
-            {success && (
-              <div className="p-3 bg-green-100 border border-green-200 rounded-lg">
-                <p className="text-green-700 text-sm">{success}</p>
-              </div>
-            )}
-
-            <div className="flex gap-3 pt-4">
-              <button
-                type="button"
-                onClick={onClose}
-                disabled={isSubmitting}
-                className="flex-1 px-4 py-2 border border-gray-300 text-gray-700 rounded-md hover:bg-gray-50 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
-              >
-                Cancel
-              </button>
-              <button
-                type="submit"
-                disabled={isSubmitting || !formData.title.trim() || !selectedVideoFile}
-                className="flex-1 px-4 py-2 bg-[#309605] text-white rounded-md hover:bg-[#3ba208] transition-colors disabled:bg-gray-300 disabled:cursor-not-allowed"
-              >
-                {isSubmitting ? 'Uploading...' : 'Upload Video'}
+            <div className="flex gap-3 pt-2">
+              {!isEditing && (
+                <button type="button" onClick={() => setCurrentStep(0)} disabled={isSubmitting} className="flex-1 min-h-[48px] py-3.5 rounded-xl font-semibold text-sm border border-white/10 hover:bg-white/10 text-white touch-manipulation disabled:opacity-50">Back</button>
+              )}
+              <button type="button" onClick={handleSubmit} disabled={isSubmitting || !canSubmit} className={cn('min-h-[48px] py-3.5 rounded-xl font-bold text-sm transition-all flex items-center justify-center gap-2 touch-manipulation', isEditing ? 'flex-1' : 'flex-[2]', canSubmit && !isSubmitting ? 'bg-[#00ad74] text-white hover:bg-[#009c68]' : 'bg-white/10 text-white/40 cursor-not-allowed disabled:opacity-50')}>
+                {isSubmitting ? <><Loader2 className="w-4 h-4 animate-spin" /> {uploadStep || 'Uploading…'}</> : isEditing ? <><CheckCircle2 className="w-4 h-4" /> Save changes</> : <><Upload className="w-4 h-4" /> Publish video</>}
               </button>
             </div>
-          </form>
           </div>
-        </div>
+        )}
       </div>
     </div>
   );

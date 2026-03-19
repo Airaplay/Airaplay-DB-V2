@@ -5,7 +5,7 @@ import { PurchaseTreatsModal } from './PurchaseStreatsModal';
 import { CustomConfirmModal } from './CustomConfirmModal';
 
 interface PromotionSetupModalProps {
-  promotionType: 'song' | 'video' | 'profile' | 'album';
+  promotionType: 'song' | 'video' | 'profile' | 'album' | 'short_clip' | 'playlist';
   targetId: string | null;
   targetTitle: string;
   targetCoverUrl?: string | null;
@@ -78,13 +78,19 @@ export const PromotionSetupModal = ({
           query = supabase.from('songs').select('cover_image_url').eq('id', targetId).maybeSingle();
           break;
         case 'video':
-          query = supabase.from('videos').select('thumbnail_url').eq('id', targetId).maybeSingle();
+        case 'short_clip':
+          // Videos and short clips are stored in content_uploads; thumbnail is inside metadata
+          query = supabase.from('content_uploads').select('metadata').eq('id', targetId).maybeSingle();
           break;
         case 'album':
           query = supabase.from('albums').select('cover_image_url').eq('id', targetId).maybeSingle();
           break;
+        case 'playlist':
+          query = supabase.from('playlists').select('cover_image_url').eq('id', targetId).maybeSingle();
+          break;
         case 'profile':
-          query = supabase.from('artist_profiles').select('avatar_url').eq('user_id', targetId).maybeSingle();
+          // Avatar is on the users table, not artist_profiles
+          query = supabase.from('users').select('avatar_url').eq('id', targetId).maybeSingle();
           break;
         default:
           return;
@@ -92,8 +98,13 @@ export const PromotionSetupModal = ({
 
       const { data, error } = await query;
       if (!error && data) {
-        const imageUrl = data.cover_image_url || data.thumbnail_url || data.avatar_url;
-        setCoverImageUrl(imageUrl || null);
+        const imageUrl =
+          data.cover_image_url ||
+          data.avatar_url ||
+          (data as any).metadata?.thumbnail_url ||
+          (data as any).metadata?.cover_url ||
+          null;
+        setCoverImageUrl(imageUrl);
       }
     } catch (err) {
       console.error('Error fetching cover image:', err);
@@ -642,7 +653,7 @@ export const PromotionSetupModal = ({
             {[
               'Boosts run in full 24-hour periods',
               'Price is per day — multiply for longer runs',
-              'Requires admin approval before going live',
+              'Goes live immediately when Auto-Approval is enabled',
               'Track performance in the Campaigns tab',
               'Treats are deducted upon confirmation',
             ].map((item) => (

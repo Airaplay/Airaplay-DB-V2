@@ -6,6 +6,7 @@ import { treatCache, CACHE_KEYS, getCachedData } from '../lib/treatCache';
 import { persistentCache } from '../lib/persistentCache';
 import { CustomConfirmDialog } from './CustomConfirmDialog';
 import { cn } from '../lib/utils';
+import { toUserFacingPaymentError, TRY_AGAIN_LABEL } from '../lib/criticalErrorMessages';
 
 interface TreatWithdrawalModalProps {
   onClose: () => void;
@@ -95,7 +96,7 @@ export const TreatWithdrawalModal: React.FC<TreatWithdrawalModalProps> = ({
       setSettings(settingsData);
     } catch (err) {
       console.error('Error loading wallet and settings:', err);
-      setError('Failed to load withdrawal information');
+      setError(toUserFacingPaymentError(err, 'load'));
     } finally {
       setIsLoading(false);
     }
@@ -177,7 +178,7 @@ export const TreatWithdrawalModal: React.FC<TreatWithdrawalModalProps> = ({
       setTimeout(() => { onClose(); }, 5000);
     } catch (err) {
       console.error('Error processing withdrawal:', err);
-      setError(err instanceof Error ? err.message : 'Withdrawal failed');
+      setError(toUserFacingPaymentError(err, 'withdrawal'));
     } finally {
       setIsSubmitting(false);
     }
@@ -431,9 +432,14 @@ export const TreatWithdrawalModal: React.FC<TreatWithdrawalModalProps> = ({
 
           {/* Validation error */}
           {error && (
-            <div className="border border-red-500/30 rounded-xl p-4 bg-red-500/10 flex items-center gap-3">
-              <AlertCircle className="w-4 h-4 text-red-400 flex-shrink-0" />
-              <p className="text-sm text-red-400 font-medium">{error}</p>
+            <div className="border border-red-500/30 rounded-xl p-4 bg-red-500/10 flex flex-col sm:flex-row sm:items-center gap-3">
+              <div className="flex items-start gap-3 flex-1">
+                <AlertCircle className="w-4 h-4 text-red-400 flex-shrink-0 mt-0.5" />
+                <p className="text-sm text-red-400 font-medium">{error}</p>
+              </div>
+              <button type="button" onClick={() => setError(null)} className="sm:ml-auto px-4 py-2 rounded-xl border border-red-400/40 text-red-400 text-sm font-medium hover:bg-red-500/10 transition-colors whitespace-nowrap">
+                {TRY_AGAIN_LABEL}
+              </button>
             </div>
           )}
 

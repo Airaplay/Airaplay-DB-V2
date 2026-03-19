@@ -18,9 +18,11 @@ interface TreatWalletCardProps {
   onTip: () => void;
   onPromote: () => void;
   onWithdraw: () => void;
+  /** When false, hides Earned Balance stat (e.g. on TreatScreen for simpler UI). Default true. */
+  showEarnedAndSpent?: boolean;
 }
 
-export const TreatWalletCard = ({ onPurchase, onTip, onPromote, onWithdraw }: TreatWalletCardProps): JSX.Element => {
+export const TreatWalletCard = ({ onPurchase, onTip, onPromote, onWithdraw, showEarnedAndSpent = true }: TreatWalletCardProps): JSX.Element => {
   const [wallet, setWallet] = useState<TreatWallet | null>(null);
   const [isLoading, setIsLoading] = useState(true);
 
@@ -189,9 +191,8 @@ export const TreatWalletCard = ({ onPurchase, onTip, onPromote, onWithdraw }: Tr
             </div>
           </div>
           
-          <div className="text-right min-w-0 max-w-[45%]">
-            <p className="font-['Inter',sans-serif] font-bold text-white truncate"
-              style={{ fontSize: 'clamp(1rem, 5vw, 1.5rem)' }}>
+          <div className="text-right">
+            <p className="font-['Inter',sans-serif] font-bold text-white text-2xl">
               {Number(wallet?.balance || 0).toLocaleString()}
             </p>
             <p className="font-['Inter',sans-serif] text-white/70 text-sm">
@@ -199,31 +200,22 @@ export const TreatWalletCard = ({ onPurchase, onTip, onPromote, onWithdraw }: Tr
             </p>
           </div>
         </div>
-        {/* Stats Grid */}
-        <div className="grid grid-cols-2 gap-3 mt-6">
-          <div className="p-4 bg-white/5 rounded-xl border border-white/10 min-w-0">
-            <p className="font-['Inter',sans-serif] text-white/60 text-xs mb-2">
-              Earned Balance
-            </p>
-            <p className="font-['Inter',sans-serif] font-bold text-white truncate"
-              style={{ fontSize: 'clamp(0.9rem, 4vw, 1.25rem)' }}>
-              {Number(wallet?.total_earned || 0).toLocaleString()}
-            </p>
+        {/* Stats Grid - optional (Earned Balance only; Spent and Withdrawn removed from UI) */}
+        {showEarnedAndSpent && (
+          <div className="grid grid-cols-2 gap-3 mt-6">
+            <div className="p-4 bg-white/5 rounded-xl border border-white/10">
+              <p className="font-['Inter',sans-serif] text-white/60 text-xs mb-2">
+                Earned Balance
+              </p>
+              <p className="font-['Inter',sans-serif] font-bold text-white text-xl">
+                {Number(wallet?.total_earned || 0).toLocaleString()}
+              </p>
+            </div>
           </div>
-
-          <div className="p-4 bg-white/5 rounded-xl border border-white/10 min-w-0">
-            <p className="font-['Inter',sans-serif] text-white/60 text-xs mb-2">
-              Total Spent
-            </p>
-            <p className="font-['Inter',sans-serif] font-bold text-white truncate"
-              style={{ fontSize: 'clamp(0.9rem, 4vw, 1.25rem)' }}>
-              {Number(wallet?.total_spent || 0).toLocaleString()}
-            </p>
-          </div>
-        </div>
+        )}
 
         {/* Action Buttons */}
-        <div className="grid grid-cols-2 gap-3 mt-3">
+        <div className={`grid grid-cols-2 gap-3 ${showEarnedAndSpent ? 'mt-3' : 'mt-6'}`}>
           <button
             onClick={onPurchase}
             className="flex items-center justify-center gap-2 h-12 bg-gradient-to-r from-green-600 to-emerald-600 hover:from-green-700 hover:to-emerald-700 rounded-xl font-['Inter',sans-serif] font-medium text-white transition-all duration-200 shadow-lg shadow-green-600/25"

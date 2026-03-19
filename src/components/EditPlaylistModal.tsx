@@ -1,6 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { X, Music, Search, Plus, Trash2, Image as ImageIcon, GripVertical } from 'lucide-react';
 import { supabase } from '../lib/supabase';
+import { sanitizeForFilter } from '../lib/filterSecurity';
 
 interface EditPlaylistModalProps {
   playlistId: string;
@@ -205,7 +206,7 @@ export const EditPlaylistModal: React.FC<EditPlaylistModalProps> = ({
           cover_image_url,
           artist:artist_id(name)
         `)
-        .ilike('title', `%${query}%`)
+        .ilike('title', `%${sanitizeForFilter(query?.trim() || '')}%`)
         .limit(10);
 
       if (error) {

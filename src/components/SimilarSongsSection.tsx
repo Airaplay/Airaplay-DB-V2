@@ -62,9 +62,9 @@ export const SimilarSongsSection: React.FC<SimilarSongsSectionProps> = ({
   }
 
   return (
-    <div className="w-full max-w-sm mx-auto mb-4">
-      <div className="flex items-center justify-between mb-3 px-1">
-        <h3 className="text-white font-semibold text-base">
+    <div className="w-full mb-0">
+      <div className="flex items-center justify-between mb-3 px-0">
+        <h3 className="font-sans font-semibold text-white text-base">
           Similar to this song
         </h3>
       </div>
@@ -73,9 +73,9 @@ export const SimilarSongsSection: React.FC<SimilarSongsSectionProps> = ({
         <div className="grid grid-cols-3 gap-3">
           {Array.from({ length: 3 }).map((_, i) => (
             <div key={i}>
-              <Skeleton variant="rectangular" className="w-full aspect-square rounded-lg bg-white/10 mb-2" />
-              <Skeleton variant="text" className="h-3 w-full rounded bg-white/10 mb-1" />
-              <Skeleton variant="text" className="h-2 w-3/4 rounded bg-white/10" />
+              <Skeleton variant="rectangular" className="w-full aspect-square rounded-lg bg-secondary mb-2" />
+              <Skeleton variant="text" className="h-3 w-full rounded bg-secondary mb-1" />
+              <Skeleton variant="text" className="h-2 w-3/4 rounded bg-secondary" />
             </div>
           ))}
         </div>
@@ -87,7 +87,7 @@ export const SimilarSongsSection: React.FC<SimilarSongsSectionProps> = ({
               onClick={() => onSongSelect(song)}
               className="group cursor-pointer text-left"
             >
-              <div className="relative w-full aspect-square rounded-lg overflow-hidden mb-2 bg-white/5">
+              <div className="relative w-full aspect-square rounded-xl overflow-hidden mb-2 bg-secondary shadow-lg">
                 {song.coverImageUrl ? (
                   <img
                     src={song.coverImageUrl}
@@ -95,12 +95,12 @@ export const SimilarSongsSection: React.FC<SimilarSongsSectionProps> = ({
                     className="w-full h-full object-cover group-hover:scale-105 transition-transform duration-300"
                   />
                 ) : (
-                  <div className="w-full h-full bg-gradient-to-br from-[#309605] to-[#3ba208] flex items-center justify-center">
-                    <span className="text-white text-2xl font-bold">♪</span>
+                  <div className="w-full h-full bg-gradient-to-br from-primary/80 to-primary flex items-center justify-center">
+                    <span className="text-primary-foreground text-2xl font-bold">♪</span>
                   </div>
                 )}
                 <div className="absolute inset-0 bg-black/0 group-hover:bg-black/40 transition-colors duration-300 flex items-center justify-center">
-                  <Play className="w-8 h-8 text-white opacity-0 group-hover:opacity-100 transition-opacity duration-300" fill="white" />
+                  <Play className="w-8 h-8 text-primary-foreground opacity-0 group-hover:opacity-100 transition-opacity duration-300" fill="currentColor" />
                 </div>
               </div>
 
@@ -108,7 +108,7 @@ export const SimilarSongsSection: React.FC<SimilarSongsSectionProps> = ({
                 <h4 className="text-xs font-semibold text-white line-clamp-2 mb-0.5 leading-tight">
                   {song.title}
                 </h4>
-                <p className="text-[10px] text-gray-400 truncate">
+                <p className="text-[10px] text-white/60 truncate">
                   {song.artist}
                 </p>
               </div>

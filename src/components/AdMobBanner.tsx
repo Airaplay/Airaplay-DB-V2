@@ -9,22 +9,23 @@ interface AdMobBannerProps {
 
 export function AdMobBanner({ position = BannerAdPosition.BOTTOM_CENTER, show = true }: AdMobBannerProps) {
   useEffect(() => {
-    if (!admobService.isNativePlatform()) {
+    const service = admobService;
+    if (!service?.isNativePlatform?.()) {
       return;
     }
 
     if (show) {
-      admobService.showBanner(position);
+      service.showBanner(position).catch(() => {});
     } else {
-      admobService.hideBanner();
+      service.hideBanner().catch(() => {});
     }
 
     return () => {
-      admobService.removeBanner();
+      service.removeBanner().catch(() => {});
     };
   }, [show, position]);
 
-  if (!admobService.isNativePlatform()) {
+  if (!admobService?.isNativePlatform?.()) {
     return (
       <div className="bg-gray-200 p-4 text-center text-sm text-gray-600">
         Ad Banner (Preview - Shows on mobile)

@@ -20,13 +20,16 @@ interface ArtistTopTracksSectionProps {
   artistName: string;
   currentSongId: string;
   onSongSelect: (_song: Song) => void;
+  /** Called when an album is clicked. If provided, use this instead of navigate (e.g. to close overlay first). */
+  onAlbumSelect?: (albumId: string) => void;
 }
 
 export const ArtistTopTracksSection: React.FC<ArtistTopTracksSectionProps> = ({
   artistId,
   artistName,
   currentSongId,
-  onSongSelect
+  onSongSelect,
+  onAlbumSelect
 }) => {
   const navigate = useNavigate();
   const [contentItems, setContentItems] = useState<ContentItem[]>([]);
@@ -69,7 +72,11 @@ export const ArtistTopTracksSection: React.FC<ArtistTopTracksSectionProps> = ({
     setTimeout(() => setActiveBlink(null), 600);
 
     if (item.type === 'album' && item.album) {
-      navigate(`/album/${item.id}`);
+      if (onAlbumSelect) {
+        onAlbumSelect(item.id);
+      } else {
+        navigate(`/album/${item.id}`);
+      }
     } else if (item.type === 'song' && item.song) {
       onSongSelect(item.song);
     }
@@ -80,14 +87,15 @@ export const ArtistTopTracksSection: React.FC<ArtistTopTracksSectionProps> = ({
   }
 
   return (
-    <section className="w-full py-2 -mx-5 px-6">
-      <div className="flex items-center justify-between mb-6">
-        <h2 className="font-['Inter',sans-serif] font-bold text-white text-xl tracking-tight">
+    <section className="w-full py-2 -mx-1 px-1">
+      <div className="flex items-center justify-between mb-4">
+        <h2 className="font-sans font-bold text-white text-lg tracking-tight">
           More from {artistName}
         </h2>
       </div>
 
       {isLoading ? (
+        // Keep ScrollArea for consistent skeleton loading animation with horizontal scrolling
         <ScrollArea className="w-full">
           <div className="flex space-x-3 pb-4">
             {[1, 2, 3, 4, 5].map((i) => (
@@ -102,11 +110,14 @@ export const ArtistTopTracksSection: React.FC<ArtistTopTracksSectionProps> = ({
               </div>
             ))}
           </div>
+          {/* ScrollBar is implicitly handled by ScrollArea when content overflows */}
           <ScrollBar orientation="horizontal" className="opacity-0" />
         </ScrollArea>
       ) : (
+        // Ensure the ScrollArea itself has a defined width and allows scrolling.
+        // The inner div should allow its content to extend horizontally.
         <ScrollArea className="w-full">
-          <div className="flex space-x-3 pb-4">
+          <div className="flex space-x-3 pb-4 w-max"> {/* Added w-max here */}
             {contentItems.map((item, index) => {
               const isAlbum = item.type === 'album';
               const coverImageUrl = isAlbum 
@@ -139,14 +150,14 @@ export const ArtistTopTracksSection: React.FC<ArtistTopTracksSectionProps> = ({
                       <div className="absolute inset-0 bg-black/30 group-active:bg-black/20 transition-colors duration-200"></div>
                       {isAlbum && (
                         <div className="absolute top-1.5 right-1.5 bg-black/70 backdrop-blur-sm px-1.5 py-0.5 rounded-md">
-                          <span className="font-['Inter',sans-serif] font-semibold text-white text-[9px] leading-none tracking-tight">
+                          <span className="font-[\'Inter\',sans-serif] font-semibold text-white text-[10px] leading-none tracking-tight">
                             Album
                           </span>
                         </div>
                       )}
                     </div>
                     <div className="w-[110px] text-center mt-2.5">
-                      <p className="font-['Inter',sans-serif] font-bold text-left text-white/90 text-xs leading-tight group-active:text-white transition-colors duration-200 line-clamp-1">
+                      <p className="font-[\'Inter\',sans-serif] font-bold text-left text-white/90 text-xs leading-tight group-active:text-white transition-colors duration-200 line-clamp-1">
                         {item.title}
                       </p>
                     </div>
@@ -155,6 +166,7 @@ export const ArtistTopTracksSection: React.FC<ArtistTopTracksSectionProps> = ({
               );
             })}
           </div>
+          {/* ScrollBar is implicitly handled by ScrollArea when content overflows */}
           <ScrollBar orientation="horizontal" className="opacity-0" />
         </ScrollArea>
       )}

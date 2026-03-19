@@ -33,6 +33,7 @@ export const LazyImage: React.FC<LazyImageProps> = ({
   const [currentSrc, setCurrentSrc] = useState<string>('');
   const imgRef = useRef<HTMLImageElement>(null);
   const containerRef = useRef<HTMLDivElement>(null);
+  const prevSrcRef = useRef<string>('');
 
   // For eager loading, skip IntersectionObserver and load immediately
   useEffect(() => {
@@ -60,8 +61,6 @@ export const LazyImage: React.FC<LazyImageProps> = ({
 
   useEffect(() => {
     if (isInView && src) {
-      setIsLoaded(false);
-      setHasError(false);
       const quality = getImageQualityForNetwork();
       const optimizedUrl = getOptimizedImageUrl(src, {
         width,
@@ -69,6 +68,12 @@ export const LazyImage: React.FC<LazyImageProps> = ({
         quality,
         format: 'webp'
       });
+      // Only reset loaded state when src actually changed to avoid flicker on parent re-renders
+      if (prevSrcRef.current !== src) {
+        prevSrcRef.current = src;
+        setIsLoaded(false);
+        setHasError(false);
+      }
       setCurrentSrc(optimizedUrl);
     }
   }, [isInView, src, width, height]);

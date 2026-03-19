@@ -55,7 +55,7 @@ export const GenreSongsModal: React.FC<GenreSongsModalProps> = ({
       totalPadding += miniPlayerHeight;
 
       // Check if ad banner is active
-      if (document.body.classList.contains('ad-banner-active')) {
+      if (document.body.classList.contains('ad-banner-active') || document.body.classList.contains('ad-banner-above-mini')) {
         totalPadding += adBannerHeight;
       }
     }

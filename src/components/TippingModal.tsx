@@ -435,7 +435,7 @@ export const TippingModal: React.FC<TippingModalProps> = ({
                             <p className="text-sm font-semibold text-white/90 truncate">{r.display_name}</p>
                             {r.username && <p className="text-[11px] text-white/35">@{r.username}</p>}
                           </div>
-                          <span className="text-[9px] font-bold uppercase tracking-widest text-white/25 shrink-0">{r.role}</span>
+                          <span className="text-[10px] font-bold uppercase tracking-widest text-white/25 shrink-0">{r.role}</span>
                         </button>
                       ))}
                     </div>

@@ -1,7 +1,12 @@
-import React, { useState } from 'react';
-import { Music, Image, X, Calendar, FileText, Tag, Plus } from 'lucide-react';
+import { useState, useEffect, useRef } from "react";
+import { useNavigate } from "react-router-dom";
+import {
+  ArrowLeft, Upload, Music2, Image as ImageIcon, Loader2, Calendar as CalendarIcon,
+  CheckCircle2, FileAudio, ChevronRight, X, AlertCircle
+} from "lucide-react";
+import { format } from "date-fns";
 import { supabase, getArtistProfile } from '../lib/supabase';
-import { useLocation } from '../hooks/useLocation';
+import { useAuth } from '../contexts/AuthContext';
 import { directUploadToBunny } from '../lib/directBunnyUpload';
 import {
   validateAudioFile,
@@ -14,109 +19,135 @@ import { compressAlbumCover } from '../lib/imageOptimization';
 import { cache } from '../lib/cache';
 import { smartCache } from '../lib/smartCache';
 import { useUpload } from '../contexts/UploadContext';
+import { useLocation } from '../hooks/useLocation';
+import { LoadingLogo } from './LoadingLogo';
+import { cn } from '../lib/utils';
 
-interface SingleUploadFormProps {
-  onClose: () => void;
-  onSuccess?: () => void;
-  initialData?: any; // For editing existing content, though not fully implemented for single songs here
+interface Genre { id: string; name: string; }
+interface Subgenre { id: string; name: string; parent_genre_id: string; }
+interface Mood { id: string; name: string; description?: string; }
+interface ArtistProfile { 
+  id: string; 
+  stage_name: string; 
+  artist_id: string | null;
+  bio?: string;
+  profile_photo_url?: string;
+  is_verified?: boolean;
 }
 
-export default function SingleUploadForm({ onClose, onSuccess, initialData }: SingleUploadFormProps) {
+/* ── Step indicator ── */
+const STEPS = ["Files", "Details", "Metadata"] as const;
+type Step = 0 | 1 | 2;
+
+interface SingleUploadFormProps {
+  onClose?: () => void;
+  onSuccess?: () => void;
+}
+
+const SingleUploadForm = ({ onClose, onSuccess }: SingleUploadFormProps) => {
+  const navigate = useNavigate();
+  const { user } = useAuth();
   const { location } = useLocation(true);
   const { addUpload, updateUploadProgress, updateUploadStatus } = useUpload();
-  const isEditing = !!initialData;
-  const [formData, setFormData] = useState({
-    title: initialData?.title || '',
-    description: initialData?.description || '',
-    releaseDate: initialData?.metadata?.release_date || '',
-    genre: initialData?.metadata?.genre || ''
-  });
+  const mountedRef = useRef(true);
+  const audioInputRef = useRef<HTMLInputElement>(null);
+  const coverInputRef = useRef<HTMLInputElement>(null);
+
+  const [artistProfile, setArtistProfile] = useState<ArtistProfile | null>(null);
+  const [loadingProfile, setLoadingProfile] = useState(true);
+  const [currentStep, setCurrentStep] = useState<Step>(0);
+
+  // Form
+  const [title, setTitle] = useState("");
+  const [description, setDescription] = useState("");
+  const [releaseDate, setReleaseDate] = useState<Date>();
+  const [releaseTime, setReleaseTime] = useState<string>('00:00');
+  const [genreId, setGenreId] = useState("");
+  const [subgenreId, setSubgenreId] = useState("");
+  const [selectedMoods, setSelectedMoods] = useState<string[]>([]);
+  const [featuredArtist, setFeaturedArtist] = useState("");
+
+  // Files
   const [audioFile, setAudioFile] = useState<File | null>(null);
-  const [coverImage, setCoverImage] = useState<File | null>(null);
-  const [imagePreviewUrl, setImagePreviewUrl] = useState<string | null>(initialData?.metadata?.cover_url || null);
-  const [isSubmitting, setIsSubmitting] = useState(false);
+  const [coverFile, setCoverFile] = useState<File | null>(null);
+  const [coverPreview, setCoverPreview] = useState<string | null>(null);
+
+  // Reference data
+  const [genres, setGenres] = useState<Genre[]>([]);
+  const [subgenres, setSubgenres] = useState<Subgenre[]>([]);
+  const [moods, setMoods] = useState<Mood[]>([]);
+
+  // Upload
+  const [uploading, setUploading] = useState(false);
+  const [uploadProgress, setUploadProgress] = useState(0);
   const [error, setError] = useState<string | null>(null);
-  const [success, setSuccess] = useState<string | null>(null);
   const [compressionStatus, setCompressionStatus] = useState<string | null>(null);
   const [uploadTaskId, setUploadTaskId] = useState<string | null>(null);
-  const [featuredArtists, setFeaturedArtists] = useState<string[]>(initialData?.metadata?.featured_artists || []);
-  const [newFeaturedArtist, setNewFeaturedArtist] = useState<string>('');
 
-  // Genre, Subgenre, and Mood state
-  const [genres, setGenres] = useState<Array<{ id: string; name: string }>>([]);
-  const [subgenres, setSubgenres] = useState<Array<{ id: string; name: string; parent_genre_id: string }>>([]);
-  const [moods, setMoods] = useState<Array<{ id: string; name: string; description: string }>>([]);
-  const [selectedGenreId, setSelectedGenreId] = useState<string>('');
-  const [selectedSubgenreId, setSelectedSubgenreId] = useState<string>('');
-  const [selectedMoods, setSelectedMoods] = useState<string[]>([]);
-
-  // Fetch genres, subgenres, and moods from database
-  React.useEffect(() => {
-    const fetchData = async () => {
-      try {
-        // Fetch genres
-        const { data: genresData } = await supabase
-          .from('genres')
-          .select('id, name')
-          .order('name');
-        if (genresData) setGenres(genresData);
-
-        // Fetch all subgenres
-        const { data: subgenresData } = await supabase
-          .from('subgenres')
-          .select('id, name, parent_genre_id')
-          .eq('is_active', true)
-          .order('display_order');
-        if (subgenresData) setSubgenres(subgenresData);
-
-        // Fetch mood categories
-        const { data: moodsData } = await supabase
-          .from('mood_categories')
-          .select('id, name, description')
-          .eq('is_active', true)
-          .order('name');
-        if (moodsData) setMoods(moodsData);
-      } catch (error) {
-        console.error('Error fetching genres/subgenres/moods:', error);
-      }
-    };
-
-    fetchData();
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => { mountedRef.current = false; };
   }, []);
 
-  const handleInputChange = (e: React.ChangeEvent<HTMLInputElement | HTMLTextAreaElement>) => {
-    const { name, value } = e.target;
-    setFormData(prev => ({
-      ...prev,
-      [name]: value,
-    }));
-  };
-
-  const handleGenreChange = (e: React.ChangeEvent<HTMLSelectElement>) => {
-    const genreId = e.target.value;
-    setSelectedGenreId(genreId);
-    // Clear subgenre when genre changes
-    setSelectedSubgenreId('');
-
-    // Update formData.genre for backward compatibility
-    const selectedGenre = genres.find(g => g.id === genreId);
-    if (selectedGenre) {
-      setFormData(prev => ({
-        ...prev,
-        genre: selectedGenre.name,
-      }));
+  useEffect(() => {
+    if (!user) {
+      navigate('/');
+      return;
     }
-  };
+    (async () => {
+      try {
+        let profile = await getArtistProfile();
+        if (!mountedRef.current) return;
+        // Fallback: if cache returned null, fetch directly (creators may have profile that cache missed)
+        if (!profile) {
+          const { data: directProfile, error } = await supabase
+            .from('artist_profiles')
+            .select('id, user_id, stage_name, artist_id, bio, profile_photo_url, is_verified')
+            .eq('user_id', user.id)
+            .maybeSingle();
+          if (!mountedRef.current) return;
+          if (!error && directProfile) profile = directProfile;
+        }
+        if (profile) {
+          setArtistProfile({
+            id: profile.id,
+            stage_name: profile.stage_name,
+            artist_id: profile.artist_id ?? null,
+            bio: profile.bio,
+            profile_photo_url: profile.profile_photo_url,
+            is_verified: profile.is_verified
+          });
+        }
+      } catch (err) {
+        console.error("[SingleUpload] Profile error:", err);
+      } finally {
+        if (mountedRef.current) setLoadingProfile(false);
+      }
+    })();
+  }, [user, navigate]);
 
-  // Filter subgenres by selected genre
-  const filteredSubgenres = subgenres.filter(
-    sub => sub.parent_genre_id === selectedGenreId
-  );
+  useEffect(() => {
+    const load = async () => {
+      const [genreRes, subgenreRes, moodRes] = await Promise.all([
+        supabase.from("genres").select("id, name").order("name"),
+        supabase.from("subgenres").select("id, name, parent_genre_id").eq("is_active", true).order("name"),
+        supabase.from("mood_categories").select("id, name, description").eq("is_active", true).order("name"),
+      ]);
+      if (!mountedRef.current) return;
+      if (genreRes.data) setGenres(genreRes.data);
+      if (subgenreRes.data) setSubgenres(subgenreRes.data);
+      if (moodRes.data) setMoods(moodRes.data);
+    };
+    load();
+  }, []);
 
-  const handleAudioUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
-    if (e.target.files && e.target.files[0]) {
-      const file = e.target.files[0];
-      // Validate audio file using security utility
+  const filteredSubgenres = genreId ? subgenres.filter((s) => s.parent_genre_id === genreId) : [];
+
+  useEffect(() => { setSubgenreId(""); }, [genreId]);
+
+  const handleAudioChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (file) {
       const validation = validateAudioFile(file);
       if (!validation.valid) {
         setError(validation.error || 'Please upload a valid audio file.');
@@ -128,15 +159,13 @@ export default function SingleUploadForm({ onClose, onSuccess, initialData }: Si
     }
   };
 
-  const handleCoverImageUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
-    if (e.target.files && e.target.files[0]) {
-      const file = e.target.files[0];
-
-      // Validate image file using security utility
+  const handleCoverChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (file) {
       const validation = validateImageFile(file);
       if (!validation.valid) {
-        setError(validation.error || 'Please upload a valid image file for the cover.');
-        setCoverImage(null);
+        setError(validation.error || 'Please upload a valid image file.');
+        setCoverFile(null);
         return;
       }
 
@@ -144,105 +173,64 @@ export default function SingleUploadForm({ onClose, onSuccess, initialData }: Si
       setCompressionStatus('Compressing cover image to 467x467px...');
 
       try {
-        // Compress the image to 467x467px with high quality
         const result = await compressAlbumCover(file, 467, 200, (status) => {
           setCompressionStatus(status);
         });
 
-        setCoverImage(result.file);
+        setCoverFile(result.file);
         setCompressionStatus(null);
 
-        // Create preview URL with compressed image
-        if (imagePreviewUrl) {
-          URL.revokeObjectURL(imagePreviewUrl);
+        if (coverPreview) {
+          URL.revokeObjectURL(coverPreview);
         }
         const url = URL.createObjectURL(result.file);
-        setImagePreviewUrl(url);
+        setCoverPreview(url);
       } catch (compressionError) {
         console.error('Image compression failed:', compressionError);
         setError('Failed to compress image. Please try a different image.');
         setCompressionStatus(null);
-        setCoverImage(null);
+        setCoverFile(null);
       }
     }
   };
 
-  const validateMediaUrl = (url: string, expectedType: 'audio' | 'image'): { valid: boolean; error?: string } => {
-    if (!url) {
-      return { valid: false, error: 'URL is empty' };
-    }
-
-    // Must start with https://
-    if (!url.startsWith('https://')) {
-      return { valid: false, error: 'URL must start with https://' };
-    }
-
-    // Must contain .b-cdn.net (Bunny CDN domain) or supabase storage domain
-    if (!url.includes('.b-cdn.net') && !url.includes('supabase.co/storage')) {
-      return { valid: false, error: 'URL must be from Bunny CDN (.b-cdn.net) or Supabase storage' };
-    }
-
-    // Check content type path
-    if (expectedType === 'audio' && !url.includes('/audio/')) {
-      return { valid: false, error: 'Audio URL must contain /audio/ path' };
-    }
-
-    if (expectedType === 'image' && !url.includes('/covers/') && !url.includes('/storage/v1/object/public/covers/')) {
-      return { valid: false, error: 'Image URL must contain /covers/ path' };
-    }
-
-    return { valid: true };
+  const toggleMood = (moodId: string) => {
+    setSelectedMoods((prev) =>
+      prev.includes(moodId) ? prev.filter((id) => id !== moodId) : [...prev, moodId]
+    );
   };
 
-  const addFeaturedArtist = () => {
-    const artistName = newFeaturedArtist.trim();
-    if (!artistName) return;
+  const canProceedStep0 = !!audioFile;
+  const canProceedStep1 = !!title.trim() && !!genreId;
 
-    if (featuredArtists.includes(artistName)) {
-      setError('This artist has already been added');
-      return;
-    }
-
-    setFeaturedArtists(prev => [...prev, artistName]);
-    setNewFeaturedArtist('');
-    setError(null);
+  const handleNext = () => {
+    if (currentStep < 2) setCurrentStep((s) => (s + 1) as Step);
+  };
+  const handleBack = () => {
+    if (currentStep > 0) setCurrentStep((s) => (s - 1) as Step);
   };
 
-  const removeFeaturedArtist = (index: number) => {
-    setFeaturedArtists(prev => prev.filter((_, i) => i !== index));
-  };
+  // Extract duration from an audio file client-side
+  const getAudioDuration = (file: File): Promise<number | null> =>
+    new Promise((resolve) => {
+      const url = URL.createObjectURL(file);
+      const audio = new Audio();
+      audio.onloadedmetadata = () => { URL.revokeObjectURL(url); resolve(Math.round(audio.duration)); };
+      audio.onerror = () => { URL.revokeObjectURL(url); resolve(null); };
+      audio.src = url;
+    });
 
-  const handleFeaturedArtistKeyDown = (e: React.KeyboardEvent<HTMLInputElement>) => {
-    if (e.key === 'Enter') {
-      e.preventDefault();
-      addFeaturedArtist();
-    }
-  };
-
-  const uploadFile = async (file: File, path: string, taskId?: string): Promise<string> => {
+  const uploadFile = async (file: File, contentType: 'audio' | 'image', taskId?: string): Promise<string> => {
     try {
       const { data: { session }, error: sessionError } = await supabase.auth.getSession();
       if (sessionError || !session) {
         throw new Error('Authentication required');
       }
 
-      let contentType: 'audio' | 'image' | 'video' = 'audio';
-      let customPath = 'audio';
-
-      if (file.type.startsWith('image/')) {
-        contentType = 'image';
-        customPath = 'covers';
-      } else if (path.includes('covers')) {
-        contentType = 'image';
-        customPath = 'covers';
-      } else if (file.type.startsWith('audio/')) {
-        contentType = 'audio';
-        customPath = 'audio';
-      }
+      const customPath = contentType === 'image' ? 'covers' : 'audio';
 
       console.log(`🎵 Uploading ${contentType}: ${file.name} (${(file.size / 1024 / 1024).toFixed(2)} MB)`);
 
-      // Use direct upload (same simple approach as video uploads)
       const result = await directUploadToBunny(file, {
         userId: session.user.id,
         contentType,
@@ -260,14 +248,6 @@ export default function SingleUploadForm({ onClose, onSuccess, initialData }: Si
         throw new Error(result.error || 'Upload failed - no URL returned');
       }
 
-      // Validate the returned URL format
-      const expectedType = contentType === 'image' ? 'image' : 'audio';
-      const urlValidation = validateMediaUrl(result.publicUrl, expectedType);
-      if (!urlValidation.valid) {
-        console.error('❌ Invalid URL returned from upload:', result.publicUrl);
-        throw new Error(`Upload returned invalid URL: ${urlValidation.error}. Please check your Bunny CDN configuration.`);
-      }
-
       console.log('✅ Upload successful:', result.publicUrl);
       setCompressionStatus(null);
       return result.publicUrl;
@@ -278,32 +258,13 @@ export default function SingleUploadForm({ onClose, onSuccess, initialData }: Si
     }
   };
 
-  const handleSubmit = async (e: React.FormEvent) => {
-    e.preventDefault();
+  const handleUpload = async () => {
+    if (!user || !artistProfile) return;
+    if (!title.trim() || !audioFile || !genreId) return;
+
+    setUploading(true);
+    setUploadProgress(0);
     setError(null);
-    setSuccess(null);
-
-    if (!formData.title.trim()) {
-      setError('Song title is required.');
-      return;
-    }
-
-    const isEditing = !!initialData;
-
-    if (!isEditing && !audioFile) {
-      setError('Audio file is required.');
-      return;
-    }
-    if (!isEditing && !coverImage) {
-      setError('Cover image is required.');
-      return;
-    }
-    if (!formData.genre) {
-      setError('Please select a genre for your song.');
-      return;
-    }
-
-    setIsSubmitting(true);
 
     const taskId = `song-${Date.now()}`;
     setUploadTaskId(taskId);
@@ -311,53 +272,90 @@ export default function SingleUploadForm({ onClose, onSuccess, initialData }: Si
     addUpload({
       id: taskId,
       type: 'single',
-      title: formData.title.trim()
+      title: title.trim()
     });
 
     try {
-      const { data: { user }, error: authError } = await supabase.auth.getUser();
-      if (authError || !user) {
+      const { data: { session }, error: authError } = await supabase.auth.getSession();
+      if (authError || !session?.user) {
         throw new Error('User not authenticated. Please sign in.');
       }
 
-      const artistProfile = await getArtistProfile();
-      if (!artistProfile) {
-        throw new Error('Artist profile not found. Please register as an artist first.');
-      }
+      // Extract duration before uploading
+      const durationSeconds = await getAudioDuration(audioFile);
+      setUploadProgress(5);
 
-      // Ensure artist record exists and is properly linked
-      let finalArtistId = artistProfile.artist_id;
-      
-      if (!finalArtistId) {
-        // Try to find existing artist by stage name
-        const { data: existingArtist, error: findError } = await supabase
+      // Upload audio file
+      const audioPublicUrl = await uploadFile(audioFile, 'audio', taskId);
+      setUploadProgress(50);
+
+      // Upload cover if provided
+      let coverUrl: string | null = null;
+      if (coverFile) {
+        coverUrl = await uploadFile(coverFile, 'image', taskId);
+      }
+      setUploadProgress(75);
+
+      // Resolve artist_id and display name — fetch by user_id so we always get current DB values
+      const { data: { user: authUser } } = await supabase.auth.getUser();
+      const { data: freshProfileById } = await supabase
+        .from('artist_profiles')
+        .select('artist_id, stage_name')
+        .eq('id', artistProfile.id)
+        .maybeSingle();
+      const { data: freshProfileByUser } = await supabase
+        .from('artist_profiles')
+        .select('artist_id, stage_name')
+        .eq('user_id', user.id)
+        .maybeSingle();
+
+      const freshProfile = freshProfileById || freshProfileByUser;
+      let resolvedArtistId = freshProfile?.artist_id ?? artistProfile.artist_id ?? null;
+      // Prefer stage_name from profile; fallback to user display_name so uploads always have a name
+      let stageName =
+        (freshProfile?.stage_name && freshProfile.stage_name.trim()) ||
+        (artistProfile.stage_name && String(artistProfile.stage_name).trim()) ||
+        authUser?.user_metadata?.display_name ||
+        '';
+
+      if (!stageName) {
+        const { data: userRow } = await supabase
+          .from('users')
+          .select('display_name')
+          .eq('id', user.id)
+          .maybeSingle();
+        stageName = userRow?.display_name || '';
+      }
+      stageName = String(stageName || '').trim();
+
+      if (!resolvedArtistId) {
+        if (!stageName) {
+          throw new Error('Artist stage name is missing. Please complete your artist profile (or set your display name) before uploading.');
+        }
+
+        const { data: existingArtist } = await supabase
           .from('artists')
           .select('id')
-          .ilike('name', artistProfile.stage_name)
+          .ilike('name', stageName.trim())
           .maybeSingle();
-        
-        if (findError) {
-          throw new Error(`Error finding artist: ${findError.message}`);
-        }
-        
+
         if (!existingArtist) {
-          // Artist doesn't exist, create it using Edge Function
           const createArtistResponse = await fetch(`${import.meta.env.VITE_SUPABASE_URL}/functions/v1/create-artist`, {
             method: 'POST',
             headers: {
-              'Authorization': `Bearer ${import.meta.env.VITE_SUPABASE_ANON_KEY}`,
+              'Authorization': `Bearer ${session.access_token}`,
               'Content-Type': 'application/json',
             },
             body: JSON.stringify({
-              name: artistProfile.stage_name,
-              bio: artistProfile.bio,
-              image_url: artistProfile.profile_photo_url,
+              name: stageName.trim(),
+              bio: artistProfile.bio || null,
+              image_url: artistProfile.profile_photo_url || null,
               verified: artistProfile.is_verified || false
             }),
           });
 
           if (!createArtistResponse.ok) {
-            const errorData = await createArtistResponse.json();
+            const errorData = await createArtistResponse.json().catch(() => ({}));
             throw new Error(`Failed to create artist record: ${errorData.error || 'Unknown error'}`);
           }
 
@@ -365,787 +363,764 @@ export default function SingleUploadForm({ onClose, onSuccess, initialData }: Si
           if (!createResult.success) {
             throw new Error(`Failed to create artist record: ${createResult.error}`);
           }
-          
-          finalArtistId = createResult.artist.id;
-          
-          // Update the artist profile with the new artist_id
-          await supabase
-            .from('artist_profiles')
-            .update({ artist_id: finalArtistId })
-            .eq('id', artistProfile.id);
+
+          resolvedArtistId = createResult.artist.id;
         } else {
-          finalArtistId = existingArtist.id;
-          
-          // Update the artist profile with the found artist_id
-          await supabase
-            .from('artist_profiles')
-            .update({ artist_id: finalArtistId })
-            .eq('id', artistProfile.id);
+          resolvedArtistId = existingArtist.id;
+        }
+
+        // Always sync artist_id back to the profile
+        await supabase
+          .from('artist_profiles')
+          .update({ artist_id: resolvedArtistId })
+          .eq('id', artistProfile.id);
+      }
+
+      setUploadProgress(80);
+
+      // Insert into songs table
+      let songId: string | null = null;
+      {
+        const { data: songData, error: songErr } = await supabase.from("songs").insert({
+          title: title.trim(),
+          artist_id: resolvedArtistId,
+          audio_url: audioPublicUrl,
+          cover_image_url: coverUrl,
+          release_date: releaseDate ? format(releaseDate, "yyyy-MM-dd") : null,
+          country: location?.location?.countryCode ?? null,
+          play_count: 0,
+          album_id: null,
+          duration_seconds: durationSeconds,
+          featured_artists: featuredArtist ? [featuredArtist] : null,
+        }).select("id").single();
+
+        if (songErr) {
+          console.error("[SingleUpload] songs insert error:", songErr);
+          throw new Error(`Failed to save song: ${songErr.message}`);
+        } else if (songData?.id) {
+          songId = songData.id;
+
+          // Link genre, subgenre, moods
+          const genreInsert = supabase.from("song_genres").insert({ song_id: songId, genre_id: genreId });
+          const subgenreInsert = subgenreId
+            ? supabase.from("song_subgenres").insert({ song_id: songId, subgenre_id: subgenreId })
+            : Promise.resolve();
+          const moodInsert = selectedMoods.length > 0
+            ? supabase.from("song_moods").insert(selectedMoods.map((mood_id) => ({ song_id: songId!, mood_id, confidence_score: 1.0 })))
+            : Promise.resolve();
+          await Promise.allSettled([genreInsert, subgenreInsert, moodInsert]);
         }
       }
 
-      let audioUrl = initialData?.metadata?.audio_url || null;
-      let coverImageUrl = initialData?.metadata?.cover_url || null;
+      setUploadProgress(90);
 
-      // Upload audio file only if new file provided
-      if (audioFile) {
-        const audioPath = createSafeFilePath(user.id, 'songs', audioFile.name, ALLOWED_AUDIO_EXTENSIONS);
-        if (!audioPath) {
-          throw new Error('Invalid audio file. Please upload a valid audio file.');
-        }
-        audioUrl = await uploadFile(audioFile, audioPath, taskId);
-      }
+      // Insert content_uploads
+      const metadata: Record<string, unknown> = {
+        song_id: songId,
+        audio_url: audioPublicUrl,
+        cover_url: coverUrl,
+        duration_seconds: durationSeconds,
+        genre_id: genreId,
+        subgenre_id: subgenreId || null,
+        mood_ids: selectedMoods,
+        featured_artist: featuredArtist || null,
+        release_date: releaseDate ? (releaseTime ? `${format(releaseDate, "yyyy-MM-dd")}T${releaseTime}:00` : format(releaseDate, "yyyy-MM-dd")) : null,
+      };
+      // songs.release_date is date-only for DB; full datetime lives in content_uploads.metadata.release_date
 
-      // Upload cover image only if new file provided
-      if (coverImage) {
-        const coverPath = createSafeFilePath(user.id, 'covers', coverImage.name, ALLOWED_IMAGE_EXTENSIONS);
-        if (!coverPath) {
-          throw new Error('Invalid image file. Please upload a valid image file.');
-        }
-        coverImageUrl = await uploadFile(coverImage, coverPath, taskId);
-      }
+      const { error: insertErr } = await supabase.from("content_uploads").insert({
+        user_id: user.id,
+        artist_profile_id: artistProfile.id,
+        content_type: "single",
+        title: title.trim(),
+        description: description.trim() || null,
+        status: "approved",
+        metadata,
+      });
 
-      // Safety check: ensure we have valid URLs when editing
-      if (isEditing) {
-        if (!audioUrl) {
-          throw new Error('Audio URL is missing. Cannot update song without audio file.');
-        }
-        if (!coverImageUrl) {
-          throw new Error('Cover image URL is missing. Cannot update song without cover image.');
-        }
-      }
+      if (insertErr) throw insertErr;
 
-      // Get audio duration (only if new audio file uploaded or not editing)
-      let duration = initialData?.metadata?.duration_seconds || 0;
-      if (audioFile && audioUrl) {
-        const audio = new Audio(audioUrl);
-        duration = await new Promise<number>((resolve) => {
-          audio.onloadedmetadata = () => {
-            resolve(audio.duration);
-          };
-          audio.onerror = () => {
-            console.warn('Could not load audio metadata for duration, defaulting to existing or 0.');
-            resolve(initialData?.metadata?.duration_seconds || 0);
-          };
-          audio.load();
-        });
-      }
+      setUploadProgress(100);
 
-      // Use the selected genre ID
-      const genreId = selectedGenreId || null;
-
-      // Insert or Update song record
-      let songData;
-      const songId = initialData?.metadata?.song_id;
-
-      if (isEditing && songId) {
-        // Update existing song (genre is handled separately via song_genres table)
-        const { data, error: songError } = await supabase
-          .from('songs')
-          .update({
-            title: formData.title.trim(),
-            duration_seconds: Math.round(duration),
-            audio_url: audioUrl,
-            cover_image_url: coverImageUrl,
-            release_date: formData.releaseDate || null,
-            featured_artists: featuredArtists.length > 0 ? featuredArtists : null,
-          })
-          .eq('id', songId)
-          .select()
-          .maybeSingle();
-
-        if (songError) {
-          console.error('Song update error details:', songError);
-          throw new Error(`Failed to update song data: ${songError.message}`);
-        }
-
-        if (!data) {
-          throw new Error('Failed to update song: Song not found or you do not have permission to update it.');
-        }
-
-        songData = data;
-      } else {
-        console.log('📀 Creating new song with audio_url:', audioUrl);
-
-        // Insert new song
-        const { data, error: songError } = await supabase
-          .from('songs')
-          .insert({
-            title: formData.title.trim(),
-            artist_id: finalArtistId,
-            duration_seconds: Math.round(duration),
-            audio_url: audioUrl,
-            cover_image_url: coverImageUrl,
-            release_date: formData.releaseDate || null,
-            country: location?.location?.countryCode || null,
-            featured_artists: featuredArtists.length > 0 ? featuredArtists : null,
-          })
-          .select()
-          .single();
-
-        if (data) {
-          console.log('✅ Song created successfully:', {
-            id: data.id,
-            title: data.title,
-            audio_url: data.audio_url
-          });
-        }
-
-        if (songError) {
-          console.error('Song creation error details:', songError);
-          throw new Error(`Failed to save song data: ${songError.message}`);
-        }
-        songData = data;
-      }
-
-      // Link song to genre, subgenres, and moods
-      if (songData) {
-        try {
-          if (isEditing && songId) {
-            // Clear existing links for editing
-            await supabase.from('song_genres').delete().eq('song_id', songData.id);
-            await supabase.from('song_subgenres').delete().eq('song_id', songData.id);
-            await supabase.from('song_moods').delete().eq('song_id', songData.id);
-          }
-
-          // Link song to genre
-          if (genreId) {
-            await supabase
-              .from('song_genres')
-              .insert({
-                song_id: songData.id,
-                genre_id: genreId
-              });
-          }
-
-          // Link song to subgenre
-          if (selectedSubgenreId) {
-            await supabase
-              .from('song_subgenres')
-              .insert({
-                song_id: songData.id,
-                subgenre_id: selectedSubgenreId
-              });
-          }
-
-          // Link song to moods (up to 2)
-          if (selectedMoods.length > 0) {
-            const moodInserts = selectedMoods.map(moodId => ({
-              song_id: songData.id,
-              mood_id: moodId,
-              confidence_score: 1.0
-            }));
-            await supabase
-              .from('song_moods')
-              .insert(moodInserts);
-          }
-        } catch (linkError) {
-          console.error('Error linking song to genre/subgenres/moods:', linkError);
-          // Don't fail the upload if linking fails
-        }
-      }
-
-      // Create or update content_upload entry
-      if (isEditing && initialData?.id) {
-        // Update existing content_upload
-        const { error: contentUploadError } = await supabase
-          .from('content_uploads')
-          .update({
-            title: formData.title.trim(),
-            description: formData.description.trim() || null,
-            metadata: {
-              song_id: songData.id,
-              audio_url: audioUrl,
-              cover_url: coverImageUrl,
-              duration_seconds: Math.round(duration),
-              release_date: formData.releaseDate || null,
-              genre: formData.genre || null,
-              genre_id: genreId,
-              file_name: audioFile?.name || initialData?.metadata?.file_name,
-              file_size: audioFile?.size || initialData?.metadata?.file_size,
-              file_type: audioFile?.type || initialData?.metadata?.file_type,
-            },
-          })
-          .eq('id', initialData.id);
-
-        if (contentUploadError) {
-          console.error('Error updating content_upload entry:', contentUploadError);
-        }
-      } else {
-        // Create new content_upload
-        const { error: contentUploadError } = await supabase
-          .from('content_uploads')
-          .insert({
-            user_id: user.id,
-            artist_profile_id: artistProfile.id,
-            content_type: 'single',
-            title: formData.title.trim(),
-            description: formData.description.trim() || null,
-            status: 'approved',
-            metadata: {
-              song_id: songData.id,
-              audio_url: audioUrl,
-              cover_url: coverImageUrl,
-              duration_seconds: Math.round(duration),
-              release_date: formData.releaseDate || null,
-              genre: formData.genre || null,
-              genre_id: genreId,
-              file_name: audioFile?.name || 'unknown',
-              file_size: audioFile?.size || 0,
-              file_type: audioFile?.type || 'audio/mpeg',
-            },
-          });
-
-        if (contentUploadError) {
-          console.error('Error creating content_upload entry:', contentUploadError);
-        }
-      }
-
-      setSuccess(isEditing ? 'Song updated successfully!' : 'Song uploaded and saved successfully!');
-
-      // Update upload status to trigger notification
+      // Update upload status
       updateUploadStatus(taskId, 'completed');
 
-      // Clear caches to ensure new content appears immediately
-      if (songData?.id) {
-        cache.deletePattern(`song.*${songData.id}`);
+      // Bust caches
+      if (songId) {
+        cache.deletePattern(`song.*${songId}`);
         cache.deletePattern('trending.*');
         cache.deletePattern('home.*');
         cache.deletePattern('new.*release.*');
-        cache.deletePattern('explore.*'); // Clear explore screen cache including genres
-        await smartCache.invalidate(`song.*${songData.id}`);
+        cache.deletePattern('explore.*');
+        await smartCache.invalidate(`song.*${songId}`);
         await smartCache.invalidate('trending.*');
         await smartCache.invalidate('home.*');
         await smartCache.invalidate('new.*release.*');
-        await smartCache.invalidate('explore.*'); // Clear explore genres cache
+        await smartCache.invalidate('explore.*');
       }
 
-      resetForm();
-
-      // Close modal after a short delay to show success message
+      // Success - call onSuccess if provided (e.g. close form in CreateScreen), else navigate to profile
       setTimeout(() => {
-        onSuccess?.();
-        onClose();
-      }, 2000);
-    } catch (err) {
-      console.error('Upload process failed:', err);
-      const errorMessage = err instanceof Error ? err.message : 'An unexpected error occurred during upload.';
-      setError(errorMessage);
-
-      // Update upload status to trigger error notification
-      updateUploadStatus(taskId, 'error', errorMessage);
+        if (onSuccess) {
+          onSuccess();
+        } else {
+          navigate('/profile');
+        }
+      }, 1500);
+    } catch (err: unknown) {
+      const message = err instanceof Error ? err.message : "Unknown error";
+      console.error("[SingleUpload] Error:", err);
+      setError(message);
+      updateUploadStatus(taskId, 'error', message);
     } finally {
-      setIsSubmitting(false);
-    }
-  };
-
-  const resetForm = () => {
-    setFormData({
-      title: '',
-      description: '',
-      releaseDate: '',
-      genre: '',
-    });
-    setAudioFile(null);
-    setCoverImage(null);
-    if (imagePreviewUrl) {
-      URL.revokeObjectURL(imagePreviewUrl);
-      setImagePreviewUrl(null);
-    }
-    
-    // Reset file inputs
-    const audioInput = document.getElementById('audio-upload') as HTMLInputElement;
-    const coverInput = document.getElementById('cover-upload') as HTMLInputElement;
-    if (audioInput) audioInput.value = '';
-    if (coverInput) coverInput.value = '';
-  };
-
-  const removeAudioFile = () => {
-    setAudioFile(null);
-    const fileInput = document.getElementById('audio-upload') as HTMLInputElement;
-    if (fileInput) {
-      fileInput.value = '';
-    }
-  };
-
-  const removeCoverImage = () => {
-    setCoverImage(null);
-    if (imagePreviewUrl && !initialData?.metadata?.cover_url) {
-      URL.revokeObjectURL(imagePreviewUrl);
-    }
-    // If editing, show upload prompt. If creating, clear preview
-    if (isEditing) {
-      setImagePreviewUrl(null);
-    } else {
-      setImagePreviewUrl(null);
-    }
-    const fileInput = document.getElementById('cover-upload') as HTMLInputElement;
-    if (fileInput) {
-      fileInput.value = '';
-    }
-  };
-
-  // Cleanup effect for blob URLs
-  React.useEffect(() => {
-    return () => {
-      if (imagePreviewUrl) {
-        URL.revokeObjectURL(imagePreviewUrl);
+      if (mountedRef.current) { 
+        setUploading(false); 
+        setUploadProgress(0); 
       }
-    };
-  }, []);
+    }
+  };
+
+  /* ── Guards ── */
+  if (loadingProfile) {
+    return (
+      <div className="flex flex-col min-h-screen min-h-[100dvh] bg-gradient-to-b from-[#1a1a1a] via-[#0d0d0d] to-[#000000] items-center justify-center">
+        <LoadingLogo variant="pulse" size={48} />
+      </div>
+    );
+  }
+
+  if (!user) { 
+    navigate("/"); 
+    return null; 
+  }
+
+  if (!artistProfile) {
+    return (
+      <div className="flex flex-col min-h-screen min-h-[100dvh] overflow-y-auto bg-gradient-to-b from-[#1a1a1a] via-[#0d0d0d] to-[#000000] text-white content-with-nav font-['Inter',sans-serif]">
+        <div className="flex-1 flex flex-col items-center justify-center gap-5 px-3">
+          <div className="w-16 h-16 rounded-2xl bg-white/10 flex items-center justify-center">
+            <Music2 className="w-7 h-7 text-white/60" />
+          </div>
+          <div className="text-center space-y-1.5">
+            <h2 className="text-xl font-semibold tracking-tight text-white">Artist Profile Required</h2>
+            <p className="text-sm text-white/60 max-w-xs">Register as an artist to start uploading your music.</p>
+          </div>
+          <button
+            onClick={() => navigate("/artist-registration")}
+            className="px-6 py-3 bg-[#00ad74] hover:bg-[#009c68] active:bg-[#008a5d] text-white rounded-full font-medium transition-all active:scale-95"
+          >
+            Register as Artist
+          </button>
+        </div>
+      </div>
+    );
+  }
+
+  const stepCompleteness = currentStep === 0
+    ? (audioFile ? 100 : 0)
+    : currentStep === 1
+    ? (title && genreId ? 100 : title ? 50 : 0)
+    : selectedMoods.length > 0 ? 60 : 20;
 
   return (
-    <div className="fixed inset-0 bg-black/80 backdrop-blur-sm z-[70] flex items-center justify-center p-4">
-      <div className="bg-white rounded-2xl w-full max-w-md max-h-[90vh] flex flex-col shadow-2xl">
-        {/* Header - Fixed */}
-        <div className="sticky top-0 z-10 bg-gradient-to-b from-white to-transparent backdrop-blur-sm px-6 py-5 border-b border-gray-100 rounded-t-2xl">
-          <div className="flex items-start justify-between">
-            <h2 className="font-['Inter',sans-serif] text-3xl font-black tracking-tight text-gray-900 leading-none">
-              {isEditing ? 'Editing' : 'Release your'}<br />
-              <span className="font-light italic text-gray-400">{isEditing ? 'track.' : 'single.'}</span>
-            </h2>
-            <button
-              onClick={onClose}
-              className="mt-1 p-2 hover:bg-gray-100 rounded-full transition-colors duration-200"
-            >
-              <X className="w-5 h-5 text-gray-500" />
-            </button>
-          </div>
+    <div className="flex flex-col min-h-screen min-h-[100dvh] overflow-y-auto bg-gradient-to-b from-[#1a1a1a] via-[#0d0d0d] to-[#000000] text-white content-with-nav font-['Inter',sans-serif]">
+      {/* ── Page header: back + title (same format as AlbumUploadForm “Curate your collection”) ── */}
+      <header className="w-full py-5 px-5 sticky top-0 z-20 flex-shrink-0 bg-gradient-to-b from-[#1a1a1a] to-transparent backdrop-blur-sm">
+        <div className="flex items-center gap-4">
+          <button
+            type="button"
+            onClick={() => (onClose ? onClose() : (window.history.length > 1 ? navigate(-1) : navigate('/')))}
+            className="p-2 -ml-2 hover:bg-white/10 rounded-full transition-all duration-200 touch-manipulation flex-shrink-0"
+            aria-label="Back"
+          >
+            <ArrowLeft className="w-6 h-6 text-white" />
+          </button>
+          <h1 className="font-['Inter',sans-serif] text-3xl font-black tracking-tight text-white leading-none">
+            Release your<br />
+            <span className="font-light italic text-white/60">track.</span>
+          </h1>
         </div>
+      </header>
 
-        {/* Scrollable Content */}
-        <div className="flex-1 overflow-y-auto">
-          <div className="p-6 space-y-6">
-            {/* Song Title */}
-            <div>
-              <label className="flex items-center gap-2 font-['Inter',sans-serif] font-medium text-gray-700 text-sm mb-3">
-                <Music className="w-4 h-4 text-[#309605]" />
-                Song Title *
-              </label>
-              <input
-                type="text"
-                name="title"
-                value={formData.title}
-                onChange={handleInputChange}
-                className="w-full h-12 px-4 bg-white border border-gray-300 rounded-xl text-gray-900 placeholder-gray-500 focus:outline-none focus:ring-2 focus:ring-[#309605] focus:border-[#309605] transition-all duration-200"
-                placeholder="Enter song title"
-                required
-              />
-            </div>
-
-            {/* Description */}
-            <div>
-              <label className="flex items-center gap-2 font-['Inter',sans-serif] font-medium text-gray-700 text-sm mb-3">
-                <FileText className="w-4 h-4 text-[#309605]" />
-                Description
-              </label>
-              <textarea
-                name="description"
-                value={formData.description}
-                onChange={handleInputChange}
-                rows={4}
-                className="w-full px-4 py-3 bg-white border border-gray-300 rounded-xl text-gray-900 placeholder-gray-500 focus:outline-none focus:ring-2 focus:ring-[#309605] focus:border-[#309605] transition-all duration-200 resize-none"
-                placeholder="Tell us about your song..."
-              />
-            </div>
-
-            {/* Release Date */}
-            <div>
-              <label className="flex items-center gap-2 font-['Inter',sans-serif] font-medium text-gray-700 text-sm mb-3">
-                <Calendar className="w-4 h-4 text-[#309605]" />
-                Release Date
-              </label>
-              <input
-                type="date"
-                name="releaseDate"
-                value={formData.releaseDate}
-                onChange={handleInputChange}
-                className="w-full h-12 px-4 bg-white border border-gray-300 rounded-xl text-gray-900 focus:outline-none focus:ring-2 focus:ring-[#309605] focus:border-[#309605] transition-all duration-200"
-              />
-            </div>
-
-            {/* Genre Selection */}
-            <div>
-              <label className="flex items-center gap-2 font-['Inter',sans-serif] font-medium text-gray-700 text-sm mb-3">
-                <Tag className="w-4 h-4 text-[#309605]" />
-                Genre *
-              </label>
-              <select
-                value={selectedGenreId}
-                onChange={handleGenreChange}
-                required
-                className="w-full h-12 px-4 bg-white border border-gray-300 rounded-xl text-gray-900 focus:outline-none focus:ring-2 focus:ring-[#309605] focus:border-[#309605] transition-all duration-200"
-              >
-                <option value="">Select a genre</option>
-                {genres.map((genre) => (
-                  <option key={genre.id} value={genre.id}>
-                    {genre.name}
-                  </option>
-                ))}
-              </select>
-            </div>
-
-            {/* Subgenre Selection */}
-            <div>
-              <label className="flex items-center gap-2 font-['Inter',sans-serif] font-medium text-gray-700 text-sm mb-3">
-                <Tag className="w-4 h-4 text-[#309605]" />
-                Subgenre (Optional)
-              </label>
-              {!selectedGenreId ? (
-                <p className="font-['Inter',sans-serif] text-gray-500 text-sm py-2">
-                  Please select a genre first
-                </p>
-              ) : filteredSubgenres.length === 0 ? (
-                <p className="font-['Inter',sans-serif] text-gray-500 text-sm py-2">
-                  No subgenres available for this genre
-                </p>
-              ) : (
-                <select
-                  value={selectedSubgenreId}
-                  onChange={(e) => setSelectedSubgenreId(e.target.value)}
-                  className="w-full h-12 px-4 bg-white border border-gray-300 rounded-xl text-gray-900 focus:outline-none focus:ring-2 focus:ring-[#309605] focus:border-[#309605] transition-all duration-200"
-                >
-                  <option value="">Select a subgenre</option>
-                  {filteredSubgenres.map((subgenre) => (
-                    <option key={subgenre.id} value={subgenre.id}>
-                      {subgenre.name}
-                    </option>
-                  ))}
-                </select>
-              )}
-            </div>
-
-            {/* Moods Selection - Chip-based UI */}
-            <div>
-              <label className="flex items-center gap-2 font-['Inter',sans-serif] font-medium text-gray-700 text-sm mb-3">
-                <Tag className="w-4 h-4 text-[#309605]" />
-                Moods (Select up to 2)
-              </label>
-              <div className="flex flex-wrap gap-2">
-                {moods.map((mood) => {
-                  const isSelected = selectedMoods.includes(mood.id);
-                  const isDisabled = !isSelected && selectedMoods.length >= 2;
-
-                  return (
+      <div className="flex-1 min-h-0 overflow-y-auto scrollbar-hide px-5 py-5 space-y-8 pb-28 w-full">
+          {/* ── Step Navigator ── */}
+          <div>
+            <div className="flex items-center gap-0 mb-3">
+              {STEPS.map((label, i) => {
+                const isActive = i === currentStep;
+                const isDone = i < currentStep;
+                return (
+                  <div key={label} className="flex items-center flex-1 last:flex-none">
                     <button
-                      key={mood.id}
-                      type="button"
-                      disabled={isDisabled}
-                      onClick={() => {
-                        if (isSelected) {
-                          setSelectedMoods(prev => prev.filter(id => id !== mood.id));
-                        } else if (selectedMoods.length < 2) {
-                          setSelectedMoods(prev => [...prev, mood.id]);
-                        }
-                      }}
-                      className={`
-                        px-4 py-2 rounded-full text-sm font-medium transition-all duration-200
-                        ${isSelected
-                          ? 'bg-[#309605] text-white shadow-md hover:bg-[#3ba208]'
-                          : isDisabled
-                            ? 'bg-gray-100 text-gray-400 cursor-not-allowed'
-                            : 'bg-gray-100 text-gray-700 hover:bg-gray-200 hover:shadow-sm'
-                        }
-                      `}
+                      onClick={() => i < currentStep && setCurrentStep(i as Step)}
+                      disabled={i > currentStep}
+                      className={cn(
+                        "flex items-center gap-2 text-xs font-semibold transition-colors min-h-[44px] touch-manipulation",
+                        isActive && "text-white",
+                        isDone && "text-white cursor-pointer",
+                        !isActive && !isDone && "text-white/30 cursor-default"
+                      )}
                     >
-                      {mood.name}
+                      <span className={cn(
+                        "w-6 h-6 rounded-full flex items-center justify-center text-[11px] font-bold transition-all",
+                        isActive && "bg-[#00ad74] text-white ring-2 ring-[#00ad74]/30 ring-offset-2 ring-offset-[#0a0a0a]",
+                        isDone && "bg-[#00ad74]/20 text-[#00ad74]",
+                        !isActive && !isDone && "bg-white/10 text-white/30"
+                      )}>
+                        {isDone ? <CheckCircle2 className="w-3.5 h-3.5" /> : i + 1}
+                      </span>
+                      {label}
                     </button>
-                  );
-                })}
-              </div>
-              {selectedMoods.length === 0 && (
-                <p className="font-['Inter',sans-serif] text-gray-500 text-xs mt-2">
-                  Select moods that match your track's vibe
-                </p>
-              )}
+                    {i < STEPS.length - 1 && (
+                      <div className={cn(
+                        "flex-1 h-px mx-3 transition-colors",
+                        i < currentStep ? "bg-[#00ad74]/40" : "bg-white/10"
+                      )} />
+                    )}
+                  </div>
+                );
+              })}
             </div>
+            {/* Step progress bar */}
+            <div className="h-0.5 bg-white/10 rounded-full overflow-hidden">
+              <div
+                className="h-full bg-[#00ad74] rounded-full transition-all duration-500"
+                style={{ width: `${((currentStep / 2) * 100) + (stepCompleteness / 3)}%` }}
+              />
+            </div>
+          </div>
 
-            {/* Featured Artists */}
-            <div>
-              <label className="flex items-center gap-2 font-['Inter',sans-serif] font-medium text-gray-700 text-sm mb-3">
-                <Music className="w-4 h-4 text-[#309605]" />
-                Featured Artist(s) (Optional)
-              </label>
+          {/* ══════════════════════════════
+              STEP 0 — FILES
+          ══════════════════════════════ */}
+          {currentStep === 0 && (
+            <div className="space-y-6 animate-in fade-in slide-in-from-right-4 duration-300">
+              <div className="space-y-1">
+                <h2 className="text-lg font-semibold tracking-tight text-white">Upload your files</h2>
+                <p className="text-sm text-white/60">Add your audio file to get started. Cover art is optional.</p>
+              </div>
 
-              {/* Featured Artists List */}
-              {featuredArtists.length > 0 && (
-                <div className="flex flex-wrap gap-2 mb-3">
-                  {featuredArtists.map((artist, index) => (
-                    <div
-                      key={index}
-                      className="flex items-center gap-1.5 px-3 py-1.5 bg-blue-100 text-blue-700 rounded-full text-sm"
-                    >
-                      <span className="font-medium">{artist}</span>
+              {/* Audio Drop Zone */}
+              <div className="space-y-2">
+                <label className="text-xs font-bold uppercase tracking-[0.12em] text-white/60 block">
+                  Audio File <span className="text-[#00ad74]">*</span>
+                </label>
+                <label
+                  className={cn(
+                    "group relative flex flex-col items-center justify-center gap-4 rounded-2xl border-2 border-dashed p-8 sm:p-12 cursor-pointer transition-all duration-200 min-h-[180px]",
+                    audioFile
+                      ? "border-[#00ad74]/40 bg-[#00ad74]/5"
+                      : "border-white/10 hover:border-[#00ad74]/40 hover:bg-[#00ad74]/5"
+                  )}
+                >
+                  <input
+                    ref={audioInputRef}
+                    type="file"
+                    accept="audio/*"
+                    className="hidden"
+                    onChange={handleAudioChange}
+                  />
+                  {audioFile ? (
+                    <>
+                      <div className="w-14 h-14 rounded-2xl bg-[#00ad74]/20 flex items-center justify-center">
+                        <FileAudio className="w-7 h-7 text-[#00ad74]" />
+                      </div>
+                      <div className="text-center">
+                        <p className="text-sm font-semibold text-white">{audioFile.name}</p>
+                        <p className="text-xs text-white/60 mt-0.5">
+                          {(audioFile.size / (1024 * 1024)).toFixed(1)} MB
+                        </p>
+                      </div>
                       <button
                         type="button"
-                        onClick={() => removeFeaturedArtist(index)}
-                        className="w-4 h-4 rounded-full flex items-center justify-center hover:bg-blue-200 transition-colors duration-200"
+                        onClick={(e) => { e.preventDefault(); setAudioFile(null); }}
+                        className="absolute top-3 right-3 min-w-[44px] min-h-[44px] w-11 h-11 rounded-full bg-white/10 flex items-center justify-center hover:bg-red-500/20 hover:text-red-400 transition-colors touch-manipulation"
+                        aria-label="Remove audio file"
                       >
-                        <X className="w-3 h-3" />
+                        <X className="w-4 h-4" />
                       </button>
+                    </>
+                  ) : (
+                    <>
+                      <div className="w-14 h-14 rounded-2xl bg-white/10 flex items-center justify-center transition-colors group-hover:bg-white/10">
+                        <Upload className="w-6 h-6 text-white/60 group-hover:text-[#00ad74] transition-colors" />
+                      </div>
+                      <div className="text-center">
+                        <p className="text-sm font-semibold text-white">
+                          Drop your audio file here
+                        </p>
+                        <p className="text-xs text-white/60 mt-1">or click to browse</p>
+                      </div>
+                      <div className="flex items-center gap-2">
+                        {["MP3", "WAV", "FLAC", "AAC"].map((fmt) => (
+                          <span key={fmt} className="px-2 py-0.5 rounded-md bg-white/10 text-[10px] font-semibold text-white/60">
+                            {fmt}
+                          </span>
+                        ))}
+                      </div>
+                    </>
+                  )}
+                </label>
+              </div>
+
+              {/* Cover Art */}
+              <div className="space-y-2">
+                <label className="text-xs font-bold uppercase tracking-[0.12em] text-white/60 block">
+                  Cover Art
+                </label>
+                <div className="flex items-stretch gap-5">
+                  <label className="relative w-[120px] h-[120px] min-w-[120px] rounded-2xl border-2 border-dashed border-white/10 cursor-pointer overflow-hidden shrink-0 transition-all hover:border-[#00ad74]/40 group">
+                    <input
+                      ref={coverInputRef}
+                      type="file"
+                      accept="image/*"
+                      className="hidden"
+                      onChange={handleCoverChange}
+                    />
+                    {coverPreview ? (
+                      <>
+                        <img src={coverPreview} alt="Cover" className="w-full h-full object-cover" />
+                        <div className="absolute inset-0 bg-black/60 opacity-0 group-hover:opacity-100 transition-opacity flex items-center justify-center">
+                          <ImageIcon className="w-5 h-5 text-white" />
+                        </div>
+                        <button
+                          type="button"
+                          onClick={(e) => { e.preventDefault(); setCoverFile(null); setCoverPreview(null); }}
+                          className="absolute top-2 right-2 min-w-[44px] min-h-[44px] w-11 h-11 rounded-full bg-black/80 flex items-center justify-center hover:bg-red-500/80 transition-colors opacity-0 group-hover:opacity-100 touch-manipulation"
+                          aria-label="Remove cover art"
+                        >
+                          <X className="w-4 h-4 text-white" />
+                        </button>
+                      </>
+                    ) : (
+                      <div className="w-full h-full flex flex-col items-center justify-center gap-1.5">
+                        <ImageIcon className="w-6 h-6 text-white/60 group-hover:text-[#00ad74] transition-colors" />
+                        <span className="text-[10px] text-white/60 font-medium">Add art</span>
+                      </div>
+                    )}
+                  </label>
+
+                  <div className="flex flex-col justify-center gap-3 py-1">
+                    <div>
+                      <p className="text-sm font-semibold text-white">
+                        {coverFile ? coverFile.name : "Album artwork"}
+                      </p>
+                      <p className="text-xs text-white/60 mt-0.5">
+                        {coverFile
+                          ? `${(coverFile.size / 1024).toFixed(0)} KB`
+                          : "Recommended: 3000×3000px square"
+                        }
+                      </p>
                     </div>
-                  ))}
+                    <div className="space-y-1">
+                      <p className="text-[11px] text-white/60">• JPG, PNG, WebP supported</p>
+                      <p className="text-[11px] text-white/60">• Minimum 500 × 500px</p>
+                      <p className="text-[11px] text-white/60">• Square format preferred</p>
+                    </div>
+                  </div>
+                </div>
+              </div>
+
+              {/* Compression Status */}
+              {compressionStatus && (
+                <div className="rounded-xl border border-[#00ad74]/30 bg-[#00ad74]/10 p-4 sm:p-5">
+                  <div className="flex items-center gap-4">
+                    <Loader2 className="w-5 h-5 animate-spin text-[#00ad74]" />
+                    <p className="text-sm text-white">{compressionStatus}</p>
+                  </div>
                 </div>
               )}
 
-              {/* Add Featured Artist Input */}
-              <div className="flex gap-2">
-                <input
-                  type="text"
-                  value={newFeaturedArtist}
-                  onChange={(e) => setNewFeaturedArtist(e.target.value)}
-                  onKeyDown={handleFeaturedArtistKeyDown}
-                  className="flex-1 h-11 px-4 text-sm text-gray-900 bg-white border border-gray-300 rounded-xl focus:outline-none focus:ring-2 focus:ring-[#309605] focus:border-[#309605] transition-all duration-200"
-                  placeholder="Enter featured artist name"
-                />
+              {/* File checklist + CTA */}
+              <div className={cn(
+                "rounded-2xl border p-5 space-y-4 transition-all duration-300",
+                canProceedStep0 ? "border-[#00ad74]/30 bg-[#00ad74]/5" : "border-white/10 bg-white/5"
+              )}>
+                <p className="text-xs font-bold uppercase tracking-[0.12em] text-white/60">Upload checklist</p>
+                <div className="space-y-3">
+                  <div className="flex items-center gap-2.5">
+                    <div className={cn(
+                      "w-5 h-5 rounded-full flex items-center justify-center shrink-0 transition-colors",
+                      audioFile ? "bg-[#00ad74]/20 text-[#00ad74]" : "bg-white/10 text-white/40"
+                    )}>
+                      {audioFile
+                        ? <CheckCircle2 className="w-3.5 h-3.5" />
+                        : <span className="w-1.5 h-1.5 rounded-full bg-current" />
+                      }
+                    </div>
+                    <span className={cn("text-sm transition-colors", audioFile ? "text-white font-medium" : "text-white/60")}>
+                      Audio file {audioFile ? `— ${audioFile.name}` : "(required)"}
+                    </span>
+                  </div>
+                  <div className="flex items-center gap-2.5">
+                    <div className={cn(
+                      "w-5 h-5 rounded-full flex items-center justify-center shrink-0 transition-colors",
+                      coverFile ? "bg-[#00ad74]/20 text-[#00ad74]" : "bg-white/10 text-white/30"
+                    )}>
+                      {coverFile
+                        ? <CheckCircle2 className="w-3.5 h-3.5" />
+                        : <span className="w-1.5 h-1.5 rounded-full bg-current" />
+                      }
+                    </div>
+                    <span className={cn("text-sm transition-colors", coverFile ? "text-white font-medium" : "text-white/60")}>
+                      Cover art {coverFile ? `— ${coverFile.name}` : "(optional)"}
+                    </span>
+                  </div>
+                </div>
+
                 <button
-                  type="button"
-                  onClick={addFeaturedArtist}
-                  disabled={!newFeaturedArtist.trim()}
-                  className="px-4 h-11 bg-[#309605] hover:bg-[#3ba208] disabled:opacity-50 disabled:cursor-not-allowed rounded-xl text-white text-sm font-medium transition-all duration-200 flex items-center gap-2"
+                  onClick={handleNext}
+                  disabled={!canProceedStep0}
+                  className={cn(
+                    "w-full rounded-xl min-h-[48px] h-12 font-semibold gap-2 mt-2 transition-all flex items-center justify-center touch-manipulation",
+                    canProceedStep0
+                      ? "bg-[#00ad74] hover:bg-[#009c68] active:bg-[#008a5d] text-white"
+                      : "bg-white/10 text-white/40 cursor-not-allowed"
+                  )}
                 >
-                  <Plus className="w-4 h-4" />
-                  Add
+                  {canProceedStep0 ? (
+                    <>
+                      <CheckCircle2 className="w-4 h-4" />
+                      Continue to Details
+                      <ChevronRight className="w-4 h-4 ml-auto" />
+                    </>
+                  ) : (
+                    <>
+                      Add an audio file to continue
+                    </>
+                  )}
                 </button>
               </div>
             </div>
+          )}
 
-            {/* Audio File Upload */}
-            <div>
-              <label className="flex items-center gap-2 font-['Inter',sans-serif] font-medium text-gray-700 text-sm mb-3">
-                <Music className="w-4 h-4 text-[#309605]" />
-                Audio File {!isEditing && '*'}
-                {isEditing && <span className="text-gray-500 text-xs">(optional - leave blank to keep existing)</span>}
-              </label>
 
-              {audioFile ? (
-                <div className="flex items-center justify-between p-4 bg-gray-50 border border-gray-200 rounded-xl">
-                  <div className="flex items-center gap-3">
-                    <div className="w-10 h-10 bg-green-100 rounded-full flex items-center justify-center">
-                      <Music className="w-5 h-5 text-[#309605]" />
-                    </div>
-                    <div className="flex-1 min-w-0">
-                      <p className="font-['Inter',sans-serif] text-gray-900 text-sm font-medium truncate">
-                        {audioFile.name}
-                      </p>
-                      <p className="font-['Inter',sans-serif] text-gray-500 text-xs">
-                        {(audioFile.size / (1024 * 1024)).toFixed(1)} MB
-                      </p>
-                    </div>
-                  </div>
-                  <button
-                    type="button"
-                    onClick={removeAudioFile}
-                    className="p-2 text-red-500 hover:text-red-700 hover:bg-red-50 rounded-full transition-colors duration-200"
-                  >
-                    <X className="w-4 h-4" />
-                  </button>
-                </div>
-              ) : isEditing && initialData?.metadata?.audio_url ? (
-                <div className="p-4 bg-blue-50 border border-blue-200 rounded-xl">
-                  <div className="flex items-center gap-3 mb-3">
-                    <div className="w-10 h-10 bg-blue-100 rounded-full flex items-center justify-center">
-                      <Music className="w-5 h-5 text-blue-600" />
-                    </div>
-                    <div className="flex-1">
-                      <p className="font-['Inter',sans-serif] text-gray-900 text-sm font-medium">
-                        Current Audio File
-                      </p>
-                      <p className="font-['Inter',sans-serif] text-gray-600 text-xs">
-                        {initialData?.metadata?.file_name || 'Existing audio'}
-                      </p>
-                    </div>
-                  </div>
-                  <div className="border-2 border-dashed border-blue-300 rounded-xl p-4 text-center hover:border-[#309605] hover:bg-blue-100 transition-all duration-200">
+          {/* ══════════════════════════════
+              STEP 1 — DETAILS
+          ══════════════════════════════ */}
+          {currentStep === 1 && (
+            <div className="space-y-6 animate-in fade-in slide-in-from-right-4 duration-300">
+              <div className="space-y-1">
+                <h2 className="text-lg font-semibold tracking-tight text-white">Track details</h2>
+                <p className="text-sm text-white/60">Name and categorize your release.</p>
+              </div>
+
+              {/* Track title */}
+              <div className="space-y-2">
+                <label htmlFor="title" className="text-xs font-bold uppercase tracking-[0.12em] text-white/60 block">
+                  Track Title <span className="text-[#00ad74]">*</span>
+                </label>
+                <input
+                  id="title"
+                  placeholder="What's this track called?"
+                  value={title}
+                  onChange={(e) => setTitle(e.target.value)}
+                  className="w-full min-h-[48px] h-12 bg-white/5 border border-white/10 focus:border-[#00ad74]/30 focus:ring-2 focus:ring-[#00ad74]/20 text-white placeholder:text-white/40 rounded-xl px-4 outline-none transition-all"
+                />
+                <p className="text-[11px] text-white/60">{title.length}/100 characters</p>
+              </div>
+
+              {/* Description */}
+              <div className="space-y-2">
+                <label htmlFor="description" className="text-xs font-bold uppercase tracking-[0.12em] text-white/60 block">
+                  Description
+                  <span className="ml-2 text-[10px] normal-case tracking-normal font-normal text-white/40">optional</span>
+                </label>
+                <textarea
+                  id="description"
+                  rows={3}
+                  placeholder="Tell your audience what this track is about..."
+                  value={description}
+                  onChange={(e) => setDescription(e.target.value)}
+                  className="w-full rounded-xl border border-white/10 bg-white/5 px-4 py-3 text-sm text-white placeholder:text-white/40 focus:outline-none focus:ring-2 focus:ring-[#00ad74]/20 focus:border-[#00ad74]/30 resize-none transition-all min-h-[96px]"
+                />
+              </div>
+
+              {/* Featured Artist */}
+              <div className="space-y-2">
+                <label htmlFor="featured" className="text-xs font-bold uppercase tracking-[0.12em] text-white/60 block">
+                  Featured Artist
+                  <span className="ml-2 text-[10px] normal-case tracking-normal font-normal text-white/40">optional</span>
+                </label>
+                <input
+                  id="featured"
+                  placeholder="e.g. REMA, Burna Boy"
+                  value={featuredArtist}
+                  onChange={(e) => setFeaturedArtist(e.target.value)}
+                  className="w-full min-h-[48px] h-12 bg-white/5 border border-white/10 focus:border-[#00ad74]/30 focus:ring-2 focus:ring-[#00ad74]/20 text-white placeholder:text-white/40 rounded-xl px-4 outline-none transition-all"
+                />
+              </div>
+
+              {/* Release Date */}
+              <div className="space-y-2">
+                <label className="text-xs font-bold uppercase tracking-[0.12em] text-white/60 block">
+                  Release Date
+                  <span className="ml-2 text-[10px] normal-case tracking-normal font-normal text-white/40">optional</span>
+                </label>
+                <div className="grid grid-cols-2 gap-3">
+                  <div className="relative">
                     <input
-                      type="file"
-                      accept="audio/mpeg, audio/mp3, .mp3"
-                      onChange={handleAudioUpload}
-                      className="hidden"
-                      id="audio-upload"
+                      type="date"
+                      value={releaseDate ? format(releaseDate, "yyyy-MM-dd") : ""}
+                      onChange={(e) => setReleaseDate(e.target.value ? new Date(e.target.value) : undefined)}
+                      className="w-full min-h-[48px] h-12 bg-white/5 border border-white/10 focus:border-[#00ad74]/30 focus:ring-2 focus:ring-[#00ad74]/20 text-white rounded-xl px-4 outline-none transition-all"
                     />
-                    <label htmlFor="audio-upload" className="cursor-pointer">
-                      <Music className="w-8 h-8 text-gray-400 mx-auto mb-2" />
-                      <p className="font-['Inter',sans-serif] font-medium text-gray-700 text-xs mb-1">
-                        Click to replace audio file
-                      </p>
-                      <p className="font-['Inter',sans-serif] text-gray-500 text-xs">
-                        MP3 format only (128-320 kbps recommended)
-                      </p>
-                    </label>
+                    <CalendarIcon className="absolute right-4 top-1/2 -translate-y-1/2 w-4 h-4 text-white/40 pointer-events-none" />
                   </div>
-                </div>
-              ) : (
-                <div className="border-2 border-dashed border-gray-300 rounded-xl p-6 text-center hover:border-[#309605] hover:bg-gray-50 transition-all duration-200">
                   <input
-                    type="file"
-                    accept="audio/mpeg, audio/mp3, .mp3"
-                    onChange={handleAudioUpload}
-                    className="hidden"
-                    id="audio-upload"
+                    type="time"
+                    value={releaseTime}
+                    onChange={(e) => setReleaseTime(e.target.value || '00:00')}
+                    className="w-full min-h-[48px] h-12 bg-white/5 border border-white/10 focus:border-[#00ad74]/30 focus:ring-2 focus:ring-[#00ad74]/20 text-white rounded-xl px-4 outline-none transition-all"
                   />
-                  <label htmlFor="audio-upload" className="cursor-pointer">
-                    <Music className="w-12 h-12 text-gray-400 mx-auto mb-3" />
-                    <p className="font-['Inter',sans-serif] font-medium text-gray-700 text-sm mb-1">
-                      Click to upload audio file
-                    </p>
-                    <p className="font-['Inter',sans-serif] text-gray-500 text-xs">
-                      MP3 format only (128-320 kbps recommended)
-                    </p>
+                </div>
+              </div>
+
+              {/* Genre */}
+              <div className="grid grid-cols-1 gap-5">
+                <div className="space-y-2">
+                  <label className="text-xs font-bold uppercase tracking-[0.12em] text-white/60 block">
+                    Genre <span className="text-[#00ad74]">*</span>
                   </label>
+                  <select
+                    value={genreId}
+                    onChange={(e) => setGenreId(e.target.value)}
+                    className="w-full min-h-[48px] h-12 bg-white/5 border border-white/10 focus:border-[#00ad74]/30 focus:ring-2 focus:ring-[#00ad74]/20 text-white rounded-xl px-4 outline-none transition-all"
+                  >
+                    <option value="" className="bg-[#0d0d0d]">Select genre</option>
+                    {genres.map((g) => (
+                      <option key={g.id} value={g.id} className="bg-[#0d0d0d]">{g.name}</option>
+                    ))}
+                  </select>
+                </div>
+
+                {filteredSubgenres.length > 0 && (
+                  <div className="space-y-2">
+                    <label className="text-xs font-bold uppercase tracking-[0.12em] text-white/60 block">
+                      Subgenre
+                      <span className="ml-1 text-[10px] normal-case tracking-normal font-normal text-white/40">optional</span>
+                    </label>
+                    <select
+                      value={subgenreId}
+                      onChange={(e) => setSubgenreId(e.target.value)}
+                      className="w-full min-h-[48px] h-12 bg-white/5 border border-white/10 focus:border-[#00ad74]/30 focus:ring-2 focus:ring-[#00ad74]/20 text-white rounded-xl px-4 outline-none transition-all"
+                    >
+                      <option value="" className="bg-[#0d0d0d]">Select subgenre</option>
+                      {filteredSubgenres.map((s) => (
+                        <option key={s.id} value={s.id} className="bg-[#0d0d0d]">{s.name}</option>
+                      ))}
+                    </select>
+                  </div>
+                )}
+              </div>
+
+              {/* Error Message */}
+              {error && (
+                <div className="rounded-xl border border-red-500/30 bg-red-500/10 p-4 sm:p-5">
+                  <div className="flex items-start gap-4">
+                    <AlertCircle className="w-5 h-5 text-red-400 shrink-0 mt-0.5" />
+                    <p className="text-sm text-red-200">{error}</p>
+                  </div>
                 </div>
               )}
-            </div>
 
-            {/* Cover Image Upload */}
-            <div>
-              <label className="flex items-center gap-2 font-['Inter',sans-serif] font-medium text-gray-700 text-sm mb-2">
-                <Image className="w-4 h-4 text-[#309605]" />
-                Cover Image {!isEditing && '*'}
-                {isEditing && <span className="text-gray-500 text-xs">(optional - leave blank to keep existing)</span>}
-              </label>
-              <p className="font-['Inter',sans-serif] text-gray-500 text-xs mb-3">
-                Images will be automatically optimized to 467x467px
-              </p>
-              
-              {imagePreviewUrl ? (
-                <div className="relative">
-                  <div className="w-full h-48 rounded-xl overflow-hidden bg-gray-100 mb-3">
-                    <img
-                      src={imagePreviewUrl}
-                      alt="Cover preview"
-                      className="w-full h-full object-cover"
-                    />
-                  </div>
-                  {(coverImage || isEditing) && (
+              {/* Navigation */}
+              <div className="pt-4 flex gap-3">
+                <button
+                  onClick={handleBack}
+                  className="flex-1 rounded-xl min-h-[48px] gap-2 text-white/60 hover:text-white transition-colors flex items-center justify-center touch-manipulation border border-white/10"
+                  aria-label="Back"
+                >
+                  <ArrowLeft className="w-4 h-4" />
+                  Back
+                </button>
+                <button
+                  onClick={handleNext}
+                  disabled={!canProceedStep1}
+                  className={cn(
+                    "flex-1 rounded-xl min-h-[48px] h-12 font-semibold gap-2 transition-all flex items-center justify-center touch-manipulation",
+                    canProceedStep1
+                      ? "bg-[#00ad74] hover:bg-[#009c68] active:bg-[#008a5d] text-white"
+                      : "bg-white/10 text-white/40 cursor-not-allowed"
+                  )}
+                >
+                  Continue
+                  <ChevronRight className="w-4 h-4" />
+                </button>
+              </div>
+            </div>
+          )}
+
+          {/* ══════════════════════════════
+              STEP 2 — METADATA / MOODS
+          ══════════════════════════════ */}
+          {currentStep === 2 && (
+            <div className="space-y-8 animate-in fade-in slide-in-from-right-4 duration-300">
+              <div className="space-y-1">
+                <h2 className="text-lg font-semibold tracking-tight text-white">Mood & metadata</h2>
+                <p className="text-sm text-white/60">
+                  Help listeners discover you through moods that match your sound.
+                </p>
+              </div>
+
+              {/* Mood selector */}
+              <div className="space-y-4">
+                <div className="flex items-center justify-between">
+                  <label className="text-xs font-bold uppercase tracking-[0.12em] text-white/60 block">
+                    Moods
+                  </label>
+                  {selectedMoods.length > 0 && (
                     <button
                       type="button"
-                      onClick={removeCoverImage}
-                      className="absolute top-3 right-3 w-8 h-8 bg-red-500 hover:bg-red-600 rounded-full flex items-center justify-center transition-colors duration-200 shadow-lg"
+                      onClick={() => setSelectedMoods([])}
+                      className="text-[11px] text-white/60 hover:text-white transition-colors"
                     >
-                      <X className="w-4 h-4 text-white" />
+                      Clear all
                     </button>
                   )}
-                  <div className="flex items-center gap-3 p-3 bg-gray-50 rounded-lg">
-                    <Image className="w-4 h-4 text-green-600" />
-                    <div className="flex-1 min-w-0">
-                      <p className="font-['Inter',sans-serif] text-gray-900 text-sm font-medium truncate">
-                        {coverImage?.name || (isEditing ? 'Current cover image' : 'Cover image')}
-                      </p>
-                      {coverImage && (
-                        <p className="font-['Inter',sans-serif] text-gray-500 text-xs">
-                          {(coverImage.size / (1024 * 1024)).toFixed(1)} MB
-                        </p>
+                </div>
+                <div className="flex flex-wrap gap-2">
+                  {moods.map((mood) => {
+                    const isSelected = selectedMoods.includes(mood.id);
+                    return (
+                      <button
+                        key={mood.id}
+                        type="button"
+                        onClick={() => toggleMood(mood.id)}
+                        className={cn(
+                          "min-h-[44px] px-4 py-2.5 rounded-full text-xs font-semibold border transition-all duration-150 touch-manipulation",
+                          isSelected
+                            ? "bg-[#00ad74] text-white border-[#00ad74] shadow-[0_0_12px_rgba(0,173,116,0.25)]"
+                            : "bg-white/5 text-white/60 border-white/10 hover:border-[#00ad74]/40 hover:text-white"
+                        )}
+                      >
+                        {mood.name}
+                      </button>
+                    );
+                  })}
+                </div>
+                {selectedMoods.length > 0 && (
+                  <p className="text-[11px] text-white/60">
+                    {selectedMoods.length} mood{selectedMoods.length !== 1 ? "s" : ""} selected
+                  </p>
+                )}
+              </div>
+
+              {/* Review summary card */}
+              <div className="rounded-2xl border border-white/10 bg-white/5 p-5 sm:p-6 space-y-4">
+                <p className="text-xs font-bold uppercase tracking-[0.12em] text-white/60">Release Summary</p>
+                <div className="flex items-center gap-4">
+                  {coverPreview ? (
+                    <img src={coverPreview} alt="Cover" className="w-16 h-16 rounded-xl object-cover shrink-0" />
+                  ) : (
+                    <div className="w-16 h-16 rounded-xl bg-white/10 flex items-center justify-center shrink-0">
+                      <Music2 className="w-6 h-6 text-white/60" />
+                    </div>
+                  )}
+                  <div className="min-w-0">
+                    <p className="text-base font-bold text-white truncate">{title}</p>
+                    {featuredArtist && (
+                      <p className="text-xs text-white/60 mt-0.5">ft. {featuredArtist}</p>
+                    )}
+                    <div className="flex items-center gap-2 mt-1.5">
+                      {genreId && genres.find(g => g.id === genreId) && (
+                        <span className="px-2 py-0.5 rounded-md bg-white/10 text-[10px] font-semibold text-white/60">
+                          {genres.find(g => g.id === genreId)?.name}
+                        </span>
                       )}
-                      {!coverImage && isEditing && (
-                        <p className="font-['Inter',sans-serif] text-blue-600 text-xs">
-                          Click &apos;Replace Image&apos; below to upload a new cover
-                        </p>
+                      {audioFile && (
+                        <span className="text-[11px] text-white/60">
+                          {audioFile.name.split('.').pop()?.toUpperCase()} · {(audioFile.size / (1024 * 1024)).toFixed(1)} MB
+                        </span>
                       )}
                     </div>
                   </div>
                 </div>
-              ) : (
-                <div className="border-2 border-dashed border-gray-300 rounded-xl p-6 text-center hover:border-[#309605] hover:bg-gray-50 transition-all duration-200">
-                  <input
-                    type="file"
-                    accept="image/*"
-                    onChange={handleCoverImageUpload}
-                    className="hidden"
-                    id="cover-upload"
-                  />
-                  <label htmlFor="cover-upload" className="cursor-pointer">
-                    <Image className="w-12 h-12 text-gray-400 mx-auto mb-3" />
-                    <p className="font-['Inter',sans-serif] font-medium text-gray-700 text-sm mb-1">
-                      {isEditing ? 'Click to replace cover image' : 'Click to upload cover image *'}
+                <div className="grid grid-cols-2 gap-3 pt-1 border-t border-white/10">
+                  <div>
+                    <p className="text-[10px] font-semibold uppercase tracking-[0.1em] text-white/40 mb-0.5">Release date</p>
+                    <p className="text-xs font-medium text-white">
+                      {releaseDate ? (releaseTime && releaseTime !== '00:00' ? `${format(releaseDate, "MMM d, yyyy")} at ${releaseTime}` : format(releaseDate, "MMM d, yyyy")) : "Immediate"}
                     </p>
-                    <p className="font-['Inter',sans-serif] text-gray-500 text-xs">
-                      JPEG, PNG, WebP (max 5MB)
+                  </div>
+                  <div>
+                    <p className="text-[10px] font-semibold uppercase tracking-[0.1em] text-white/40 mb-0.5">Moods</p>
+                    <p className="text-xs font-medium text-white">
+                      {selectedMoods.length > 0 ? `${selectedMoods.length} selected` : "None"}
                     </p>
-                  </label>
+                  </div>
+                </div>
+              </div>
+
+              {/* Upload progress */}
+              {uploading && (
+                <div className="space-y-2">
+                  <div className="flex items-center justify-between">
+                    <p className="text-xs font-semibold text-white">Uploading to Bunny Storage…</p>
+                    <p className="text-xs font-semibold text-white">{uploadProgress}%</p>
+                  </div>
+                  <div className="h-1.5 bg-white/10 rounded-full overflow-hidden">
+                    <div 
+                      className="h-full bg-[#00ad74] rounded-full transition-all duration-300"
+                      style={{ width: `${uploadProgress}%` }}
+                    />
+                  </div>
+                  <p className="text-[11px] text-white/60">
+                    {uploadProgress < 50 ? "Processing audio file…" : uploadProgress < 80 ? "Uploading cover art…" : "Finalizing…"}
+                  </p>
                 </div>
               )}
+
+              {/* Error Message */}
+              {error && (
+                <div className="rounded-xl border border-red-500/30 bg-red-500/10 p-4 sm:p-5">
+                  <div className="flex items-start gap-4">
+                    <AlertCircle className="w-5 h-5 text-red-400 shrink-0 mt-0.5" />
+                    <p className="text-sm text-red-200">{error}</p>
+                  </div>
+                </div>
+              )}
+
+              {/* Navigation */}
+              <div className="pt-4 flex gap-3">
+                <button
+                  onClick={handleBack}
+                  disabled={uploading}
+                  className="flex-1 rounded-xl min-h-[48px] gap-2 text-white/60 hover:text-white transition-colors flex items-center justify-center disabled:opacity-50 touch-manipulation border border-white/10"
+                  aria-label="Back"
+                >
+                  <ArrowLeft className="w-4 h-4" />
+                  Back
+                </button>
+                <button
+                  onClick={handleUpload}
+                  disabled={uploading}
+                  className={cn(
+                    "flex-1 rounded-xl min-h-[48px] h-12 font-semibold gap-2 transition-all flex items-center justify-center touch-manipulation",
+                    uploading
+                      ? "bg-white/10 text-white/40 cursor-not-allowed"
+                      : "bg-[#00ad74] hover:bg-[#009c68] active:bg-[#008a5d] text-white"
+                  )}
+                >
+                  {uploading ? (
+                    <>
+                      <Loader2 className="w-4 h-4 animate-spin" />
+                      Uploading…
+                    </>
+                  ) : (
+                    <>
+                      <Upload className="w-4 h-4" />
+                      Publish Track
+                    </>
+                  )}
+                </button>
+              </div>
             </div>
+          )}
 
-            {/* Compression Status */}
-            {compressionStatus && (
-              <div className="p-4 bg-blue-50 border border-blue-200 rounded-xl">
-                <div className="flex items-center gap-3">
-                  <div className="w-5 h-5 border-2 border-blue-600 border-t-transparent rounded-full animate-spin"></div>
-                  <p className="font-['Inter',sans-serif] text-blue-700 text-sm">{compressionStatus}</p>
-                </div>
-              </div>
-            )}
-
-            {/* Error Message */}
-            {error && (
-              <div className="p-4 bg-red-50 border border-red-200 rounded-xl">
-                <div className="flex items-start gap-3">
-                  <div className="w-5 h-5 bg-red-500 rounded-full flex items-center justify-center flex-shrink-0 mt-0.5">
-                    <X className="w-3 h-3 text-white" />
-                  </div>
-                  <p className="font-['Inter',sans-serif] text-red-700 text-sm">{error}</p>
-                </div>
-              </div>
-            )}
-
-            {/* Success Message */}
-            {success && (
-              <div className="p-4 bg-green-50 border border-green-200 rounded-xl">
-                <div className="flex items-start gap-3">
-                  <div className="w-5 h-5 bg-green-500 rounded-full flex items-center justify-center flex-shrink-0 mt-0.5">
-                    <Music className="w-3 h-3 text-white" />
-                  </div>
-                  <p className="font-['Inter',sans-serif] text-green-700 text-sm">{success}</p>
-                </div>
-              </div>
-            )}
-
-            {/* Bottom spacing to ensure content doesn't get hidden behind sticky footer */}
-            <div className="h-4"></div>
-          </div>
-        </div>
-
-        {/* Sticky Footer with Submit Buttons */}
-        <div className="p-6 border-t border-gray-100 bg-white rounded-b-2xl">
-          <div className="flex gap-3">
-            <button
-              type="button"
-              onClick={onClose}
-              disabled={isSubmitting}
-              className="flex-1 h-12 px-4 bg-white border-2 border-gray-300 text-gray-700 rounded-xl font-['Inter',sans-serif] font-medium hover:bg-gray-50 hover:border-gray-400 transition-all duration-200 disabled:opacity-50 disabled:cursor-not-allowed"
-            >
-              Cancel
-            </button>
-            <button
-              type="button"
-              onClick={handleSubmit}
-              disabled={isSubmitting || !formData.title.trim() || (!initialData && (!audioFile || !coverImage)) || !formData.genre}
-              className="flex-1 h-12 px-4 bg-gradient-to-r from-[#309605] to-[#3ba208] hover:from-[#3ba208] hover:to-[#3ba208] text-white rounded-xl font-['Inter',sans-serif] font-medium transition-all duration-200 disabled:opacity-50 disabled:cursor-not-allowed shadow-lg shadow-[#309605]/25"
-            >
-              {isSubmitting ? (
-                <div className="flex items-center justify-center gap-2">
-                  <div className="w-4 h-4 border-2 border-white border-t-transparent rounded-full animate-spin"></div>
-                  <span>{initialData ? 'Updating...' : 'Uploading...'}</span>
-                </div>
-              ) : (
-                initialData ? 'Update Song' : 'Upload Song'
-              )}
-            </button>
-          </div>
-          
-          {/* Form validation hint */}
-          <div className="mt-3 text-center">
-            <p className="font-['Inter',sans-serif] text-gray-500 text-xs">
-              {!formData.title.trim() ? 'Song title required' :
-               !initialData && !audioFile ? 'Audio file required' :
-               !initialData && !coverImage ? 'Cover image required' :
-               !formData.genre ? 'Genre selection required' :
-               initialData ? 'Ready to update' : 'Ready to upload'}
-            </p>
-          </div>
-        </div>
       </div>
     </div>
   );
-}
+};
+
+export default SingleUploadForm;

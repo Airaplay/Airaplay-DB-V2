@@ -15,6 +15,13 @@ import {
 import { formatDistanceToNowStrict } from 'date-fns';
 import { recordContribution } from '../lib/contributionService';
 
+const COMMENTS_CACHE_TTL_MS = 5 * 60 * 1000; // 5 minutes
+const commentsCache = new Map<string, { comments: Comment[]; ts: number }>();
+
+function getCommentsCacheKey(contentId: string, contentType: string): string {
+  return `${contentType}-${contentId}`;
+}
+
 interface CommentsModalProps {
   contentId: string;
   contentTitle: string;
@@ -68,9 +75,11 @@ export const CommentsModal: React.FC<CommentsModalProps> = ({
   const replyTextRef = useRef<HTMLTextAreaElement>(null);
 
   // Define loadComments BEFORE any hooks or functions that reference it
-  const loadComments = useCallback(async () => {
+  const loadComments = useCallback(async (opts?: { silent?: boolean }) => {
     try {
-      setIsLoading(true);
+      if (!opts?.silent) {
+        setIsLoading(true);
+      }
       setError(null);
 
       const fetchedComments = await getContentComments(contentId, contentType || 'song');
@@ -143,6 +152,8 @@ export const CommentsModal: React.FC<CommentsModalProps> = ({
       });
 
       setComments(rootComments);
+      const cacheKey = getCommentsCacheKey(contentId, contentType || 'song');
+      commentsCache.set(cacheKey, { comments: JSON.parse(JSON.stringify(rootComments)), ts: Date.now() });
     } catch (err) {
       console.error('Error loading comments:', err);
       setError('Failed to load comments');
@@ -158,10 +169,22 @@ export const CommentsModal: React.FC<CommentsModalProps> = ({
   };
 
   useEffect(() => {
-    if (isInitialized) {
+    if (!isInitialized) return;
+
+    const cacheKey = getCommentsCacheKey(contentId, contentType || 'song');
+    const cached = commentsCache.get(cacheKey);
+    const now = Date.now();
+    const isCacheValid = cached && now - cached.ts < COMMENTS_CACHE_TTL_MS;
+
+    if (isCacheValid && cached.comments.length >= 0) {
+      setComments(cached.comments);
+      setIsLoading(false);
+      setError(null);
+      loadComments({ silent: true });
+    } else {
       loadComments();
     }
-  }, [contentId, isInitialized, loadComments]);
+  }, [contentId, contentType, isInitialized, loadComments]);
 
   useEffect(() => {
     const checkMiniPlayer = () => {
@@ -453,7 +476,14 @@ export const CommentsModal: React.FC<CommentsModalProps> = ({
       };
 
       const comment = findCommentById(comments, commentId);
-      if (!comment) return;
+      if (!comment) {
+        setLikingComments(prev => {
+          const next = new Set(prev);
+          next.delete(commentId);
+          return next;
+        });
+        return;
+      }
 
       // Store previous state for error recovery
       const previousComments = comments;
@@ -497,6 +527,7 @@ export const CommentsModal: React.FC<CommentsModalProps> = ({
         console.warn('Optimistic update mismatch, reloading comments');
         await loadComments();
       } else {
+        const cacheKey = getCommentsCacheKey(contentId, contentType || 'song');
         // Update like count from server to ensure accuracy
         const { data: likesCountData } = await supabase.rpc('get_comment_likes_count', { comment_uuid: commentId });
         if (likesCountData !== null && likesCountData !== undefined) {
@@ -511,7 +542,13 @@ export const CommentsModal: React.FC<CommentsModalProps> = ({
               return c;
             });
           };
-          setComments(updateLikeCount(comments));
+          const updatedComments = updateLikeCount(comments);
+          setComments(updatedComments);
+          commentsCache.set(cacheKey, { comments: JSON.parse(JSON.stringify(updatedComments)), ts: Date.now() });
+        } else {
+          // Keep optimistic state; update cache so reopen shows correct like state
+          const optimisticComments = updateCommentImmutably(comments);
+          commentsCache.set(cacheKey, { comments: JSON.parse(JSON.stringify(optimisticComments)), ts: Date.now() });
         }
       }
     } catch (error: any) {

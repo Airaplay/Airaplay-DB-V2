@@ -1,11 +1,8 @@
-import React, { useEffect, useState } from 'react';
+import React from 'react';
 import { Play, Pause, Share2, X } from 'lucide-react';
 import { useNavigate, useLocation } from 'react-router-dom';
 import { recordShareEvent } from '../lib/supabase';
 import { shareSong } from '../lib/shareService';
-import { useAdPlacement } from '../hooks/useAdPlacement';
-import { BannerAdPosition } from '@capacitor-community/admob';
-import { getActivePlacement } from '../lib/adPlacementService';
 
 interface Song {
   id: string;
@@ -46,14 +43,7 @@ export const MiniMusicPlayer: React.FC<MiniMusicPlayerProps> = ({
 }) => {
   const navigate = useNavigate();
   const location = useLocation();
-
   const isOnMessageThread = location.pathname.startsWith('/messages/');
-
-  // Ad placement for top of mini player
-  const { showBanner, hideBanner, removeBanner } = useAdPlacement('MiniMusicPlayer');
-  
-  // Track if ad is actually showing
-  const [isAdActive, setIsAdActive] = useState(false);
 
   const handleShare = async () => {
     if (!song) return;
@@ -78,6 +68,15 @@ export const MiniMusicPlayer: React.FC<MiniMusicPlayerProps> = ({
       return;
     }
 
+    // If playback started from an album/EP, return to the album player screen
+    if (playlistContext && playlistContext.startsWith('album-')) {
+      const albumIdFromContext = playlistContext.replace('album-', '');
+      if (albumIdFromContext) {
+        navigate(`/album/${albumIdFromContext}`);
+        return;
+      }
+    }
+
     if (albumId) {
       navigate(`/album/${albumId}`);
       return;
@@ -93,80 +92,17 @@ export const MiniMusicPlayer: React.FC<MiniMusicPlayerProps> = ({
     handlePlayerClick();
   };
 
-  // Show/hide ad banner based on visibility
-  useEffect(() => {
-    let isMounted = true;
-
-    const checkAndShowAd = async () => {
-      if (!isVisible || !song || isOnMessageThread) {
-        setIsAdActive(false);
-        hideBanner();
-        document.body.classList.remove('ad-banner-active');
-        return;
-      }
-
-      try {
-        // First check if placement exists and is enabled
-        const placement = await getActivePlacement('mini_music_player_top_banner');
-        
-        if (placement && placement.is_enabled && placement.ad_unit) {
-          // Placement exists and is enabled, show the ad
-          await showBanner('mini_music_player_top_banner', BannerAdPosition.BOTTOM_CENTER, {
-            contentId: song.id,
-            contentType: 'song'
-          });
-          
-          if (isMounted) {
-            setIsAdActive(true);
-            document.body.classList.add('ad-banner-active');
-          }
-        } else {
-          // No active placement, hide ad and reset position
-          if (isMounted) {
-            setIsAdActive(false);
-            document.body.classList.remove('ad-banner-active');
-          }
-          hideBanner();
-        }
-      } catch (err) {
-        console.error('Failed to show ad on mini player:', err);
-        if (isMounted) {
-          setIsAdActive(false);
-          document.body.classList.remove('ad-banner-active');
-        }
-        hideBanner();
-      }
-    };
-
-    checkAndShowAd();
-
-    return () => {
-      isMounted = false;
-      // Cleanup: remove banner when component unmounts
-      removeBanner();
-      setIsAdActive(false);
-      document.body.classList.remove('ad-banner-active');
-    };
-  }, [isVisible, song, isOnMessageThread, showBanner, hideBanner, removeBanner]);
-
   if (!isVisible || !song || isOnMessageThread) {
     return null;
   }
 
-  // Position calculation:
-  // - If ad is active: position mini player above the ad banner
-  // - If no ad: position mini player at original position (above navigation bar)
-  const adBannerHeight = 50; // pixels - typical AdMob adaptive banner height
-  const miniPlayerBottom = isAdActive
-    ? `calc(4rem + ${adBannerHeight}px + env(safe-area-inset-bottom, 0px))`
-    : `calc(4rem + env(safe-area-inset-bottom, 0px))`;
+  const NAV_BAR_HEIGHT_PX = 72;
+  const miniPlayerBottom = `calc(${NAV_BAR_HEIGHT_PX}px + env(safe-area-inset-bottom, 0px))`;
 
   return (
     <>
-      {/* Mini Music Player - Positioned above the ad banner */}
-      {/* The ad banner (via AdMob BOTTOM_CENTER) appears at bottom, mini player sits above it */}
       <div
-        className="fixed left-0 right-0 w-full z-[61]"
+        className="mini-music-player fixed left-0 right-0 w-full z-[61] transition-[bottom] duration-300 ease-out"
         style={{
           bottom: miniPlayerBottom
         }}

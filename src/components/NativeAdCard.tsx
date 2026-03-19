@@ -63,7 +63,7 @@ export const NativeAdCard = ({ ad, className = '' }: NativeAdCardProps): JSX.Ele
         </div>
 
         {/* Sponsored Badge */}
-        <div className="absolute top-1.5 right-1.5 px-2 py-0.5 bg-gradient-to-r from-blue-500/90 to-purple-500/90 backdrop-blur-sm rounded text-[9px] font-semibold text-white shadow-lg">
+        <div className="absolute top-1.5 right-1.5 px-2 py-0.5 bg-gradient-to-r from-blue-500/90 to-purple-500/90 backdrop-blur-sm rounded text-[10px] font-semibold text-white shadow-lg">
           Sponsored
         </div>
       </div>

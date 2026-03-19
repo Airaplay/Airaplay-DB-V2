@@ -7,6 +7,7 @@ import { supabase, formatTreats } from '../lib/supabase';
 import { PaymentChannelSelector } from './PaymentChannelSelector';
 import { getUserCurrency, CurrencyDetectionResult, Currency, convertAmount, convertAmountWithRoundingInfo, formatCurrencyAmount } from '../lib/currencyDetection';
 import { CACHE_KEYS, getCachedData } from '../lib/treatCache';
+import { toUserFacingPaymentError, TRY_AGAIN_LABEL } from '../lib/criticalErrorMessages';
 
 interface PurchaseTreatsModalProps {
   onClose: () => void;
@@ -162,7 +163,7 @@ export const PurchaseTreatsModal: React.FC<PurchaseTreatsModalProps> = ({ onClos
         setError('No treat packages available at this time');
       }
     } catch {
-      setError('Failed to load treat packages');
+      setError(toUserFacingPaymentError(err, 'load'));
     } finally {
       setIsLoadingPackages(false);
     }
@@ -187,7 +188,7 @@ export const PurchaseTreatsModal: React.FC<PurchaseTreatsModalProps> = ({ onClos
       }
       setTimeout(() => { onSuccess(); onClose(); }, 2500);
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'Payment processing error');
+      setError(toUserFacingPaymentError(err, 'payment'));
       setTimeout(() => { onClose(); }, 2500);
     }
   };
@@ -510,7 +511,7 @@ export const PurchaseTreatsModal: React.FC<PurchaseTreatsModalProps> = ({ onClos
                       {badge && (
                         <div className={`absolute top-2.5 left-2.5 flex items-center gap-1 px-2 py-0.5 bg-gradient-to-r ${getBadgeGradient(pkg)} rounded-full`}>
                           {getBadgeIcon(pkg)}
-                          <span className="text-[9px] font-bold text-white font-['Inter',sans-serif]">{badge}</span>
+                          <span className="text-[10px] font-bold text-white font-['Inter',sans-serif]">{badge}</span>
                         </div>
                       )}
 
@@ -568,9 +569,14 @@ export const PurchaseTreatsModal: React.FC<PurchaseTreatsModalProps> = ({ onClos
 
             {/* Error / Success banners */}
             {error && (
-              <div className="flex items-center gap-3 p-4 rounded-2xl bg-red-500/[0.08] border border-red-500/20">
-                <AlertCircle className="w-4 h-4 text-red-400 flex-shrink-0" />
-                <p className="text-red-400 text-sm font-medium font-['Inter',sans-serif]">{error}</p>
+              <div className="flex flex-col sm:flex-row sm:items-center gap-3 p-4 rounded-2xl bg-red-500/[0.08] border border-red-500/20">
+                <div className="flex items-start gap-3 flex-1">
+                  <AlertCircle className="w-4 h-4 text-red-400 flex-shrink-0 mt-0.5" />
+                  <p className="text-red-400 text-sm font-medium font-['Inter',sans-serif]">{error}</p>
+                </div>
+                <button type="button" onClick={() => setError(null)} className="sm:ml-auto px-4 py-2 rounded-xl border border-red-400/40 text-red-400 text-sm font-medium hover:bg-red-500/10 transition-colors whitespace-nowrap">
+                  {TRY_AGAIN_LABEL}
+                </button>
               </div>
             )}
             {success && (
