@@ -33,13 +33,14 @@ import { ContentSectionThresholdsManager } from './ContentSectionThresholdsManag
 import { FinancialControlsSection } from './FinancialControlsSection';
 import { PromotionalCreditsSection } from './PromotionalCreditsSection';
 import { DailyMixManagerSection } from './DailyMixManagerSection';
+import { GlobalDailyMixManagerSection } from './GlobalDailyMixManagerSection';
 import { AdminNotificationBell } from '../../components/AdminNotificationBell';
 import { SupportTicketsSection } from './SupportTicketsSection';
 import { WebAdsSection } from './WebAdsSection';
 import { BlogManagementSection } from './BlogManagementSection';
 import { AccountingSection } from './AccountingSection';
 
-type SectionType = 'users' | 'content' | 'faqs' | 'analytics' | 'country_performance' | 'settings' | 'earnings' | 'analysis' | 'announcements' | 'admin_settings' | 'ad_management' | 'native_ads' | 'web_ads' | 'feature_banners' | 'treat_manager' | 'daily_checkin' | 'referral_management' | 'promotion_manager' | 'reports' | 'featured_artists' | 'mix_manager' | 'daily_mix_manager' | 'genre_manager' | 'payment_monitoring' | 'mood_analysis' | 'listener_curations' | 'contribution_rewards' | 'content_thresholds' | 'financial_controls' | 'promotional_credits' | 'support' | 'blog' | 'accounting';
+type SectionType = 'users' | 'content' | 'faqs' | 'analytics' | 'country_performance' | 'settings' | 'earnings' | 'analysis' | 'announcements' | 'admin_settings' | 'ad_management' | 'native_ads' | 'web_ads' | 'feature_banners' | 'treat_manager' | 'daily_checkin' | 'referral_management' | 'promotion_manager' | 'reports' | 'featured_artists' | 'mix_manager' | 'daily_mix_manager' | 'global_daily_mix_manager' | 'genre_manager' | 'payment_monitoring' | 'mood_analysis' | 'listener_curations' | 'contribution_rewards' | 'content_thresholds' | 'financial_controls' | 'promotional_credits' | 'support' | 'blog' | 'accounting';
 
 const ADMIN_ROLES = ['admin', 'manager', 'editor', 'account'];
 
@@ -77,6 +78,7 @@ const getSectionLabel = (section: SectionType): string => {
     contribution_rewards: 'Contribution System',
     mix_manager: 'Mix Manager',
     daily_mix_manager: 'Daily Mix AI',
+    global_daily_mix_manager: 'Global Daily Mix',
     genre_manager: 'Genre Manager',
     native_ads: 'Native Ads',
     ad_management: 'Ad Management',
@@ -287,6 +289,7 @@ export const AdminDashboardScreen = (): JSX.Element => {
         case 'featured_artists': return <FeaturedArtistsSection />;
         case 'mix_manager': return <MixManagerSection />;
         case 'daily_mix_manager': return <DailyMixManagerSection />;
+        case 'global_daily_mix_manager': return <GlobalDailyMixManagerSection />;
         case 'genre_manager': return <GenreManagerSection />;
         case 'mood_analysis': return <MoodAnalysisSection />;
         case 'payment_monitoring': return <PaymentMonitoringSection />;
@@ -478,6 +481,7 @@ export const AdminDashboardScreen = (): JSX.Element => {
           <NavGroup groupKey="system" label="System">
             <NavItem section="mix_manager" icon={<Music className="w-4 h-4" />} label="Mix Manager" />
             <NavItem section="daily_mix_manager" icon={<Sparkles className="w-4 h-4" />} label="Daily Mix AI" />
+            <NavItem section="global_daily_mix_manager" icon={<Globe className="w-4 h-4" />} label="Global Daily Mix" />
             <NavItem section="genre_manager" icon={<Tags className="w-4 h-4" />} label="Genre Manager" />
             <NavItem section="mood_analysis" icon={<TrendingUp className="w-4 h-4" />} label="Mood Analysis" />
             <NavItem section="faqs" icon={<HelpCircle className="w-4 h-4" />} label="FAQs" />
