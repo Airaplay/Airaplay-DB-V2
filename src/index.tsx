@@ -1,6 +1,6 @@
 import React, { StrictMode, useState, useEffect, useRef } from "react";
 import { createRoot } from "react-dom/client";
-import { BrowserRouter, Routes, Route, useLocation, useNavigate } from "react-router-dom";
+import { BrowserRouter, Routes, Route, Navigate, useLocation, useNavigate } from "react-router-dom";
 import { lazy, Suspense } from "react";
 import "./index.css";
 import "./lib/preloader";
@@ -750,12 +750,13 @@ function App() {
 
   return (
     <div className="bg-gradient-to-b from-[#0a0a0a] via-[#0d0d0d] to-[#111111] flex flex-row justify-center w-full min-h-screen min-h-[100dvh]">
-      {isAdminRoute && BUILD_TARGET === 'web' ? (
-        // Admin routes - Only available in web build
+      {BUILD_TARGET === 'web' ? (
+        // Web desktop target: hide the main app and show admin only.
         <Suspense fallback={<ScreenLoader />}>
           <Routes>
-            <Route path="/admin" element={AdminDashboardScreen ? <AdminDashboardScreen /> : <div>Admin not available</div>} />
             <Route path="/admin/login" element={AdminLoginScreen ? <AdminLoginScreen /> : <div>Admin not available</div>} />
+            <Route path="/admin/*" element={AdminDashboardScreen ? <AdminDashboardScreen /> : <div>Admin not available</div>} />
+            <Route path="*" element={<Navigate to="/admin/login" replace />} />
           </Routes>
         </Suspense>
       ) : (
@@ -813,10 +814,10 @@ function App() {
       )}
 
       {/* Bottom Navigation Bar - Positioned outside container for edge-to-edge rendering */}
-      {!shouldHideNavigation && !isAdminRoute && <NavigationBarSection />}
+      {BUILD_TARGET !== 'web' && !shouldHideNavigation && !isAdminRoute && <NavigationBarSection />}
 
       {/* Mini Music Player */}
-      {(() => {
+      {BUILD_TARGET !== 'web' && (() => {
         const shouldShow = isMiniPlayerVisible && currentSong && !shouldHideMiniPlayer;
 
         return shouldShow ? (
@@ -840,7 +841,7 @@ function App() {
         ) : null;
       })()}
 
-      {isFullPlayerVisible && currentSong && (
+      {BUILD_TARGET !== 'web' && isFullPlayerVisible && currentSong && (
         <MusicPlayerScreen
           song={currentSong}
           playlist={playlist}
