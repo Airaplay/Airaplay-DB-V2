@@ -2,47 +2,60 @@ import React, { useEffect, useState } from 'react';
 import { Capacitor } from '@capacitor/core';
 import { SplashScreen as CapacitorSplashScreen } from '@capacitor/splash-screen';
 
+const FADE_OUT_MS = 400;
+
 interface SplashScreenProps {
   onFinished: () => void;
   minDisplayTime?: number;
+  /** When true, splash dismisses as soon as minDisplayTime has passed (faster feel when app is ready). */
+  appReady?: boolean;
 }
 
 export const SplashScreen: React.FC<SplashScreenProps> = ({
   onFinished,
-  minDisplayTime = 2000
+  minDisplayTime = 2000,
+  appReady = false
 }) => {
   const [isVisible, setIsVisible] = useState(true);
   const [isLoading, setIsLoading] = useState(true);
+  const startTimeRef = React.useRef<number>(Date.now());
+  const dismissedRef = React.useRef(false);
 
+  // Hide native splash on mobile
   useEffect(() => {
-    const initializeSplash = async () => {
-      const startTime = Date.now();
+    if (Capacitor.isNativePlatform()) {
+      CapacitorSplashScreen.hide().catch(() => {});
+    }
+  }, []);
 
-      // Hide native splash screen on mobile
-      if (Capacitor.isNativePlatform()) {
-        try {
-          await CapacitorSplashScreen.hide();
-        } catch (error) {
-          console.warn('Failed to hide native splash screen:', error);
-        }
-      }
+  // Dismiss after minDisplayTime when app is ready (or after minDisplayTime if appReady not passed)
+  useEffect(() => {
+    if (dismissedRef.current) return;
+    // If caller doesn't pass appReady, we dismiss after minDisplayTime only
+    const ready = appReady === undefined || appReady;
+    if (appReady === false) return;
 
-      // Wait for minimum display time
-      const elapsed = Date.now() - startTime;
-      const remainingTime = Math.max(0, minDisplayTime - elapsed);
-
+    const tryDismiss = () => {
+      if (dismissedRef.current) return;
+      dismissedRef.current = true;
+      setIsLoading(false);
       setTimeout(() => {
-        setIsLoading(false);
-        // Add fade out time before calling onFinished
-        setTimeout(() => {
-          setIsVisible(false);
-          onFinished();
-        }, 500); // Fade out duration
-      }, remainingTime);
+        setIsVisible(false);
+        onFinished();
+      }, FADE_OUT_MS);
     };
 
-    initializeSplash();
-  }, [minDisplayTime, onFinished]);
+    const elapsed = Date.now() - startTimeRef.current;
+    const remaining = Math.max(0, minDisplayTime - elapsed);
+
+    if (remaining === 0) {
+      tryDismiss();
+      return;
+    }
+
+    const id = setTimeout(tryDismiss, remaining);
+    return () => clearTimeout(id);
+  }, [minDisplayTime, onFinished, appReady]);
 
   if (!isVisible) return null;
 
