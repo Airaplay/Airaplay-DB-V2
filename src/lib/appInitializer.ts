@@ -1,6 +1,7 @@
 import { persistentCache } from './persistentCache';
 import { backgroundPrefetcher } from './backgroundPrefetch';
-import { fetchOptimizedHomeScreen } from './optimizedDataFetcher';
+import { fetchHomeScreenData } from './dataFetching';
+import { getRequestTimeoutMs, shouldSkipBackgroundPrefetch } from './networkAwareConfig';
 
 class AppInitializer {
   private initialized = false;
@@ -9,9 +10,10 @@ class AppInitializer {
     if (this.initialized) return;
 
     try {
-      // Add timeout to prevent blocking
+      // Longer init timeout on 2G so cache can load
+      const initTimeoutMs = getRequestTimeoutMs(8000);
       const timeoutPromise = new Promise((_, reject) =>
-        setTimeout(() => reject(new Error('Initialization timeout')), 5000)
+        setTimeout(() => reject(new Error('Initialization timeout')), initTimeoutMs)
       );
 
       await Promise.race([
@@ -21,7 +23,10 @@ class AppInitializer {
         console.warn('Cache initialization failed, continuing without cache:', err);
       });
 
-      this.startBackgroundPrefetch();
+      // Skip aggressive prefetch on 2G to avoid blocking and save bandwidth
+      if (!shouldSkipBackgroundPrefetch()) {
+        this.startBackgroundPrefetch();
+      }
 
       this.setupVisibilityHandlers();
 
@@ -30,14 +35,19 @@ class AppInitializer {
       this.initialized = true;
     } catch (error) {
       console.error('Failed to initialize app:', error);
-      // Don't throw - allow app to continue even if initialization fails
       this.initialized = true;
     }
   }
 
+  /** Prefetch public data (home, explore) so first navigation is instant. Low egress: only fills cache. */
   private startBackgroundPrefetch(): void {
-    // Disabled - let individual screens load their own data on demand
-    // This prevents aggressive prefetching and reduces network load
+    if (typeof requestIdleCallback !== 'undefined') {
+      requestIdleCallback(() => {
+        fetchHomeScreenData(true).catch(() => {});
+      }, { timeout: 4000 });
+    } else {
+      setTimeout(() => fetchHomeScreenData(true).catch(() => {}), 1500);
+    }
   }
 
   private setupVisibilityHandlers(): void {
