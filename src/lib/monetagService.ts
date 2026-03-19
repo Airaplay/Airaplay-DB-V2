@@ -225,7 +225,7 @@ class MonetagService {
         placementKey: placementKey,
         estimatedCPM: estimatedCPM,
         estimatedRevenue: estimatedRevenue,
-        winningNetwork: 'monetag'
+        network: 'monetag'
       });
     } catch (error) {
       console.error('Failed to record Monetag impression:', error);

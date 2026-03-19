@@ -19,8 +19,32 @@ export interface BunnyUploadOptions {
   onProgress?: UploadProgressCallback;
 }
 
+/** In-memory cache for built Bunny URLs to avoid recomputing the same URLs repeatedly */
+const BUNNY_URL_CACHE_MAX = 200;
+
+function createUrlCache<T>(): { get: (key: string) => T | undefined; set: (key: string, value: T) => void } {
+  const map = new Map<string, T>();
+  const keys: string[] = [];
+  return {
+    get(key: string) {
+      return map.get(key);
+    },
+    set(key: string, value: T) {
+      if (map.has(key)) return;
+      if (keys.length >= BUNNY_URL_CACHE_MAX) {
+        const oldest = keys.shift();
+        if (oldest) map.delete(oldest);
+      }
+      keys.push(key);
+      map.set(key, value);
+    },
+  };
+}
+
 export class BunnyStreamService {
   private static instance: BunnyStreamService;
+  private playbackUrlCache = createUrlCache<string>();
+  private thumbnailUrlCache = createUrlCache<string>();
 
   private constructor() {}
 
@@ -36,6 +60,11 @@ export class BunnyStreamService {
     options: BunnyUploadOptions = {}
   ): Promise<BunnyUploadResponse> {
     try {
+      const { data: { session }, error: sessionError } = await supabase.auth.getSession();
+      if (sessionError || !session?.access_token) {
+        throw new Error('Please sign in to upload videos.');
+      }
+
       const formData = new FormData();
       formData.append('file', file);
 
@@ -50,6 +79,8 @@ export class BunnyStreamService {
       const uploadUrl = `${import.meta.env.VITE_SUPABASE_URL}/functions/v1/bunny-stream-upload`;
 
       const xhr = new XMLHttpRequest();
+      const UPLOAD_TIMEOUT_MS = 15 * 60 * 1000;
+      xhr.timeout = UPLOAD_TIMEOUT_MS;
 
       return new Promise<BunnyUploadResponse>((resolve, reject) => {
         if (options.onProgress) {
@@ -85,7 +116,13 @@ export class BunnyStreamService {
         });
 
         xhr.addEventListener('error', () => {
-          reject(new Error('Network error during upload'));
+          reject(new Error(
+            'Upload failed. If the file is large, try a smaller video or try again. Check your connection and that the Edge Function is deployed.'
+          ));
+        });
+
+        xhr.addEventListener('timeout', () => {
+          reject(new Error('Upload timed out. Try a smaller file or check your connection.'));
         });
 
         xhr.addEventListener('abort', () => {
@@ -93,7 +130,7 @@ export class BunnyStreamService {
         });
 
         xhr.open('POST', uploadUrl);
-        xhr.setRequestHeader('Authorization', `Bearer ${import.meta.env.VITE_SUPABASE_ANON_KEY}`);
+        xhr.setRequestHeader('Authorization', `Bearer ${session.access_token}`);
         xhr.send(formData);
       });
     } catch (error) {
@@ -136,17 +173,19 @@ export class BunnyStreamService {
 
   getPlaybackUrl(videoGuid: string, hostname?: string, quality?: string): string {
     const bunnyHostname = hostname || import.meta.env.VITE_BUNNY_STREAM_HOSTNAME;
-
     if (!bunnyHostname) {
       throw new Error('Bunny Stream hostname not configured');
     }
 
-    if (quality && quality !== 'auto') {
-      return `https://${bunnyHostname}/${videoGuid}/play_${quality}.mp4`;
-    }
+    const cacheKey = `playback:${videoGuid}:${bunnyHostname}:${quality ?? 'hls'}`;
+    const cached = this.playbackUrlCache.get(cacheKey);
+    if (cached) return cached;
 
-    // Default to HLS playlist for immediate playback and adaptive streaming
-    return `https://${bunnyHostname}/${videoGuid}/playlist.m3u8`;
+    const url = quality && quality !== 'auto'
+      ? `https://${bunnyHostname}/${videoGuid}/play_${quality}.mp4`
+      : `https://${bunnyHostname}/${videoGuid}/playlist.m3u8`;
+    this.playbackUrlCache.set(cacheKey, url);
+    return url;
   }
 
   /**
@@ -159,48 +198,56 @@ export class BunnyStreamService {
     userNetwork?: 'slow' | 'medium' | 'fast'
   ): string {
     const bunnyHostname = hostname || import.meta.env.VITE_BUNNY_STREAM_HOSTNAME;
-
     if (!bunnyHostname) {
       throw new Error('Bunny Stream hostname not configured');
     }
 
-    // Default to 360p/480p for bandwidth savings
-    // HLS will still adapt, but starts lower
+    const cacheKey = `optimized:${videoGuid}:${bunnyHostname}:${userNetwork ?? 'medium'}`;
+    const cached = this.playbackUrlCache.get(cacheKey);
+    if (cached) return cached;
+
     const defaultQuality = userNetwork === 'slow' ? '360p' :
                           userNetwork === 'medium' ? '480p' : '480p';
-
-    return `https://${bunnyHostname}/${videoGuid}/play_${defaultQuality}.mp4`;
+    const url = `https://${bunnyHostname}/${videoGuid}/play_${defaultQuality}.mp4`;
+    this.playbackUrlCache.set(cacheKey, url);
+    return url;
   }
 
   getQualityUrl(videoGuid: string, quality: '360p' | '480p' | '720p' | '1080p', hostname?: string): string {
     const bunnyHostname = hostname || import.meta.env.VITE_BUNNY_STREAM_HOSTNAME;
-
     if (!bunnyHostname) {
       throw new Error('Bunny Stream hostname not configured');
     }
 
-    return `https://${bunnyHostname}/${videoGuid}/play_${quality}.mp4`;
+    const cacheKey = `quality:${videoGuid}:${bunnyHostname}:${quality}`;
+    const cached = this.playbackUrlCache.get(cacheKey);
+    if (cached) return cached;
+
+    const url = `https://${bunnyHostname}/${videoGuid}/play_${quality}.mp4`;
+    this.playbackUrlCache.set(cacheKey, url);
+    return url;
   }
 
   getThumbnailUrl(videoGuid: string, hostname?: string, size: 'small' | 'medium' | 'large' = 'medium'): string {
     const bunnyHostname = hostname || import.meta.env.VITE_BUNNY_STREAM_HOSTNAME;
-
     if (!bunnyHostname) {
       throw new Error('Bunny Stream hostname not configured');
     }
 
-    // Base thumbnail URL
-    const baseUrl = `https://${bunnyHostname}/${videoGuid}/thumbnail.jpg`;
+    const cacheKey = `thumb:${videoGuid}:${bunnyHostname}:${size}`;
+    const cached = this.thumbnailUrlCache.get(cacheKey);
+    if (cached) return cached;
 
-    // Add optimization parameters for bandwidth savings
+    const baseUrl = `https://${bunnyHostname}/${videoGuid}/thumbnail.jpg`;
     const sizes = {
       small: { width: 180, height: 101, quality: 60 },
       medium: { width: 360, height: 202, quality: 70 },
       large: { width: 720, height: 404, quality: 75 },
     };
-
     const params = sizes[size];
-    return `${baseUrl}?width=${params.width}&height=${params.height}&quality=${params.quality}&format=webp`;
+    const url = `${baseUrl}?width=${params.width}&height=${params.height}&quality=${params.quality}&format=webp`;
+    this.thumbnailUrlCache.set(cacheKey, url);
+    return url;
   }
 
   async getVideoDuration(videoUrl: string): Promise<number> {

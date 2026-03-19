@@ -3,11 +3,11 @@ import { supabase } from './supabase';
 /**
  * Service for handling ad revenue-related operations
  *
- * NEW MONETIZATION MODEL (AdMob Compliant):
- * - Ad Revenue Split: 60% Creators | 0% Listeners | 40% Platform
- * - Listeners earn through separate Contribution Rewards System
- * - Platform allocates monthly budget for listener contribution rewards
- * - This ensures AdMob compliance (creators get at least 50% of ad revenue)
+ * REVENUE SPLIT (per ad shown, per song):
+ * - Always 50% Artist/Creator | 50% Platform (configurable in Ad Safety Caps; minimum 50% creator for AdMob compliance).
+ * - The Artist/Creator "Live balance" (users.total_earnings) displayed everywhere in the app
+ *   is always their NET revenue (their 50% share after the split), never gross ad revenue.
+ * - Listeners earn through the separate Contribution Rewards System.
  *
  * The actual revenue processing and split logic is handled by database
  * functions that were updated in the migration system.

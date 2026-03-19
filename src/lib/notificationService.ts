@@ -19,6 +19,15 @@ interface CreateNotificationParams {
   metadata?: Record<string, any>;
 }
 
+/** True if the error is a foreign key violation (e.g. user_id not in users table). */
+function isForeignKeyViolation(error: unknown): boolean {
+  if (!error || typeof error !== 'object') return false;
+  const o = error as { message?: string; code?: string | number };
+  const msg = o.message != null ? String(o.message) : '';
+  const code = o.code != null ? String(o.code) : '';
+  return code === '23503' || /foreign key constraint|violates foreign key|notifications_user_id_fkey/i.test(msg);
+}
+
 export const createNotification = async ({
   userId,
   type,
@@ -37,9 +46,17 @@ export const createNotification = async ({
       });
 
     if (error) {
+      if (isForeignKeyViolation(error)) {
+        console.warn('Notification skipped: user_id not found in users table.', userId);
+        return;
+      }
       console.error('Failed to create notification:', error);
     }
   } catch (err) {
+    if (isForeignKeyViolation(err)) {
+      console.warn('Notification skipped: user_id not found in users table.', userId);
+      return;
+    }
     console.error('Error creating notification:', err);
   }
 };
@@ -129,6 +146,43 @@ export const deleteNotification = async (notificationId: string): Promise<void> 
     }
   } catch (err) {
     console.error('Error deleting notification:', err);
+  }
+};
+
+/**
+ * Insert a notification row (e.g. title, message, type). Swallows FK violations
+ * so callers don't fail when user_id is missing from the referenced table.
+ */
+export const insertNotificationSafe = async (row: {
+  user_id: string;
+  title?: string;
+  message: string;
+  type: string;
+  metadata?: Record<string, unknown>;
+  is_read?: boolean;
+}): Promise<void> => {
+  try {
+    const { error } = await supabase.from('notifications').insert({
+      user_id: row.user_id,
+      title: row.title ?? null,
+      message: row.message,
+      type: row.type,
+      metadata: row.metadata ?? {},
+      is_read: row.is_read ?? false
+    });
+    if (error) {
+      if (isForeignKeyViolation(error)) {
+        console.warn('Notification skipped: user_id not in users table.', row.user_id);
+        return;
+      }
+      console.error('Failed to insert notification:', error);
+    }
+  } catch (err) {
+    if (isForeignKeyViolation(err)) {
+      console.warn('Notification skipped: user_id not in users table.', row.user_id);
+      return;
+    }
+    throw err;
   }
 };
 

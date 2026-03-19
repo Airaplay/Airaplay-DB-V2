@@ -1,3 +1,5 @@
+import { getRequestTimeoutMs } from './networkAwareConfig';
+
 export interface LocationData {
   ip: string;
   city: string;
@@ -215,7 +217,8 @@ export const detectLocation = async (forceRefresh: boolean = false): Promise<Loc
   for (const api of apis) {
     try {
       const controller = new AbortController();
-      const timeoutId = setTimeout(() => controller.abort(), 5000);
+      const timeoutMs = getRequestTimeoutMs(8000); // longer on 2G so geo request can complete
+      const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
 
       const response = await fetch(api.url, {
         method: 'GET',

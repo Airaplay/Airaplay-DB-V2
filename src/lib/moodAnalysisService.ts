@@ -346,10 +346,10 @@ export async function getSongsByMood(moodName: string, limit: number = 50): Prom
           )
         )
       `)
-      .or(`primary_mood.eq.${moodName},secondary_mood.eq.${moodName}`)
+      .or(`primary_mood.eq.${moodName.replace(/[\\',().]/g, ' ')},secondary_mood.eq.${moodName.replace(/[\\',().]/g, ' ')}`)
       .limit(fetchLimit);
 
-    // Filter out recently shown songs if any
+    // Filter out recently shown songs if any (use array for parameterized in-clause)
     if (recentlyShown.length > 0) {
       query = query.not('song_id', 'in', `(${recentlyShown.join(',')})`);
     }

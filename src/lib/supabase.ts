@@ -3,6 +3,9 @@ import { cache } from './cache';
 import { smartCache } from './smartCache';
 import { enhancedFetch, cacheInvalidation } from './enhancedDataFetching';
 import { favoritesCache } from './favoritesCache';
+import { followsCache } from './followsCache';
+import { logger } from './logger';
+import { sanitizeForFilter } from './filterSecurity';
 
 // Utility function to format treat amounts
 export const formatTreats = (amount: number): string => {
@@ -29,7 +32,11 @@ export const supabase = createClient(supabaseUrl, supabaseAnonKey, {
   auth: {
     autoRefreshToken: true,
     persistSession: true,
-    detectSessionInUrl: false,
+    // Required for email confirmation and OAuth: parse tokens from URL hash/query after redirect
+    detectSessionInUrl: true,
+    // Use PKCE so redirects use `?code=` instead of URL fragments (`#...`).
+    // Android app links commonly drop URL fragments, breaking auth/recovery flows in-app.
+    flowType: 'pkce',
     // Increase session refresh buffer to prevent premature expiration
     storage: typeof window !== 'undefined' ? window.localStorage : undefined,
   },
@@ -47,10 +54,8 @@ export const refreshSessionIfNeeded = async (): Promise<boolean> => {
     
     // If there's an error getting session, try refreshing anyway (might be expired)
     if (error && !error.message?.includes('Invalid Refresh Token')) {
-      console.log('[Auth] Session check had error, attempting refresh...', error.message);
       const refreshResult = await supabase.auth.refreshSession();
       if (refreshResult.data.session) {
-        console.log('[Auth] Session refreshed after error');
         return true;
       }
     }
@@ -67,23 +72,19 @@ export const refreshSessionIfNeeded = async (): Promise<boolean> => {
       
       // Refresh if expired or expiring within 10 minutes (more aggressive)
       if (expiresIn < 600) {
-        console.log('[Auth] Session expiring soon, refreshing...');
         const { data, error: refreshError } = await supabase.auth.refreshSession();
-        
+
         if (refreshError) {
-          // Only fail if refresh token is truly invalid (user logged out or token revoked)
-          if (refreshError.message?.includes('Invalid Refresh Token') || 
+          if (refreshError.message?.includes('Invalid Refresh Token') ||
               refreshError.message?.includes('refresh_token_not_found')) {
-            console.error('[Auth] Refresh token invalid - user must sign in again:', refreshError);
+            logger.error('Auth: Refresh token invalid - user must sign in again', refreshError);
             return false;
           }
-          // For other errors (network, etc.), don't give up - session might still be valid
-          console.warn('[Auth] Session refresh had error but continuing:', refreshError.message);
-          return true; // Assume session is still valid
+          logger.warn('Auth: Session refresh had error but continuing', refreshError.message);
+          return true;
         }
-        
+
         if (data.session) {
-          console.log('[Auth] Session refreshed successfully');
           return true;
         }
       }
@@ -91,8 +92,7 @@ export const refreshSessionIfNeeded = async (): Promise<boolean> => {
 
     return true;
   } catch (error) {
-    console.error('[Auth] Error refreshing session:', error);
-    // Don't fail on errors - assume session is still valid unless proven otherwise
+    logger.error('Auth: Error refreshing session', error);
     return true;
   }
 };
@@ -110,9 +110,8 @@ export const getAuthenticatedSession = async () => {
   
   if (error) {
     // If error is not about invalid refresh token, try one more refresh
-    if (!error.message?.includes('Invalid Refresh Token') && 
+    if (!error.message?.includes('Invalid Refresh Token') &&
         !error.message?.includes('refresh_token_not_found')) {
-      console.log('[Auth] Retrying session refresh after error...');
       const refreshResult = await supabase.auth.refreshSession();
       if (refreshResult.data.session) {
         return { session: refreshResult.data.session, error: null };
@@ -181,7 +180,7 @@ export const getArtistProfile = async (): Promise<any | null> => {
 
       const { data, error: profileError } = await supabase
         .from('artist_profiles')
-        .select('id, user_id, stage_name, bio, hometown, country, profile_image_url, profile_photo_url, cover_photo_url, is_verified, weekly_growth_percentage, created_at, updated_at')
+        .select('id, user_id, stage_name, artist_id, bio, hometown, country, profile_image_url, profile_photo_url, cover_photo_url, is_verified, weekly_growth_percentage, created_at, updated_at')
         .eq('user_id', user.id)
         .maybeSingle();
 
@@ -226,34 +225,28 @@ export const getArtistSocialLinks = async (artistProfileId: string): Promise<any
 
 export const getFollowerCount = async (userId: string): Promise<number> => {
   try {
-    console.log('[getFollowerCount] Called for user:', userId);
-    // Use RPC function which is SECURITY DEFINER and bypasses RLS
     const { data, error } = await supabase.rpc('get_follower_count', {
       user_uuid: userId
     });
 
     if (error) {
-      console.error('[getFollowerCount] RPC error:', error);
-      // Fallback to direct query if RPC fails
-      console.log('[getFollowerCount] Trying direct query fallback...');
+      logger.warn('getFollowerCount: RPC failed, trying direct query', error.message);
       const { count, error: countError } = await supabase
         .from('user_follows')
         .select('*', { count: 'exact', head: true })
         .eq('following_id', userId);
 
       if (countError) {
-        console.error('[getFollowerCount] Direct query error:', countError);
+        logger.error('getFollowerCount: Direct query error', countError);
         return 0;
       }
 
-      console.log('[getFollowerCount] Direct query result:', count);
       return count || 0;
     }
 
-    console.log('[getFollowerCount] RPC result:', data);
     return data || 0;
   } catch (error) {
-    console.error('[getFollowerCount] Unexpected error:', error);
+    logger.error('getFollowerCount: Unexpected error', error);
     return 0;
   }
 };
@@ -266,7 +259,7 @@ export const getFollowingCount = async (userId: string): Promise<number> => {
     });
 
     if (error) {
-      console.error('Error fetching following count via RPC:', error);
+      logger.error('Error fetching following count via RPC', error);
       // Fallback to direct query if RPC fails
       const { count, error: countError } = await supabase
         .from('user_follows')
@@ -291,8 +284,6 @@ export const getFollowingCount = async (userId: string): Promise<number> => {
 // Album Functions
 export const getAlbumDetails = async (albumId: string): Promise<any> => {
   try {
-    console.log('Fetching album details for ID:', albumId);
-    
     // Fetch album details with artist information
     const { data: albumData, error: albumError } = await supabase
       .from('albums')
@@ -320,15 +311,13 @@ export const getAlbumDetails = async (albumId: string): Promise<any> => {
       .single();
 
     if (albumError) {
-      console.error('Error fetching album:', albumError);
+      logger.error('Error fetching album', albumError);
       throw new Error(`Album not found: ${albumError.message}`);
     }
 
     if (!albumData) {
       throw new Error('Album data is null');
     }
-
-    console.log('Album data fetched:', albumData);
 
     // Fetch album tracks
     const { data: tracksData, error: tracksError } = await supabase
@@ -356,15 +345,13 @@ export const getAlbumDetails = async (albumId: string): Promise<any> => {
       .order('created_at', { ascending: true });
 
     if (tracksError) {
-      console.error('Error fetching album tracks:', tracksError);
+      logger.error('Error fetching album tracks', tracksError);
       throw new Error(`Failed to load album tracks: ${tracksError.message}`);
     }
 
     if (!tracksData || tracksData.length === 0) {
       throw new Error('No tracks found for this album');
     }
-
-    console.log('Tracks data fetched:', tracksData);
 
     // Type assertion for album artists data
     const albumArtists = albumData.artists as any;
@@ -419,10 +406,9 @@ export const getAlbumDetails = async (albumId: string): Promise<any> => {
       followerCount
     };
 
-    console.log('Formatted album data:', formattedAlbumData);
     return formattedAlbumData;
   } catch (error) {
-    console.error('Error in getAlbumDetails:', error);
+    logger.error('Error in getAlbumDetails', error);
     throw error;
   }
 };
@@ -634,6 +620,9 @@ export const searchUsersByUsername = async (query: string): Promise<any[]> => {
   try {
     if (!query.trim() || query.length < 2) return [];
 
+    const safe = sanitizeForFilter(query.trim());
+    if (!safe) return [];
+
     const { data, error } = await supabase
       .from('users')
       .select(`
@@ -644,7 +633,7 @@ export const searchUsersByUsername = async (query: string): Promise<any[]> => {
         role,
         show_artist_badge
       `)
-      .or(`username.ilike.%${query}%,display_name.ilike.%${query}%`)
+      .or(`username.ilike.%${safe}%,display_name.ilike.%${safe}%`)
       .eq('is_active', true)
       .limit(20);
 
@@ -652,16 +641,17 @@ export const searchUsersByUsername = async (query: string): Promise<any[]> => {
 
     return data || [];
   } catch (error) {
-    console.error('Error searching users by username:', error);
+    logger.error('Error searching users by username', error);
     return [];
   }
 };
 // Search Functions
 export const searchAllContent = async (query: string): Promise<any> => {
   try {
-    const searchTerm = `%${query}%`;
+    const safe = sanitizeForFilter(query.trim());
+    const searchTerm = safe ? `%${safe}%` : '%';
 
-    // Search users by username/display name
+    // Search users by username/display name (uses sanitized query internally)
     const users = await searchUsersByUsername(query);
 
     // Search songs
@@ -724,6 +714,22 @@ export const searchAllContent = async (query: string): Promise<any> => {
       .eq('status', 'approved')
       .ilike('title', searchTerm)
       .limit(15);
+
+    // Search albums
+    const { data: albumsData } = await supabase
+      .from('albums')
+      .select(`
+        id,
+        title,
+        cover_image_url,
+        artists:artist_id (
+          id,
+          name,
+          artist_profiles ( user_id )
+        )
+      `)
+      .ilike('title', searchTerm)
+      .limit(10);
 
     // Format results
     const songs = songsData?.map((song: any) => ({
@@ -797,14 +803,23 @@ export const searchAllContent = async (query: string): Promise<any> => {
 
     const creators = Array.from(creatorsMap.values());
 
+    const albums = (albumsData || []).map((album: any) => ({
+      id: album.id,
+      title: album.title,
+      coverImageUrl: album.cover_image_url,
+      artist: album.artists?.artist_profiles?.[0] ? (album.artists?.name || 'Unknown Artist') : (album.artists?.name || 'Unknown Artist'),
+      artistId: album.artists?.artist_profiles?.[0]?.user_id,
+    }));
+
     // Combine all results
-    const all = [...songs, ...creators, ...videos];
+    const all = [...songs, ...creators, ...videos, ...albums];
 
     return {
       all,
       songs,
       creators,
-      videos
+      videos,
+      albums
     };
   } catch (error) {
     console.error('Error in searchAllContent:', error);
@@ -1105,7 +1120,19 @@ export const getBatchSongsFavoriteStatus = async (songIds: string[]): Promise<Re
   }
 };
 
+// In-flight guard to prevent duplicate like/favorite requests (rate-limit / debounce)
+const favoriteInFlight = new Map<string, Promise<boolean>>();
+
 export const toggleSongFavorite = async (songId: string): Promise<boolean> => {
+  const existing = favoriteInFlight.get(songId);
+  if (existing) return existing;
+  const promise = toggleSongFavoriteImpl(songId);
+  favoriteInFlight.set(songId, promise);
+  promise.finally(() => favoriteInFlight.delete(songId));
+  return promise;
+};
+
+const toggleSongFavoriteImpl = async (songId: string): Promise<boolean> => {
   try {
     const { data: { user }, error: authError } = await supabase.auth.getUser();
     if (authError || !user) throw new Error('User not authenticated');
@@ -1360,6 +1387,7 @@ export const followUser = async (targetUserId: string): Promise<void> => {
     if (error && error.code !== '23505') {
       throw error;
     }
+    followsCache.setFollowing(targetUserId, true);
   } catch (error) {
     console.error('Error following user:', error);
     throw error;
@@ -1378,6 +1406,7 @@ export const unfollowUser = async (targetUserId: string): Promise<void> => {
       .eq('following_id', targetUserId);
 
     if (error) throw error;
+    followsCache.setFollowing(targetUserId, false);
   } catch (error) {
     console.error('Error unfollowing user:', error);
     throw error;
@@ -1412,7 +1441,24 @@ export const getClipComments = async (clipId: string): Promise<any[]> => {
   }
 };
 
+// In-flight guard to prevent duplicate comment submit (rate-limit / debounce)
+const commentInFlight = new Map<string, Promise<any>>();
+
+function commentKey(type: 'clip' | 'content', id: string, parentId?: string | null): string {
+  return `${type}_comment:${id}:${parentId ?? 'root'}`;
+}
+
 export const addClipComment = async (clipId: string, commentText: string, parentCommentId?: string | null): Promise<any> => {
+  const key = commentKey('clip', clipId, parentCommentId);
+  const existing = commentInFlight.get(key);
+  if (existing) return existing;
+  const promise = addClipCommentImpl(clipId, commentText, parentCommentId);
+  commentInFlight.set(key, promise);
+  promise.finally(() => commentInFlight.delete(key));
+  return promise;
+};
+
+const addClipCommentImpl = async (clipId: string, commentText: string, parentCommentId?: string | null): Promise<any> => {
   try {
     const { data: { user }, error: authError } = await supabase.auth.getUser();
     if (authError || !user) throw new Error('User not authenticated');
@@ -1443,6 +1489,69 @@ export const addClipComment = async (clipId: string, commentText: string, parent
     return data;
   } catch (error) {
     console.error('Error adding clip comment:', error);
+    throw error;
+  }
+};
+
+export const addContentComment = async (
+  contentId: string,
+  contentType: string,
+  commentText: string,
+  parentCommentId?: string | null
+): Promise<any> => {
+  const key = commentKey('content', contentId, parentCommentId);
+  const existing = commentInFlight.get(key);
+  if (existing) return existing;
+  const promise = addContentCommentImpl(contentId, contentType, commentText, parentCommentId);
+  commentInFlight.set(key, promise);
+  promise.finally(() => commentInFlight.delete(key));
+  return promise;
+};
+
+const addContentCommentImpl = async (
+  contentId: string,
+  contentType: string,
+  commentText: string,
+  parentCommentId?: string | null
+): Promise<any> => {
+  try {
+    const { data: { user }, error: authError } = await supabase.auth.getUser();
+    if (authError || !user) throw new Error('User not authenticated');
+
+    const { data, error } = await supabase
+      .from('content_comments')
+      .insert({
+        user_id: user.id,
+        content_id: contentId,
+        content_type: contentType,
+        comment_text: commentText,
+        parent_comment_id: parentCommentId || null
+      })
+      .select(`
+        id,
+        user_id,
+        content_id,
+        content_type,
+        comment_text,
+        created_at,
+        updated_at,
+        parent_comment_id,
+        users:user_id (
+          display_name,
+          avatar_url
+        )
+      `)
+      .single();
+
+    if (error) throw error;
+
+    return {
+      ...data,
+      likes_count: 0,
+      is_liked: false
+    };
+  } catch (error) {
+    console.error('Error adding content comment:', error);
     throw error;
   }
 };
@@ -1556,55 +1665,6 @@ export const getContentComments = async (contentId: string, contentType: string)
     }));
   } catch (error) {
     console.error('Error fetching content comments:', error);
-    throw error;
-  }
-};
-
-export const addContentComment = async (
-  contentId: string,
-  contentType: string,
-  commentText: string,
-  parentCommentId?: string | null
-): Promise<any> => {
-  try {
-    const { data: { user }, error: authError } = await supabase.auth.getUser();
-    if (authError || !user) throw new Error('User not authenticated');
-
-    const { data, error } = await supabase
-      .from('content_comments')
-      .insert({
-        user_id: user.id,
-        content_id: contentId,
-        content_type: contentType,
-        comment_text: commentText,
-        parent_comment_id: parentCommentId || null
-      })
-      .select(`
-        id,
-        user_id,
-        content_id,
-        content_type,
-        comment_text,
-        created_at,
-        updated_at,
-        parent_comment_id,
-        users:user_id (
-          display_name,
-          avatar_url
-        )
-      `)
-      .single();
-
-    if (error) throw error;
-
-    // Add like fields to new comment (new comments have no likes yet)
-    return {
-      ...data,
-      likes_count: 0,
-      is_liked: false
-    };
-  } catch (error) {
-    console.error('Error adding content comment:', error);
     throw error;
   }
 };
@@ -1782,10 +1842,7 @@ export const getVideoDetails = async (videoId: string): Promise<any> => {
       throw new Error('Video not found');
     }
 
-    // Get follower count for the creator
-    console.log('[getVideoDetails] Fetching follower count for user:', data.user_id);
     const followerCount = await getFollowerCount(data.user_id);
-    console.log('[getVideoDetails] Follower count result:', followerCount);
 
     // Type assertion for users data
     const userData = data.users as any;
@@ -1794,25 +1851,14 @@ export const getVideoDetails = async (videoId: string): Promise<any> => {
     const videoUrl = data.metadata?.video_url || data.metadata?.file_url;
 
     if (!videoUrl) {
-      console.error('[getVideoDetails] ❌ VIDEO URL MISSING:', {
-        videoId: data.id,
-        title: data.title,
-        metadata: data.metadata
-      });
+      logger.error('getVideoDetails: Video URL missing', { videoId: data.id, title: data.title });
       throw new Error(`Video playback unavailable: Missing video URL for video ${videoId}`);
     }
 
     if (!videoUrl.startsWith('https://')) {
-      console.error('[getVideoDetails] ❌ INVALID URL PROTOCOL:', videoUrl);
+      logger.error('getVideoDetails: Invalid URL protocol', videoUrl);
       throw new Error(`Invalid video URL protocol: ${videoUrl}`);
     }
-
-    console.log('[getVideoDetails] ✅ Video loaded successfully:', {
-      id: data.id,
-      title: data.title,
-      videoUrl: videoUrl,
-      hasThumbnail: !!data.metadata?.thumbnail_url
-    });
 
     const videoDetails = {
       id: data.id,
@@ -1822,6 +1868,7 @@ export const getVideoDetails = async (videoId: string): Promise<any> => {
       thumbnailUrl: data.metadata?.thumbnail_url,
       playCount: data.play_count || 0,
       createdAt: data.created_at,
+      releaseDate: data.metadata?.release_date ?? null,
       creator: {
         id: data.user_id,
         name: userData?.display_name || 'Unknown Creator',
@@ -1834,7 +1881,7 @@ export const getVideoDetails = async (videoId: string): Promise<any> => {
     // The video metadata itself is cached elsewhere (videoCache)
     return videoDetails;
   } catch (error) {
-    console.error('Error fetching video details:', error);
+    logger.error('Error fetching video details', error);
     throw error;
   }
 };
@@ -2267,10 +2314,7 @@ export const updateUserProfile = async (updates: any): Promise<any> => {
       }
     }
 
-    // Add updated_at timestamp
     cleanUpdates.updated_at = new Date().toISOString();
-
-    console.log('Updating user profile with data:', cleanUpdates);
 
     // Update user profile
     const { data, error } = await supabase
@@ -2281,7 +2325,7 @@ export const updateUserProfile = async (updates: any): Promise<any> => {
       .single();
 
     if (error) {
-      console.error('Database update error:', error);
+      logger.error('Database update error (profile)', error);
       throw new Error(`Failed to update profile: ${error.message}`);
     }
 
@@ -2289,14 +2333,12 @@ export const updateUserProfile = async (updates: any): Promise<any> => {
       throw new Error('No data returned from profile update');
     }
 
-    // Clear cached user role and artist profile
     cache.delete(CACHE_KEYS.USER_ROLE);
     cache.delete(CACHE_KEYS.ARTIST_PROFILE);
 
-    console.log('Profile updated successfully:', data);
     return { success: true, data };
   } catch (error) {
-    console.error('Error updating user profile:', error);
+    logger.error('Error updating user profile', error);
     // Re-throw with more specific error message
     if (error instanceof Error) {
       throw error;
@@ -2330,7 +2372,7 @@ export const getPublicUserProfile = async (userId: string): Promise<any> => {
       .single();
 
     if (userError) {
-      console.error('Error fetching user data:', userError);
+      logger.error('Error fetching user data', userError);
       throw userError;
     }
 
@@ -2352,17 +2394,16 @@ export const getPublicUserProfile = async (userId: string): Promise<any> => {
         .maybeSingle();
 
       if (artistError) {
-        console.error(`Error fetching artist profile for user ${userId} (${userData.email}):`, artistError);
+        logger.error(`Error fetching artist profile for user ${userId}`, artistError);
       } else if (artistData) {
         artistProfile = artistData;
-        console.log(`Artist profile found for user ${userId}: is_verified=${artistData.is_verified}`);
-        
+
         // Get social links (only if profile is public)
         if (!isPrivateProfile) {
           socialLinks = await getArtistSocialLinks(artistData.id);
         }
       } else {
-        console.warn(`No artist profile found for creator user ${userId} (${userData.email})`);
+        logger.warn('No artist profile found for creator user', { userId, email: userData.email });
       }
     }
 
@@ -2377,7 +2418,7 @@ export const getPublicUserProfile = async (userId: string): Promise<any> => {
         .order('created_at', { ascending: false });
 
       if (uploadsError) {
-        console.error('Error fetching user uploads:', uploadsError);
+        logger.error('Error fetching user uploads', uploadsError);
       } else {
         uploadsData = uploads;
       }
@@ -2392,35 +2433,23 @@ export const getPublicUserProfile = async (userId: string): Promise<any> => {
         .maybeSingle();
 
       if (badgeError) {
-        console.error('Error fetching verified badge config:', badgeError);
+        logger.error('Error fetching verified badge config', badgeError);
       } else if (badgeConfig?.badge_url) {
         verifiedBadgeUrl = badgeConfig.badge_url;
-      } else {
-        console.log('Verified badge config not found or has no badge_url, using default icon');
       }
     }
 
     // Get follower and following counts (public info, shown even for private profiles)
     const [followerCount, followingCount] = await Promise.all([
       getFollowerCount(userId).catch((err) => {
-        console.error(`Error fetching follower count for user ${userId}:`, err);
+        logger.error(`Error fetching follower count for user ${userId}`, err);
         return 0;
       }),
       getFollowingCount(userId).catch((err) => {
-        console.error(`Error fetching following count for user ${userId}:`, err);
+        logger.error(`Error fetching following count for user ${userId}`, err);
         return 0;
       })
     ]);
-
-    console.log(`Profile data for user ${userId}:`, {
-      role: userData.role,
-      isPrivateProfile,
-      hasArtistProfile: !!artistProfile,
-      isVerified: artistProfile?.is_verified,
-      followerCount,
-      followingCount,
-      verifiedBadgeUrl
-    });
 
     return {
       user: {
@@ -2441,13 +2470,58 @@ export const getPublicUserProfile = async (userId: string): Promise<any> => {
 };
 
 // Content Management Functions
-export const deleteContentUpload = async (contentId: string): Promise<void> => {
-  try {
-    const { error } = await supabase
-      .from('content_uploads')
-      .delete()
-      .eq('id', contentId);
+/** Optional upload shape when caller already has it (e.g. from Library) to avoid extra fetch. */
+export type ContentUploadForDelete = { content_type: string; metadata?: { song_id?: string; album_id?: string } | null };
 
+/**
+ * Deletes a content upload from the library and automatically deletes the underlying
+ * content from the database: single → song row; album → album + its songs; video/short_clip → content_uploads only.
+ */
+export const deleteContentUpload = async (
+  contentId: string,
+  upload?: ContentUploadForDelete | null
+): Promise<void> => {
+  try {
+    let contentType: string;
+    let metadata: { song_id?: string; album_id?: string } | null | undefined;
+
+    if (upload?.content_type) {
+      contentType = upload.content_type;
+      metadata = upload.metadata ?? null;
+    } else {
+      const { data: row, error: fetchError } = await supabase
+        .from('content_uploads')
+        .select('content_type, metadata')
+        .eq('id', contentId)
+        .maybeSingle();
+      if (fetchError) throw fetchError;
+      if (!row) throw new Error('Content upload not found');
+      contentType = row.content_type;
+      metadata = row.metadata ?? null;
+    }
+
+    const songId = metadata?.song_id ?? null;
+    const albumId = metadata?.album_id ?? null;
+
+    // 1) Delete underlying content so it is removed from the database (not just the library entry)
+    if (contentType === 'single' && songId) {
+      const { error: songError } = await supabase.from('songs').delete().eq('id', songId);
+      if (songError) {
+        console.warn('Error deleting song (may be already removed or RLS):', songError);
+        // Continue to remove content_upload so library is in sync
+      }
+    } else if (contentType === 'album' && albumId) {
+      const { error: songsError } = await supabase.from('songs').delete().eq('album_id', albumId);
+      if (songsError) console.warn('Error deleting album songs:', songsError);
+      const { error: albumError } = await supabase.from('albums').delete().eq('id', albumId);
+      if (albumError) {
+        console.warn('Error deleting album:', albumError);
+      }
+    }
+    // video / short_clip: no separate table; content_uploads row is the only record
+
+    // 2) Always delete the content_uploads row so it disappears from the library
+    const { error } = await supabase.from('content_uploads').delete().eq('id', contentId);
     if (error) throw error;
   } catch (error) {
     console.error('Error deleting content upload:', error);
@@ -2688,12 +2762,12 @@ export const adminGeneratePasswordResetLink = async (userId: string): Promise<an
 
     // Send password reset email using the standard auth flow
     // This works with the anon key and is the proper way to trigger password resets
-    const { error: resetError } = await supabase.auth.resetPasswordForEmail(
-      data.email,
-      {
-        redirectTo: `${window.location.origin}/reset-password`
-      }
-    );
+    const resetRedirectBase =
+      import.meta.env.VITE_PUBLIC_WEB_URL ||
+      (typeof window !== 'undefined' ? window.location.origin : '');
+    const { error: resetError } = await supabase.auth.resetPasswordForEmail(data.email, {
+      redirectTo: `${resetRedirectBase}/reset-password`
+    });
 
     if (resetError) throw resetError;
 
@@ -3752,19 +3826,13 @@ export const addManualBlowingUpSong = async (
   notes?: string
 ): Promise<{ success: boolean; error?: string; details?: any }> => {
   try {
-    console.log('addManualBlowingUpSong called with:', { songId, displayOrder, notes });
-    
     const { data: { user }, error: authError } = await supabase.auth.getUser();
     if (authError || !user) {
-      console.error('Auth error:', authError);
+      logger.error('addManualBlowingUpSong: Auth error', authError);
       return { success: false, error: `User not authenticated: ${authError?.message || 'No user'}`, details: authError };
     }
 
-    console.log('User authenticated:', user.id);
-
-    // Verify user is admin
     const role = await getUserRole();
-    console.log('User role:', role);
     if (role !== 'admin' && role !== 'manager' && role !== 'editor') {
       return { success: false, error: `Admin role required. Current role: ${role || 'none'}`, details: { role } };
     }
@@ -3777,11 +3845,9 @@ export const addManualBlowingUpSong = async (
       .single();
 
     if (songError || !songCheck) {
-      console.error('Song not found:', songError);
+      logger.error('addManualBlowingUpSong: Song not found', songError);
       return { success: false, error: `Song not found: ${songError?.message || 'Invalid song ID'}`, details: songError };
     }
-
-    console.log('Song verified:', songCheck.title);
 
     // Check if song already exists
     const { data: existing, error: existingError } = await supabase
@@ -3792,8 +3858,7 @@ export const addManualBlowingUpSong = async (
       .maybeSingle();
 
     if (existingError && existingError.code !== 'PGRST116') {
-      // PGRST116 is "not found" which is fine
-      console.error('Error checking existing song:', existingError);
+      logger.error('addManualBlowingUpSong: Error checking existing song', existingError);
       return { success: false, error: `Error checking existing song: ${existingError.message}`, details: existingError };
     }
 
@@ -3812,8 +3877,7 @@ export const addManualBlowingUpSong = async (
         .limit(1);
 
       if (orderError && orderError.code !== 'PGRST116') {
-        console.error('Error fetching display order:', orderError);
-        // Continue with maxOrder = 0 if error
+        logger.error('addManualBlowingUpSong: Error fetching display order', orderError);
       } else {
         maxOrder = orderData?.[0]?.display_order || 0;
       }
@@ -3827,27 +3891,23 @@ export const addManualBlowingUpSong = async (
       notes: notes || null
     };
 
-    console.log('Inserting data:', insertData);
-
     const { data: insertedData, error } = await supabase
       .from('manual_blowing_up_songs')
       .insert(insertData)
       .select();
 
     if (error) {
-      console.error('Database insert error:', error);
-      console.error('Error details:', JSON.stringify(error, null, 2));
-      return { 
-        success: false, 
-        error: `Database error: ${error.message || 'Unknown error'} (Code: ${error.code || 'N/A'})`, 
-        details: error 
+      logger.error('addManualBlowingUpSong: Database insert error', error);
+      return {
+        success: false,
+        error: `Database error: ${error.message || 'Unknown error'} (Code: ${error.code || 'N/A'})`,
+        details: error
       };
     }
 
-    console.log('Song added successfully:', insertedData);
     return { success: true, details: insertedData };
   } catch (error) {
-    console.error('Unexpected error adding manual blowing up song:', error);
+    logger.error('addManualBlowingUpSong: Unexpected error', error);
     const errorMessage = error instanceof Error ? error.message : 'Unknown error';
     const errorDetails = error instanceof Error ? { message: error.message, stack: error.stack } : error;
     return { success: false, error: `Unexpected error: ${errorMessage}`, details: errorDetails };

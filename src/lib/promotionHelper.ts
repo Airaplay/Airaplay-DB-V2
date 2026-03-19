@@ -95,30 +95,36 @@ export const checkMultiplePromoted = async (
 /**
  * Get all promoted content for a specific section with fair rotation
  * This replaces the old getPromotedContentForSection with fairness algorithm
+ * @param userIdOptional - If provided, skips getUser() (reduces egress when caller has user from context).
  */
 export const getPromotedContentForSection = async (
   sectionKey: string,
   contentType: 'song' | 'video' | 'album' | 'short_clip' | 'profile',
-  limit: number = 10
+  limit: number = 10,
+  userIdOptional?: string | null
 ): Promise<string[]> => {
   try {
+    console.log(`[PromotionHelper] 🎯 Fetching promoted content for section: ${sectionKey}, type: ${contentType}, limit: ${limit}`);
+    
     const promotedContent = await getFairPromotedContent(sectionKey, contentType, limit);
 
     if (promotedContent.length === 0) {
-      console.log(`[PromotionHelper] No promoted content found for ${sectionKey} (${contentType})`);
+      console.warn(`[PromotionHelper] ⚠️ No promoted content found for ${sectionKey} (${contentType}) - Check if promotions are ACTIVE`);
       return [];
     }
 
-    console.log(`[PromotionHelper] Retrieved ${promotedContent.length} fairly rotated items for ${sectionKey}`);
+    console.log(`[PromotionHelper] ✅ Retrieved ${promotedContent.length} fairly rotated items for ${sectionKey}:`, 
+      promotedContent.map(p => ({ targetId: p.targetId, title: p.targetTitle }))
+    );
 
     const sessionId = getSessionId();
-    const { data: { user } } = await supabase.auth.getUser();
+    const userId = userIdOptional ?? (await supabase.auth.getUser()).data.user?.id;
 
     const impressionPromises = promotedContent.map(item =>
       recordPromotionImpression({
         promotionId: item.promotionId,
         sectionKey,
-        userId: user?.id,
+        userId,
         clicked: false,
         sessionId
       })
@@ -126,9 +132,12 @@ export const getPromotedContentForSection = async (
 
     await Promise.allSettled(impressionPromises);
 
-    return promotedContent.map(item => item.targetId);
+    const targetIds = promotedContent.map(item => item.targetId);
+    console.log(`[PromotionHelper] 📤 Returning ${targetIds.length} promoted content IDs for ${sectionKey}`);
+    
+    return targetIds;
   } catch (error) {
-    console.error('Error fetching promoted content:', error);
+    console.error(`[PromotionHelper] ❌ Error fetching promoted content for ${sectionKey}:`, error);
     return [];
   }
 };
@@ -136,27 +145,36 @@ export const getPromotedContentForSection = async (
 /**
  * Get promoted content with detailed information
  * Useful for displaying promoted content with metadata
+ * @param userIdOptional - If provided, skips getUser() (reduces egress when caller has user from context).
  */
 export const getPromotedContentDetailed = async (
   sectionKey: string,
   contentType: 'song' | 'video' | 'album' | 'short_clip' | 'profile',
-  limit: number = 10
+  limit: number = 10,
+  userIdOptional?: string | null
 ) => {
   try {
+    console.log(`[PromotionHelper] 🎯 Fetching DETAILED promoted content for section: ${sectionKey}, type: ${contentType}, limit: ${limit}`);
+    
     const promotedContent = await getFairPromotedContent(sectionKey, contentType, limit);
 
     if (promotedContent.length === 0) {
+      console.warn(`[PromotionHelper] ⚠️ No detailed promoted content found for ${sectionKey} (${contentType})`);
       return [];
     }
 
+    console.log(`[PromotionHelper] ✅ Retrieved ${promotedContent.length} detailed promoted items for ${sectionKey}:`,
+      promotedContent.map(p => ({ targetId: p.targetId, title: p.targetTitle }))
+    );
+
     const sessionId = getSessionId();
-    const { data: { user } } = await supabase.auth.getUser();
+    const userId = userIdOptional ?? (await supabase.auth.getUser()).data.user?.id;
 
     const impressionPromises = promotedContent.map(item =>
       recordPromotionImpression({
         promotionId: item.promotionId,
         sectionKey,
-        userId: user?.id,
+        userId,
         clicked: false,
         sessionId
       })
@@ -164,20 +182,24 @@ export const getPromotedContentDetailed = async (
 
     await Promise.allSettled(impressionPromises);
 
+    console.log(`[PromotionHelper] 📤 Returning ${promotedContent.length} detailed promoted items for ${sectionKey}`);
+    
     return promotedContent;
   } catch (error) {
-    console.error('Error fetching detailed promoted content:', error);
+    console.error(`[PromotionHelper] ❌ Error fetching detailed promoted content for ${sectionKey}:`, error);
     return [];
   }
 };
 
 /**
  * Record a click on promoted content
+ * @param userIdOptional - If provided, skips getUser() (reduces egress when caller has user from context).
  */
 export const recordPromotedContentClick = async (
   targetId: string,
   sectionKey: string,
-  contentType: 'song' | 'video' | 'album' | 'short_clip' | 'profile'
+  contentType: 'song' | 'video' | 'album' | 'short_clip' | 'profile',
+  userIdOptional?: string | null
 ): Promise<void> => {
   try {
     console.log(`[PromotionHelper] Recording click - targetId: ${targetId}, sectionKey: ${sectionKey}, contentType: ${contentType}`);
@@ -227,12 +249,12 @@ export const recordPromotedContentClick = async (
     console.log(`[PromotionHelper] Found promotion ID: ${promotionData.id}`);
 
     const sessionId = getSessionId();
-    const { data: { user } } = await supabase.auth.getUser();
+    const userId = userIdOptional ?? (await supabase.auth.getUser()).data.user?.id;
 
     await recordPromotionImpression({
       promotionId: promotionData.id,
       sectionKey,
-      userId: user?.id,
+      userId,
       clicked: true,
       sessionId
     });

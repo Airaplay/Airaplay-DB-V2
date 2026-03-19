@@ -1,4 +1,5 @@
 import { supabase } from './supabase';
+import { getRequestTimeoutMs } from './networkAwareConfig';
 
 interface Song {
   id: string;
@@ -17,11 +18,9 @@ interface SimilarSongResult {
   reason: string;
 }
 
-// Performance constants
-const QUERY_TIMEOUT_MS = 3000; // 3 seconds max per query (reduced from 5s)
+// Performance constants (timeouts are network-aware via getRequestTimeoutMs for 2G)
 const CACHE_TTL_MS = 10 * 60 * 1000; // 10 minutes cache TTL (increased from 5min)
 const MAX_CACHE_SIZE = 100; // Increased from 50 for better cache hits
-const OVERALL_RECOMMENDATION_TIMEOUT = 3500; // 3.5 seconds for entire process (reduced from 8s)
 
 // Query timeout wrapper
 const withTimeout = <T>(promise: Promise<T>, timeoutMs: number): Promise<T> => {
@@ -310,7 +309,7 @@ const findSimilarSongs = async (song: Song, excludeIds: string[] = []): Promise<
 
       let songWithGenres;
       try {
-        const result = await withTimeout(songQuery, QUERY_TIMEOUT_MS);
+        const result = await withTimeout(songQuery, getRequestTimeoutMs(3000));
         songWithGenres = result.data;
       } catch (error) {
         if (error instanceof Error && error.message === 'Query timeout') {
@@ -357,7 +356,7 @@ const findSimilarSongs = async (song: Song, excludeIds: string[] = []): Promise<
                 `)
                 .in('genre_id', genreIds)
                 .limit(100), // Increased from 50 to 100 for more options
-              QUERY_TIMEOUT_MS
+              getRequestTimeoutMs(3000)
             )
           : Promise.resolve({ data: null, error: null }),
         
@@ -388,7 +387,7 @@ const findSimilarSongs = async (song: Song, excludeIds: string[] = []): Promise<
                 .eq('artist_id', song.artistId)
                 .order('play_count', { ascending: false })
                 .limit(20), // Increased from 10 to 20 for more options
-              QUERY_TIMEOUT_MS
+              getRequestTimeoutMs(3000)
             )
           : Promise.resolve({ data: null, error: null })
       ]);
@@ -510,7 +509,7 @@ const findSimilarSongs = async (song: Song, excludeIds: string[] = []): Promise<
           
           diversityQuery = diversityQuery.order('play_count', { ascending: false }).limit(15);
 
-          const diversityResult = await withTimeout(diversityQuery, QUERY_TIMEOUT_MS);
+          const diversityResult = await withTimeout(diversityQuery, getRequestTimeoutMs(3000));
           
           if (diversityResult.data && diversityResult.data.length > 0) {
             let addedCount = 0;
@@ -713,7 +712,7 @@ export const getSmartAutoplayRecommendation = async (
     })();
 
     // Overall timeout for recommendation process (reduced to 3.5 seconds for faster UX)
-    return await withTimeout(recommendationPromise, OVERALL_RECOMMENDATION_TIMEOUT);
+    return await withTimeout(recommendationPromise, getRequestTimeoutMs(3500));
   } catch (error) {
     if (error instanceof Error && error.message === 'Query timeout') {
       console.warn('[SmartAutoplay] Recommendation timeout - returning null');

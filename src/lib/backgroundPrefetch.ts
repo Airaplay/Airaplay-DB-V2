@@ -1,4 +1,3 @@
-import { supabase } from './supabase';
 import { persistentCache } from './persistentCache';
 
 interface PrefetchQueueItem {

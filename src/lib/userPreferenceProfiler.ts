@@ -77,7 +77,7 @@ async function getUserListeningStats(userId: string, minDurationSeconds: number 
     .gte('duration_seconds', minDurationSeconds)
     .gte('listened_at', new Date(Date.now() - 90 * 24 * 60 * 60 * 1000).toISOString()) // Last 90 days
     .order('listened_at', { ascending: false })
-    .limit(1000);
+    .limit(200);
 
   if (error) throw error;
   return playbacks || [];

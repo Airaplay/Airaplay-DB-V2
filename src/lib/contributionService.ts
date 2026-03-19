@@ -65,20 +65,22 @@ export interface RewardsBudget {
 }
 
 /**
- * Record a contribution activity
+ * Record a contribution activity.
+ * @param userIdOptional - If provided, skips getUser() (reduces egress when caller has user from context).
  */
 export async function recordContribution(
   activityType: string,
   referenceId?: string,
   referenceType?: string,
-  metadata?: Record<string, unknown>
+  metadata?: Record<string, unknown>,
+  userIdOptional?: string | null
 ): Promise<void> {
   try {
-    const { data: { user } } = await supabase.auth.getUser();
-    if (!user) return;
+    const userId = userIdOptional ?? (await supabase.auth.getUser()).data.user?.id;
+    if (!userId) return;
 
     const { error } = await supabase.rpc('record_listener_contribution', {
-      p_user_id: user.id,
+      p_user_id: userId,
       p_activity_type: activityType,
       p_reference_id: referenceId || null,
       p_reference_type: referenceType || null,

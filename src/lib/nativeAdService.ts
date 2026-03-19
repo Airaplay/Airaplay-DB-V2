@@ -1,5 +1,4 @@
 import { supabase } from './supabase';
-import { logAdImpression, logAdRevenue } from './adLoggingService';
 
 export interface NativeAdCard {
   id: string;
@@ -84,7 +83,7 @@ export async function getNativeAdsForPlacement(
 }
 
 /**
- * Record an impression for a native ad (increments counter + logs revenue)
+ * Record an impression for a native ad
  */
 export async function recordNativeAdImpression(adId: string): Promise<void> {
   try {
@@ -95,27 +94,6 @@ export async function recordNativeAdImpression(adId: string): Promise<void> {
     if (error) {
       console.error('Error recording native ad impression:', error);
     }
-
-    const { data: { user } } = await supabase.auth.getUser();
-    const estimatedCPM = 0.5;
-    const estimatedRevenue = estimatedCPM / 1000;
-
-    await logAdImpression({
-      userId: user?.id,
-      adUnitId: adId,
-      placementKey: 'native_grid',
-      network: 'native',
-      adType: 'native',
-      completed: true,
-    });
-
-    await logAdRevenue({
-      adUnitId: adId,
-      placementKey: 'native_grid',
-      estimatedCPM,
-      estimatedRevenue,
-      winningNetwork: 'native',
-    });
   } catch (error) {
     console.error('Error in recordNativeAdImpression:', error);
   }

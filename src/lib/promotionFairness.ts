@@ -35,28 +35,28 @@ export const getFairPromotedContent = async (
   limit: number = 10
 ): Promise<PromotedContent[]> => {
   try {
-    console.log(`[PromotionFairness] getFairPromotedContent called for ${sectionKey} (${contentType}), limit: ${limit}`);
+    console.log(`[PromotionFairness] 🔄 getFairPromotedContent called for ${sectionKey} (${contentType}), limit: ${limit}`);
 
     const cacheKey = `promoted_content:${sectionKey}:${contentType}:${limit}`;
 
     // Check cache first
     const cached = cache.get(cacheKey);
     if (cached) {
-      console.log(`[PromotionFairness] Using cached promoted content for ${sectionKey}:`, cached);
+      console.log(`[PromotionFairness] 💾 Using cached promoted content for ${sectionKey} (${cached.length} items)`);
       return cached;
     }
 
     // Check if current cycle needs rotation
     const needsRotation = await rotationQueueManager.checkCycleExpiration(sectionKey);
     if (needsRotation) {
-      console.log(`[PromotionFairness] Cycle expired for ${sectionKey}, rotating...`);
+      console.log(`[PromotionFairness] 🔄 Cycle expired for ${sectionKey}, rotating...`);
       await rotationQueueManager.rotateSection(sectionKey);
       // Clear cache for this section when rotating
       cache.delete(cacheKey);
     }
 
     // Use the new smart rotation function
-    console.log(`[PromotionFairness] Calling get_smart_rotated_promotions RPC with params:`, {
+    console.log(`[PromotionFairness] 📞 Calling get_smart_rotated_promotions RPC with params:`, {
       p_section_key: sectionKey,
       p_content_type: contentType,
       p_limit: limit
@@ -69,16 +69,16 @@ export const getFairPromotedContent = async (
     });
 
     if (error) {
-      console.error('[PromotionFairness] Error fetching smart rotated content:', error);
+      console.error('[PromotionFairness] ❌ Error fetching smart rotated content:', error);
       return [];
     }
 
     if (!data || data.length === 0) {
-      console.log(`[PromotionFairness] No promoted content found for ${sectionKey} (${contentType})`);
+      console.warn(`[PromotionFairness] ⚠️ No promoted content found for ${sectionKey} (${contentType}) - Promotions may be PENDING or INACTIVE`);
       return [];
     }
 
-    console.log(`[PromotionFairness] Retrieved ${data.length} promoted items for ${sectionKey} with smart rotation:`, data);
+    console.log(`[PromotionFairness] ✅ Retrieved ${data.length} promoted items for ${sectionKey} with smart rotation:`, data);
 
     // Map the response
     const promotedContent = data.map((item: any) => ({
@@ -93,7 +93,13 @@ export const getFairPromotedContent = async (
       forcedInclusion: item.forced_inclusion
     }));
 
-    console.log(`[PromotionFairness] Mapped promoted content:`, promotedContent);
+    console.log(`[PromotionFairness] 📊 Mapped promoted content for ${sectionKey}:`, 
+      promotedContent.map(p => ({ 
+        id: p.promotionId.substring(0, 8), 
+        targetId: p.targetId.substring(0, 8), 
+        title: p.targetTitle 
+      }))
+    );
 
     // Cache the results
     cache.set(cacheKey, promotedContent, CACHE_TTL);
@@ -101,13 +107,13 @@ export const getFairPromotedContent = async (
     // Log starved promotions for monitoring (async, non-blocking)
     rotationQueueManager.getStarvedPromotions(sectionKey).then(starved => {
       if (starved.length > 0) {
-        console.warn(`[PromotionFairness] ${starved.length} promotions in ${sectionKey} need fairness enforcement`);
+        console.warn(`[PromotionFairness] ⚖️ ${starved.length} promotions in ${sectionKey} need fairness enforcement`);
       }
     });
 
     return promotedContent;
   } catch (error) {
-    console.error('[PromotionFairness] Error in getFairPromotedContent:', error);
+    console.error('[PromotionFairness] ❌ Error in getFairPromotedContent:', error);
     return [];
   }
 };

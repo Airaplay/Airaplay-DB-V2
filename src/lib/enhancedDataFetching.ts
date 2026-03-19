@@ -11,6 +11,7 @@
 
 import { smartCache } from './smartCache';
 import { getNetworkInfo } from './imageOptimization';
+import { isSlowNetwork } from './networkAwareConfig';
 import type { CacheOptions } from './smartCache';
 
 export interface FetchConfig<T> extends CacheOptions {
@@ -182,6 +183,8 @@ export async function batchFetch<T>(
 ): Promise<T[]> {
   const network = getNetworkInfo();
   const isFastNetwork = network.effectiveType === '4g' && !network.saveData;
+  // On 2G, run one request at a time to avoid overwhelming the connection
+  requestQueue.setMaxConcurrent(isSlowNetwork() ? 1 : 3);
 
   if (isFastNetwork && requests.length <= 10) {
     // Parallel fetch on fast networks for small batches

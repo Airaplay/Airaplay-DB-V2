@@ -10,6 +10,11 @@ import { supabase } from './supabase';
 import { getUserProfile, updateUserProfile, type UserProfile } from './userPreferenceProfiler';
 import { generateRecommendations, type SongRecommendation } from './recommendationEngine';
 import { fetchWithCache, CACHE_KEYS, CACHE_TTL } from './configCache';
+import {
+  getCreativeMixTitle,
+  getCreativeMixTitleByIndex,
+  CREATIVE_MIX_TITLES,
+} from './dailyMixTitles';
 
 interface DailyMixConfig {
   enabled: boolean;
@@ -41,7 +46,17 @@ async function getConfig(): Promise<DailyMixConfig> {
     async () => {
       const { data, error } = await supabase
         .from('daily_mix_config')
-        .select('enabled, mixes_per_user, songs_per_mix, min_user_plays, refresh_hours')
+        .select(
+          [
+            'enabled',
+            'mixes_per_user',
+            'tracks_per_mix',
+            'familiar_ratio',
+            'min_play_duration_seconds',
+            'skip_threshold_seconds',
+            'refresh_hour',
+          ].join(', ')
+        )
         .single();
 
       if (error || !data) {
@@ -274,6 +289,42 @@ function generateCoverImageUrl(genreFocus: string | null): string | null {
   return null;
 }
 
+const CREATIVE_TITLE_COUNT = CREATIVE_MIX_TITLES.length;
+
+/**
+ * Get the next N creative title indices for a user (rotating 0..CREATIVE_TITLE_COUNT-1)
+ * and persist the new position so the user won't see the same title again until all are seen.
+ * Requires table: daily_mix_user_state (user_id uuid PRIMARY KEY, next_creative_title_index int NOT NULL DEFAULT 0).
+ * If the table is missing, returns [] and caller should fall back to mix_number-based titles.
+ */
+async function getAndIncrementNextTitleIndices(userId: string, count: number): Promise<number[]> {
+  if (count <= 0) return [];
+  try {
+    const { data: row, error: selectError } = await supabase
+      .from('daily_mix_user_state')
+      .select('next_creative_title_index')
+      .eq('user_id', userId)
+      .maybeSingle();
+
+    if (selectError) return [];
+
+    const current = (row?.next_creative_title_index ?? 0) % CREATIVE_TITLE_COUNT;
+    const indices = Array.from({ length: count }, (_, i) => (current + i) % CREATIVE_TITLE_COUNT);
+    const nextIndex = (current + count) % CREATIVE_TITLE_COUNT;
+
+    await supabase
+      .from('daily_mix_user_state')
+      .upsert(
+        { user_id: userId, next_creative_title_index: nextIndex },
+        { onConflict: 'user_id' }
+      );
+
+    return indices;
+  } catch {
+    return [];
+  }
+}
+
 /**
  * Create daily mixes for a user
  */
@@ -297,6 +348,13 @@ async function createDailyMixes(
   const clusters = clusterRecommendations(recommendations, userProfile, config.mixes_per_user);
   await assignToClusters(recommendations, clusters, userProfile);
 
+  // Per-user rotating titles: get next indices for Discovery mixes so user doesn't see repeats until all 150 seen
+  const discoveryCount = clusters.filter(
+    (c) => (c.genre || c.mood || 'Mixed') === 'Discovery'
+  ).length;
+  const titleIndices = await getAndIncrementNextTitleIndices(userId, discoveryCount);
+  let discoveryIdx = 0;
+
   // Create mixes from clusters
   const mixes: DailyMix[] = clusters.map((cluster, idx) => {
     const tracks = balanceFamiliarRatio(
@@ -313,12 +371,18 @@ async function createDailyMixes(
 
     const genreFocus = cluster.genre || cluster.mood || 'Mixed';
     const isDiscovery = genreFocus === 'Discovery';
+    const mixNumber = idx + 1;
+
+    const title =
+      isDiscovery && discoveryIdx < titleIndices.length
+        ? getCreativeMixTitleByIndex(titleIndices[discoveryIdx++])
+        : isDiscovery
+          ? getCreativeMixTitle(mixNumber)
+          : `Your ${genreFocus} Mix`;
 
     return {
-      mix_number: idx + 1,
-      title: isDiscovery
-        ? `Daily Mix ${idx + 1}: Discover New Music`
-        : `Daily Mix ${idx + 1}: ${genreFocus}`,
+      mix_number: mixNumber,
+      title,
       description: isDiscovery
         ? 'Fresh tracks trending globally and new discoveries based on your taste'
         : `A personalized mix featuring ${genreFocus.toLowerCase()} tracks you'll love`,

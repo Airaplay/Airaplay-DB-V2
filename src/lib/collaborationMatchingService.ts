@@ -1,4 +1,5 @@
 import { supabase } from './supabase';
+import { insertNotificationSafe } from './notificationService';
 
 // In-memory cache for collaboration matches
 const matchCache = new Map<string, { matches: CollaborationMatch[]; timestamp: number }>();
@@ -641,18 +642,14 @@ export async function sendCollaborationRequest(
         interaction_type: 'request_sent'
       });
 
-    await supabase
-      .from('notifications')
-      .insert({
-        user_id: recipientProfile.user_id,
-        title: 'New Collaboration Request',
-        message: `${senderArtistData?.stage_name || 'An artist'} sent you a collaboration request`,
-        type: 'collaboration_request',
-        metadata: {
-          request_id: newRequest?.id
-        },
-        is_read: false
-      });
+    await insertNotificationSafe({
+      user_id: recipientProfile.user_id,
+      title: 'New Collaboration Request',
+      message: `${senderArtistData?.stage_name || 'An artist'} sent you a collaboration request`,
+      type: 'collaboration_request',
+      metadata: { request_id: newRequest?.id },
+      is_read: false
+    });
 
     return { success: true };
   } catch (error) {

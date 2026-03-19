@@ -21,6 +21,9 @@ const isDataSaverEnabled = (): boolean => {
   return false;
 };
 
+const isBunnyCdnUrl = (url: string): boolean =>
+  url.includes('b-cdn.net') || url.includes('bunnycdn.com');
+
 export const getOptimizedImageUrl = (
   originalUrl: string,
   options: ImageOptimizationOptions = {}
@@ -37,26 +40,28 @@ export const getOptimizedImageUrl = (
     format = 'webp'
   } = options;
 
-  if (originalUrl.startsWith('http://') || originalUrl.startsWith('https://')) {
-    return originalUrl;
-  }
-
-  const supabaseUrl = import.meta.env.VITE_SUPABASE_URL;
-  if (!supabaseUrl) return originalUrl;
-
-  let url = originalUrl;
   const params: string[] = [];
-
   if (width) params.push(`width=${width}`);
   if (height) params.push(`height=${height}`);
   if (quality) params.push(`quality=${quality}`);
   if (format && format !== 'png') params.push(`format=${format}`);
 
-  if (params.length > 0 && url.includes('/storage/v1/object/public/')) {
-    url = `${url}?${params.join('&')}`;
+  if (params.length === 0) return originalUrl;
+
+  const separator = originalUrl.includes('?') ? '&' : '?';
+  const paramString = params.join('&');
+
+  // Bunny CDN: add params to reduce bandwidth (smaller size, WebP)
+  if (isBunnyCdnUrl(originalUrl)) {
+    return `${originalUrl}${separator}${paramString}`;
   }
 
-  return url;
+  // Supabase Storage (full or relative URL)
+  if (originalUrl.includes('/storage/v1/object/public/')) {
+    return `${originalUrl}${separator}${paramString}`;
+  }
+
+  return originalUrl;
 };
 
 export const generateBlurDataUrl = (width: number = 10, height: number = 10): string => {

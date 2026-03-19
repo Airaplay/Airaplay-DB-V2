@@ -106,3 +106,22 @@ export function sanitizeHtml(html: string): string {
 export function createSafeHtml(html: string): { __html: string } {
   return { __html: sanitizeHtml(html) };
 }
+
+/**
+ * Returns a URL safe for use as href (only http/https). Use for user-provided links
+ * (e.g. profile social_media_url, social links) to prevent javascript:/data: XSS.
+ * Returns '' if the URL is invalid or not http(s).
+ */
+export function safeHrefUrl(url: string | null | undefined): string {
+  if (url == null || typeof url !== 'string') return '';
+  const trimmed = url.trim();
+  if (!trimmed) return '';
+  try {
+    const parsed = new URL(trimmed);
+    const protocol = parsed.protocol.toLowerCase();
+    if (protocol === 'https:' || protocol === 'http:') return trimmed;
+  } catch {
+    // Invalid URL
+  }
+  return '';
+}

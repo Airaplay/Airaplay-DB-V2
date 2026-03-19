@@ -1,7 +1,8 @@
 import { cacheManager } from './cache';
 import { getNetworkInfo } from './imageOptimization';
-import { supabase } from './supabase';
+import { getRequestTimeoutMs, getRetryConfig } from './networkAwareConfig';
 import { persistentCache } from './persistentCache';
+import { releaseDatePublicFilter, isReleased } from './releaseDateUtils';
 
 export interface PaginationOptions {
   page: number;
@@ -189,33 +190,38 @@ import React from 'react';
 
 const HOME_SCREEN_CACHE_KEY = 'home_screen_data_v3_optimized';
 const HOME_SCREEN_CACHE_DURATION = 30 * 60 * 1000; // 30 minutes
+const HOME_REVALIDATE_AFTER_MS = 10 * 60 * 1000; // Only background-revalidate when cache is older than 10 min (reduces egress/DB load)
 
 export const fetchHomeScreenData = async (forceRefresh = false) => {
   try {
     if (!forceRefresh) {
       const cached = await persistentCache.get(HOME_SCREEN_CACHE_KEY);
       if (cached) {
-        setTimeout(() => fetchHomeScreenData(true).catch(console.error), 100);
+        const ts = (cached as { timestamp?: number }).timestamp;
+        if (typeof ts === 'number') {
+          const age = Date.now() - ts;
+          if (age >= HOME_REVALIDATE_AFTER_MS) {
+            setTimeout(() => fetchHomeScreenData(true).catch(() => {}), 100);
+          }
+        }
         return cached;
       }
     }
 
-    // Fetch ALL data in parallel for maximum speed
-    const allPromises = [
-      // 0: Trending songs — pass null so DB uses admin-configured time_window_days
-      supabase.rpc('get_shuffled_trending_songs', {
-        days_param: null,
-        limit_param: 20
-      }),
-      // 1: New releases
+    // Lazy-load supabase to avoid circular dependency / TDZ (index -> appInitializer -> dataFetching -> supabase)
+    const { supabase } = await import('./supabase');
+
+    // Build fresh promise array so each retry makes new requests (required for real retries)
+    const buildFetchPromises = () => [
+      supabase.rpc('get_shuffled_trending_songs', { days_param: null, limit_param: 20 }),
       supabase
         .from('songs')
         .select('id, title, duration_seconds, audio_url, cover_image_url, play_count, created_at, featured_artists, artists:artist_id(id, name, artist_profiles(stage_name, user_id, users:user_id(display_name)))')
         .is('album_id', null)
         .not('audio_url', 'is', null)
+        .or(releaseDatePublicFilter())
         .order('created_at', { ascending: false })
         .limit(15),
-      // 2: Must watch videos
       supabase
         .from('content_uploads')
         .select('id, title, description, content_type, metadata, play_count, created_at, user_id, users(id, display_name, avatar_url)')
@@ -223,8 +229,7 @@ export const fetchHomeScreenData = async (forceRefresh = false) => {
         .eq('status', 'approved')
         .not('metadata->video_url', 'is', null)
         .order('play_count', { ascending: false })
-        .limit(12),
-      // 3: Loops (short clips)
+        .limit(20),
       supabase
         .from('content_uploads')
         .select('id, title, metadata, play_count, created_at, user_id, users(id, display_name, avatar_url)')
@@ -232,42 +237,60 @@ export const fetchHomeScreenData = async (forceRefresh = false) => {
         .eq('status', 'approved')
         .order('created_at', { ascending: false })
         .limit(12),
-      // 4: Trending albums
       supabase
         .from('albums')
         .select('id, title, cover_image_url, release_date, created_at, artists:artist_id(id, name, artist_profiles(stage_name))')
+        .or(releaseDatePublicFilter())
         .order('created_at', { ascending: false })
         .limit(10),
-      // 5: Top artists
       supabase
         .from('artist_profiles')
         .select('id, stage_name, profile_photo_url, is_verified, user_id, users:user_id(display_name, country)')
         .limit(10),
-      // 6: Trending near you
       supabase
         .from('songs')
         .select('id, title, duration_seconds, audio_url, cover_image_url, play_count, country, featured_artists, artists:artist_id(id, name, artist_profiles(stage_name, user_id, users:user_id(display_name)))')
         .not('audio_url', 'is', null)
+        .or(releaseDatePublicFilter())
         .gte('play_count', 50)
         .order('play_count', { ascending: false })
         .limit(15),
-      // 7: AI recommended
       supabase
         .from('songs')
         .select('id, title, duration_seconds, audio_url, cover_image_url, play_count, featured_artists, artists:artist_id(id, name, artist_profiles(stage_name, user_id, users:user_id(display_name)))')
         .not('audio_url', 'is', null)
+        .or(releaseDatePublicFilter())
         .order('play_count', { ascending: false })
         .range(25, 40)
         .limit(15),
     ];
 
-    // Execute all queries in parallel with timeout
-    const results = await Promise.race([
-      Promise.allSettled(allPromises),
-      new Promise((_, reject) =>
-        setTimeout(() => reject(new Error('Home screen data fetch timeout')), 5000)
-      )
-    ]);
+    // Execute with network-aware timeout and retries (2G: longer timeout + fresh retries)
+    const timeoutMs = getRequestTimeoutMs(10000);
+    const { attempts, delayMs, backoff } = getRetryConfig();
+    let results: Array<PromiseSettledResult<{ data?: unknown[] }>> | null = null;
+    let lastErr: unknown;
+    for (let attempt = 1; attempt <= attempts; attempt++) {
+      try {
+        const allPromises = buildFetchPromises();
+        results = (await Promise.race([
+          Promise.allSettled(allPromises),
+          new Promise((_, reject) =>
+            setTimeout(() => reject(new Error('Home screen data fetch timeout')), timeoutMs)
+          )
+        ])) as Array<PromiseSettledResult<{ data?: unknown[] }>>;
+        break;
+      } catch (err) {
+        lastErr = err;
+        if (attempt < attempts) {
+          const delay = backoff === 'exponential' ? delayMs * Math.pow(2, attempt - 1) : delayMs;
+          await new Promise((r) => setTimeout(r, delay));
+        } else {
+          throw err;
+        }
+      }
+    }
+    if (!results) throw lastErr;
 
     // Extract results with fallbacks
     const [
@@ -281,10 +304,14 @@ export const fetchHomeScreenData = async (forceRefresh = false) => {
       aiRecommendedResult,
     ] = results;
 
+    const rawTrendingSongs = (trendingSongsResult.status === 'fulfilled' ? trendingSongsResult.value?.data : null) ?? [];
+    const trendingSongsArray = Array.isArray(rawTrendingSongs) ? rawTrendingSongs : [];
+    const rawMustWatch = mustWatchVideosResult.status === 'fulfilled' ? (mustWatchVideosResult.value?.data || []) : [];
+    const mustWatchVideos = rawMustWatch.filter((v: { metadata?: { release_date?: string | null } }) => isReleased(v.metadata?.release_date));
     const data = {
-      trendingSongs: trendingSongsResult.status === 'fulfilled' ? (trendingSongsResult.value?.data || []) : [],
+      trendingSongs: trendingSongsArray.filter((s) => isReleased((s as { release_date?: string | null }).release_date)),
       newReleases: newReleasesResult.status === 'fulfilled' ? (newReleasesResult.value?.data || []) : [],
-      mustWatchVideos: mustWatchVideosResult.status === 'fulfilled' ? (mustWatchVideosResult.value?.data || []) : [],
+      mustWatchVideos: mustWatchVideos.slice(0, 12),
       loops: loopsResult.status === 'fulfilled' ? (loopsResult.value?.data || []) : [],
       trendingAlbums: trendingAlbumsResult.status === 'fulfilled' ? (trendingAlbumsResult.value?.data || []) : [],
       topArtists: topArtistsResult.status === 'fulfilled' ? (topArtistsResult.value?.data || []) : [],
