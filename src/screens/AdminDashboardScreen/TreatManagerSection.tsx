@@ -1081,6 +1081,22 @@ const PaymentChannelModal = ({ channel, onClose, onSave }: {
         { key: 'secret_key', label: 'Secret Key', type: 'password' },
         { key: 'currency', label: 'Currency', type: 'text', default: 'USD' }
       ],
+      'google_pay': [
+        { key: 'merchant_id', label: 'Merchant ID', type: 'text', placeholder: 'Your Google Pay Merchant ID' },
+        { key: 'merchant_name', label: 'Merchant Name', type: 'text', placeholder: 'Airaplay' },
+        { key: 'gateway', label: 'Payment Gateway', type: 'select', options: [
+          { value: 'stripe', label: 'Stripe' },
+          { value: 'paystack', label: 'Paystack' },
+          { value: 'flutterwave', label: 'Flutterwave' }
+        ], default: 'stripe' },
+        { key: 'gateway_merchant_id', label: 'Gateway Merchant ID', type: 'text', placeholder: 'Your payment gateway merchant ID' },
+        { key: 'environment', label: 'Environment', type: 'select', options: [
+          { value: 'TEST', label: 'Test' },
+          { value: 'PRODUCTION', label: 'Production' }
+        ], default: 'TEST' },
+        { key: 'allowed_card_networks', label: 'Allowed Card Networks', type: 'text', default: 'AMEX,DISCOVER,INTERAC,JCB,MASTERCARD,VISA', placeholder: 'Comma-separated networks' },
+        { key: 'currency', label: 'Currency', type: 'text', default: 'USD' }
+      ],
       'usdt_trc20': [
         { key: 'wallet_address', label: 'Wallet Address', type: 'text' },
         { key: 'network', label: 'Network', type: 'text', default: 'TRC20' }
@@ -1148,6 +1164,7 @@ const PaymentChannelModal = ({ channel, onClose, onSave }: {
                 <option value="paystack">Paystack</option>
                 <option value="flutterwave">Flutterwave</option>
                 <option value="stripe">Stripe</option>
+                <option value="google_pay">Google Pay</option>
                 <option value="usdt_trc20">USDT (TRC20)</option>
                 <option value="usdt_erc20">USDT (ERC20)</option>
                 <option value="custom">Custom</option>
