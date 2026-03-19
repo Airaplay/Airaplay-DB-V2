@@ -1082,20 +1082,22 @@ const PaymentChannelModal = ({ channel, onClose, onSave }: {
         { key: 'currency', label: 'Currency', type: 'text', default: 'USD' }
       ],
       'google_pay': [
-        { key: 'merchant_id', label: 'Merchant ID', type: 'text', placeholder: 'Your Google Pay Merchant ID' },
-        { key: 'merchant_name', label: 'Merchant Name', type: 'text', placeholder: 'Airaplay' },
-        { key: 'gateway', label: 'Payment Gateway', type: 'select', options: [
-          { value: 'stripe', label: 'Stripe' },
-          { value: 'paystack', label: 'Paystack' },
-          { value: 'flutterwave', label: 'Flutterwave' }
-        ], default: 'stripe' },
-        { key: 'gateway_merchant_id', label: 'Gateway Merchant ID', type: 'text', placeholder: 'Your payment gateway merchant ID' },
+        { key: 'merchant_id', label: 'Google Merchant ID', type: 'text', placeholder: 'BCR2DN4T...' },
+        { key: 'merchant_name', label: 'Merchant Name', type: 'text', placeholder: 'Airaplay', default: 'Airaplay' },
+        { key: 'gateway', label: 'Gateway Provider', type: 'text', placeholder: 'example', default: 'example' },
+        { key: 'gateway_merchant_id', label: 'Gateway Merchant ID', type: 'text', placeholder: 'exampleGatewayMerchantId' },
         { key: 'environment', label: 'Environment', type: 'select', options: [
           { value: 'TEST', label: 'Test' },
           { value: 'PRODUCTION', label: 'Production' }
         ], default: 'TEST' },
-        { key: 'allowed_card_networks', label: 'Allowed Card Networks', type: 'text', default: 'AMEX,DISCOVER,INTERAC,JCB,MASTERCARD,VISA', placeholder: 'Comma-separated networks' },
-        { key: 'currency', label: 'Currency', type: 'text', default: 'USD' }
+        { key: 'allowed_auth_methods', label: 'Auth Methods', type: 'text', default: 'PAN_ONLY,CRYPTOGRAM_3DS', placeholder: 'PAN_ONLY,CRYPTOGRAM_3DS' },
+        { key: 'allowed_card_networks', label: 'Card Networks', type: 'text', default: 'AMEX,DISCOVER,MASTERCARD,VISA', placeholder: 'Comma-separated' },
+        { key: 'total_price_status', label: 'Price Status', type: 'select', options: [
+          { value: 'FINAL', label: 'Final' },
+          { value: 'ESTIMATED', label: 'Estimated' }
+        ], default: 'FINAL' },
+        { key: 'currency', label: 'Currency Code', type: 'text', default: 'USD', placeholder: 'USD, NGN, EUR, etc.' },
+        { key: 'country_code', label: 'Country Code', type: 'text', default: 'US', placeholder: 'US, NG, etc.' }
       ],
       'usdt_trc20': [
         { key: 'wallet_address', label: 'Wallet Address', type: 'text' },
