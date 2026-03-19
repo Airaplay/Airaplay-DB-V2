@@ -766,6 +766,11 @@ export const DailyMixPlayerScreen: React.FC = () => {
                             <span className="font-['Inter',sans-serif] text-white/60 text-xs truncate">
                               {song.artist}
                             </span>
+                            {song.explanation ? (
+                              <span className="font-['Inter',sans-serif] text-white/50 text-[11px] leading-snug line-clamp-2">
+                                {song.explanation}
+                              </span>
+                            ) : null}
                           </div>
 
                           {/* Duration */}

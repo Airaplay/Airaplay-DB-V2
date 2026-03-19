@@ -51,44 +51,47 @@ export const GlobalDailyMixManagerSection: React.FC = () => {
   };
 
   return (
-    <div className="p-6 space-y-6">
-      <div className="flex items-center gap-3">
-        <div className="w-10 h-10 rounded-lg bg-gradient-to-br from-purple-500 to-pink-500 flex items-center justify-center">
-          <Globe className="w-6 h-6 text-white" />
-        </div>
-        <div>
-          <h2 className="text-2xl font-bold text-white">Global Daily Mix Manager</h2>
-          <p className="text-white/60 text-sm">
-            Manage global daily mixes for non-authenticated and new users
-          </p>
+    <div className="space-y-4 min-h-full">
+      {/* Header */}
+      <div className="mb-6">
+        <div className="flex items-start gap-4">
+          <div className="w-8 h-8 rounded-lg bg-blue-50 flex items-center justify-center flex-shrink-0">
+            <Globe className="w-4 h-4 text-blue-600" />
+          </div>
+          <div>
+            <h2 className="text-xl font-bold text-gray-900 leading-tight">Global Daily Mix Manager</h2>
+            <p className="text-sm text-gray-500 mt-0.5">
+              Manage global daily mixes for non-authenticated and new users
+            </p>
+          </div>
         </div>
       </div>
 
       {/* Info Card */}
-      <div className="bg-white/5 border border-white/10 rounded-xl p-5">
+      <div className="mb-6 p-4 bg-green-50 border border-green-200 rounded-lg">
         <div className="flex items-start gap-3">
-          <Sparkles className="w-5 h-5 text-blue-400 flex-shrink-0 mt-0.5" />
+          <Sparkles className="w-5 h-5 text-[#309605] flex-shrink-0 mt-0.5" />
           <div>
-            <h3 className="text-white font-semibold mb-2">About Global Mixes</h3>
-            <p className="text-white/70 text-sm leading-relaxed mb-3">
+            <h3 className="font-semibold text-green-900 mb-1 text-sm">About Global Mixes</h3>
+            <p className="text-sm text-green-800 leading-relaxed mb-3">
               Global daily mixes are automatically generated playlists visible to all users (authenticated and non-authenticated).
               They are based on trending songs, popular genres, and global listening patterns.
             </p>
-            <ul className="text-white/60 text-sm space-y-1.5">
+            <ul className="text-sm text-green-800 space-y-1.5">
               <li className="flex items-center gap-2">
-                <CheckCircle className="w-4 h-4 text-green-400" />
+                <CheckCircle className="w-4 h-4 text-green-600" />
                 <span>Updated automatically every 24 hours</span>
               </li>
               <li className="flex items-center gap-2">
-                <CheckCircle className="w-4 h-4 text-green-400" />
+                <CheckCircle className="w-4 h-4 text-green-600" />
                 <span>No listening history required</span>
               </li>
               <li className="flex items-center gap-2">
-                <CheckCircle className="w-4 h-4 text-green-400" />
+                <CheckCircle className="w-4 h-4 text-green-600" />
                 <span>Cached for optimal performance</span>
               </li>
               <li className="flex items-center gap-2">
-                <CheckCircle className="w-4 h-4 text-green-400" />
+                <CheckCircle className="w-4 h-4 text-green-600" />
                 <span>Includes artist images and metadata</span>
               </li>
             </ul>
@@ -101,71 +104,79 @@ export const GlobalDailyMixManagerSection: React.FC = () => {
         <button
           onClick={handleGenerateGlobalMixes}
           disabled={isGenerating}
-          className="flex items-center justify-center gap-3 p-5 bg-gradient-to-br from-purple-500/20 to-pink-500/20 border border-purple-500/30 rounded-xl hover:from-purple-500/30 hover:to-pink-500/30 transition-all disabled:opacity-50 disabled:cursor-not-allowed"
+          className="flex items-center justify-center gap-3 p-5 bg-gradient-to-r from-[#309605] to-[#3ba208] hover:from-[#3ba208] hover:to-[#309605] disabled:from-gray-400 disabled:to-gray-500 text-white rounded-lg text-sm font-medium transition-all flex items-center shadow-sm disabled:opacity-50 disabled:cursor-not-allowed"
         >
-          <RefreshCw className={`w-5 h-5 text-purple-400 ${isGenerating ? 'animate-spin' : ''}`} />
+          <RefreshCw className={`w-5 h-5 ${isGenerating ? 'animate-spin' : ''}`} />
           <div className="text-left">
-            <div className="text-white font-semibold">Generate If Needed</div>
-            <div className="text-white/60 text-xs">Only generates if mixes are expired</div>
+            <div className="font-semibold">Generate If Needed</div>
+            <div className="text-white/80 text-xs">Only generates if mixes are expired</div>
           </div>
         </button>
 
         <button
           onClick={handleForceRegenerate}
           disabled={isGenerating}
-          className="flex items-center justify-center gap-3 p-5 bg-gradient-to-br from-orange-500/20 to-red-500/20 border border-orange-500/30 rounded-xl hover:from-orange-500/30 hover:to-red-500/30 transition-all disabled:opacity-50 disabled:cursor-not-allowed"
+          className="flex items-center justify-center gap-3 p-5 bg-white hover:bg-gray-50 border border-red-200 rounded-lg text-red-700 text-sm font-medium transition-colors shadow-sm disabled:opacity-50 disabled:cursor-not-allowed"
         >
-          <Music className={`w-5 h-5 text-orange-400 ${isGenerating ? 'animate-pulse' : ''}`} />
+          <Music className={`w-5 h-5 ${isGenerating ? 'animate-pulse' : ''}`} />
           <div className="text-left">
-            <div className="text-white font-semibold">Force Regenerate</div>
-            <div className="text-white/60 text-xs">Delete old mixes and create new ones</div>
+            <div className="font-semibold">Force Regenerate</div>
+            <div className="text-gray-500/90 text-xs">Delete old mixes and create new ones</div>
           </div>
         </button>
       </div>
 
       {/* Status Message */}
       {message && (
-        <div
-          className={`p-4 rounded-xl border ${
-            message.type === 'success'
-              ? 'bg-green-500/10 border-green-500/30 text-green-400'
-              : message.type === 'error'
-              ? 'bg-red-500/10 border-red-500/30 text-red-400'
-              : 'bg-blue-500/10 border-blue-500/30 text-blue-400'
-          }`}
-        >
-          <div className="flex items-center gap-3">
+        <div className="mb-6">
+          <div
+            className={`p-4 rounded-r-lg border-l-4 flex items-start gap-3 animate-in slide-in-from-top-2 ${
+              message.type === 'success'
+                ? 'bg-green-50 border-green-600 text-green-700'
+                : message.type === 'error'
+                  ? 'bg-red-50 border-red-600 text-red-700'
+                  : 'bg-blue-50 border-blue-600 text-blue-700'
+            }`}
+          >
             {message.type === 'success' ? (
-              <CheckCircle className="w-5 h-5" />
+              <CheckCircle className="w-5 h-5 text-green-600 flex-shrink-0 mt-0.5" />
             ) : message.type === 'error' ? (
-              <AlertCircle className="w-5 h-5" />
+              <AlertCircle className="w-5 h-5 text-red-600 flex-shrink-0 mt-0.5" />
             ) : (
-              <Sparkles className="w-5 h-5" />
+              <Sparkles className="w-5 h-5 text-blue-600 flex-shrink-0 mt-0.5" />
             )}
-            <span className="text-sm font-medium">{message.text}</span>
+            <div className="flex-1">
+              <p className="font-medium text-sm">
+                {message.type === 'success' ? 'Success' : message.type === 'error' ? 'Error' : 'Info'}
+              </p>
+              <p className="text-sm">{message.text}</p>
+            </div>
           </div>
         </div>
       )}
 
       {/* Technical Details */}
-      <div className="bg-white/5 border border-white/10 rounded-xl p-5">
-        <h3 className="text-white font-semibold mb-3">Technical Details</h3>
-        <div className="space-y-2 text-sm text-white/60">
+      <div className="bg-gray-50 border border-gray-200 rounded-lg p-6">
+        <h3 className="font-semibold text-gray-900 mb-3 flex items-center gap-2">
+          <Globe className="w-4 h-4 text-blue-600" />
+          Technical Details
+        </h3>
+        <div className="space-y-2 text-sm text-gray-600">
           <div className="flex justify-between">
-            <span>Tables:</span>
-            <span className="text-white/80 font-mono">global_daily_mix_playlists, global_daily_mix_tracks</span>
+            <span className="text-gray-700">Tables:</span>
+            <span className="text-gray-900/80 font-mono">global_daily_mix_playlists, global_daily_mix_tracks</span>
           </div>
           <div className="flex justify-between">
-            <span>RLS Policies:</span>
-            <span className="text-white/80">Public read, Admin write only</span>
+            <span className="text-gray-700">RLS Policies:</span>
+            <span className="text-gray-900/80">Public read, Admin write only</span>
           </div>
           <div className="flex justify-between">
-            <span>Cache Duration:</span>
-            <span className="text-white/80">4 hours (client-side)</span>
+            <span className="text-gray-700">Cache Duration:</span>
+            <span className="text-gray-900/80">4 hours (client-side)</span>
           </div>
           <div className="flex justify-between">
-            <span>Expires After:</span>
-            <span className="text-white/80">24 hours (database)</span>
+            <span className="text-gray-700">Expires After:</span>
+            <span className="text-gray-900/80">24 hours (database)</span>
           </div>
         </div>
       </div>
