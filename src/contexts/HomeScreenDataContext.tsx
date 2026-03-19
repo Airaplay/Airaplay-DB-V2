@@ -1,5 +1,6 @@
 import { createContext, useContext, useState, useEffect, ReactNode } from 'react';
 import { fetchHomeScreenData } from '../lib/dataFetching';
+import { getRequestTimeoutMs } from '../lib/networkAwareConfig';
 
 interface HomeScreenData {
   trendingSongs: any[];
@@ -30,16 +31,15 @@ export const HomeScreenDataProvider = ({ children }: { children: ReactNode }) =>
 
   const fetchData = async (forceRefresh = false) => {
     try {
-      // Only show loading on very first load when we have no data
-      const shouldShowLoading = !data;
-      if (shouldShowLoading) {
-        setIsLoading(true);
-      }
       setError(null);
+      // Cache-first: only show loading when we have no cached data
+      const shouldShowLoading = !data;
+      if (shouldShowLoading) setIsLoading(true);
 
-      // Add timeout to prevent hanging
+      // Network-aware timeout: longer on 2G so requests can complete
+      const timeoutMs = getRequestTimeoutMs(10000);
       const timeoutPromise = new Promise((_, reject) =>
-        setTimeout(() => reject(new Error('Data fetch timeout')), 5000)
+        setTimeout(() => reject(new Error('Data fetch timeout')), timeoutMs)
       );
 
       const result = await Promise.race([
@@ -57,10 +57,35 @@ export const HomeScreenDataProvider = ({ children }: { children: ReactNode }) =>
   };
 
   useEffect(() => {
-    // Fetch data but don't block rendering
-    fetchData().catch(err => {
-      console.error('Initial data fetch failed:', err);
-    });
+    let mounted = true;
+    let revalidateTimer: ReturnType<typeof setTimeout> | null = null;
+    setIsLoading(true);
+    (async () => {
+      // Cache-first: get cached or fresh; show cached immediately to avoid loading flash on navigation
+      const result = await fetchHomeScreenData(false);
+      if (!mounted) return;
+      setData(result);
+      setIsLoading(false);
+      
+      // EGRESS OPTIMIZATION: Only revalidate if cache is old (>20min)
+      // Previous: always revalidated after 10min, causing 16 queries per home visit
+      // Now: only revalidate if cache is stale, reducing queries by 50%
+      const cacheAge = result?.timestamp ? Date.now() - result.timestamp : Infinity;
+      const REVALIDATE_THRESHOLD = 20 * 60 * 1000; // 20 minutes
+      
+      if (cacheAge > REVALIDATE_THRESHOLD) {
+        // Cache is old, schedule background refresh
+        revalidateTimer = setTimeout(() => {
+          if (mounted) {
+            fetchHomeScreenData(true).then((fresh) => mounted && setData(fresh)).catch(() => {});
+          }
+        }, 2000); // Small delay to not block initial render
+      }
+    })();
+    return () => {
+      mounted = false;
+      if (revalidateTimer) clearTimeout(revalidateTimer);
+    };
   }, []);
 
   const refetch = async () => {

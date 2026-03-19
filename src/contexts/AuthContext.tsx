@@ -29,6 +29,10 @@ const INITIAL_STATE: AuthState = {
   displayName: null,
 };
 
+// Survives AuthProvider remount (e.g. React Strict Mode, OAuth redirect). Prevents showing
+// the full-page auth skeleton again after login when the provider remounts.
+let hasInitializedOnce = false;
+
 export function AuthProvider({ children }: { children: ReactNode }) {
   const [state, setState] = useState<AuthState>(INITIAL_STATE);
   const mountedRef = useRef(true);
@@ -63,7 +67,20 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const updateAuthState = useCallback(async (session: Session | null) => {
     const user = session?.user ?? null;
 
-    let displayName: string | null = null;
+    // Set auth state immediately so UI shows logged-in without a loading flash (e.g. after login)
+    const displayNameFallback = user?.user_metadata?.full_name ?? user?.user_metadata?.name ?? null;
+    hasInitializedOnce = true;
+    safeSetState({
+      user,
+      session,
+      isAuthenticated: !!user,
+      isLoading: false,
+      isInitialized: true,
+      displayName: displayNameFallback,
+    });
+    removeInitialLoader();
+
+    // Fetch canonical display_name from DB in background and update only displayName
     if (user?.id) {
       try {
         const { data } = await supabase
@@ -71,23 +88,14 @@ export function AuthProvider({ children }: { children: ReactNode }) {
           .select('display_name')
           .eq('id', user.id)
           .maybeSingle();
-        displayName = data?.display_name || null;
+        const displayName = data?.display_name || null;
+        if (displayName !== displayNameFallback) {
+          safeSetState({ displayName });
+        }
       } catch (error) {
         console.error('[AuthContext] Error fetching display name:', error);
       }
     }
-
-    safeSetState({
-      user,
-      session,
-      isAuthenticated: !!user,
-      isLoading: false,
-      isInitialized: true,
-      displayName,
-    });
-
-    // Remove initial loader once auth is initialized
-    removeInitialLoader();
   }, [safeSetState, removeInitialLoader]);
 
   const initializeAuth = useCallback(async () => {
@@ -126,6 +134,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       }
     } catch (error) {
       console.error('[AuthContext] Error during initialization:', error);
+      hasInitializedOnce = true;
       safeSetState({ isLoading: false, isInitialized: true });
       removeInitialLoader();
     } finally {
@@ -135,14 +144,21 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
   useEffect(() => {
     mountedRef.current = true;
+    // If we already initialized once (e.g. before Strict Mode remount or OAuth return), mark
+    // initialized immediately so home doesn't flash the auth skeleton again.
+    if (hasInitializedOnce) {
+      safeSetState({ isInitialized: true });
+    }
     initializeAuth();
 
     const { data: { subscription } } = supabase.auth.onAuthStateChange(
       (event: AuthChangeEvent, session: Session | null) => {
-        console.log('[AuthContext] Auth state change:', event, session ? 'has session' : 'no session');
-
         // Skip INITIAL_SESSION event since we handle it in initializeAuth
         if (event === 'INITIAL_SESSION') {
+          return;
+        }
+        // Skip TOKEN_REFRESHED during init to avoid double state update
+        if (event === 'TOKEN_REFRESHED' && initializingRef.current) {
           return;
         }
 
@@ -190,7 +206,6 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         console.error('[AuthContext] Sign out error:', error);
       }
 
-      console.log('[AuthContext] Complete logout performed, clearing auth state');
     } catch (error) {
       console.error('[AuthContext] Sign out failed:', error);
     } finally {
