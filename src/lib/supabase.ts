@@ -22,13 +22,18 @@ export const formatTreats = (amount: number): string => {
 // These must be set in .env file - no fallback credentials for security
 const supabaseUrl = import.meta.env.VITE_SUPABASE_URL;
 const supabaseAnonKey = import.meta.env.VITE_SUPABASE_ANON_KEY;
+const hasValidSupabaseConfig = Boolean(supabaseUrl && supabaseAnonKey);
 
-if (!supabaseUrl || !supabaseAnonKey) {
-  console.error('[Supabase] CRITICAL: Missing required environment variables VITE_SUPABASE_URL or VITE_SUPABASE_ANON_KEY');
-  throw new Error('Supabase configuration missing. Please check your .env file.');
+if (!hasValidSupabaseConfig) {
+  console.error('[Supabase] Missing required environment variables VITE_SUPABASE_URL or VITE_SUPABASE_ANON_KEY. App will not connect until .env is configured.');
 }
 
-export const supabase = createClient(supabaseUrl, supabaseAnonKey, {
+// Do not crash the entire app on boot when env is missing.
+// This keeps admin/login routes renderable and surfaces recoverable UI errors instead of a blank screen.
+const safeSupabaseUrl = supabaseUrl || 'https://invalid-project.supabase.co';
+const safeSupabaseAnonKey = supabaseAnonKey || 'invalid-anon-key';
+
+export const supabase = createClient(safeSupabaseUrl, safeSupabaseAnonKey, {
   auth: {
     autoRefreshToken: true,
     persistSession: true,
