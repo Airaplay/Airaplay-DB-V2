@@ -40,6 +40,8 @@ interface SongRow {
   created_at: string | null;
 }
 
+type SongGenreMap = Map<string, string[]>;
+
 // Creative, curiosity-driven titles that make users want to tap
 const CREATIVE_MIX_TITLES = [
   'Sounds You Slept On',
@@ -171,6 +173,10 @@ export async function generateGlobalMixes(): Promise<GlobalDailyMix[]> {
   const emerging = dedupeSongsById(emergingTracks);
   const crossovers = dedupeSongsById(crossoverTracks);
   const wildcards = dedupeSongsById(wildcardTracks);
+  const allCandidateSongs = dedupeSongsById([...globalHits, ...emerging, ...crossovers, ...wildcards]);
+  const songGenres = await getSongGenres(allCandidateSongs.map((song) => song.id));
+  const maxPerGenre = Math.max(3, Math.ceil(tracksPerMix * 0.35));
+  const maxPerArtist = Math.max(1, Math.floor(tracksPerMix * 0.2));
 
   // Build 4 balanced mixes with strict 40/30/20/10 quotas.
   const mixDefinitions = [
@@ -189,18 +195,28 @@ export async function generateGlobalMixes(): Promise<GlobalDailyMix[]> {
   for (let i = 0; i < mixDefinitions.length; i++) {
     const def = mixDefinitions[i];
     const songs: SongRow[] = [];
+    const mixGenreCounts = new Map<string, number>();
+    const mixArtistCounts = new Map<string, number>();
 
-    globalCursor = pushFromPool(songs, globalHits, globalCursor, quota.globalHits, usedSongIds);
-    emergingCursor = pushFromPool(songs, emerging, emergingCursor, quota.emerging, usedSongIds);
-    crossoverCursor = pushFromPool(songs, crossovers, crossoverCursor, quota.crossover, usedSongIds);
-    wildcardCursor = pushFromPool(songs, wildcards, wildcardCursor, quota.wildcard, usedSongIds);
+    globalCursor = pushFromPool(songs, globalHits, globalCursor, quota.globalHits, usedSongIds, songGenres, mixGenreCounts, maxPerGenre, mixArtistCounts, maxPerArtist);
+    emergingCursor = pushFromPool(songs, emerging, emergingCursor, quota.emerging, usedSongIds, songGenres, mixGenreCounts, maxPerGenre, mixArtistCounts, maxPerArtist);
+    crossoverCursor = pushFromPool(songs, crossovers, crossoverCursor, quota.crossover, usedSongIds, songGenres, mixGenreCounts, maxPerGenre, mixArtistCounts, maxPerArtist);
+    wildcardCursor = pushFromPool(songs, wildcards, wildcardCursor, quota.wildcard, usedSongIds, songGenres, mixGenreCounts, maxPerGenre, mixArtistCounts, maxPerArtist);
 
     fillFromFallbackPools(
       songs,
       tracksPerMix,
       [globalHits, emerging, crossovers, wildcards],
-      usedSongIds
+      usedSongIds,
+      songGenres,
+      mixGenreCounts,
+      maxPerGenre,
+      mixArtistCounts,
+      maxPerArtist
     );
+
+    // Guarantee artist diversity for card collage and user perception.
+    ensureMinimumDistinctArtists(songs, [globalHits, emerging, crossovers, wildcards], 3, usedSongIds);
     
     if (songs.length === 0) continue;
 
@@ -331,6 +347,40 @@ function getMixQuota(tracksPerMix: number): { globalHits: number; emerging: numb
   return { globalHits, emerging, crossover, wildcard };
 }
 
+async function getSongGenres(songIds: string[]): Promise<SongGenreMap> {
+  const genreMap: SongGenreMap = new Map();
+  if (!songIds.length) return genreMap;
+
+  const { data } = await supabase
+    .from('song_genres')
+    .select(`
+      song_id,
+      genres (
+        name
+      )
+    `)
+    .in('song_id', songIds);
+
+  (data || []).forEach((row: any) => {
+    const genreName = row?.genres?.name;
+    if (!genreName || !row?.song_id) return;
+    const existing = genreMap.get(row.song_id) || [];
+    existing.push(String(genreName).trim().toLowerCase());
+    genreMap.set(row.song_id, existing);
+  });
+
+  return genreMap;
+}
+
+function getPrimaryGenre(song: SongRow, songGenres: SongGenreMap): string {
+  const genres = songGenres.get(song.id) || [];
+  return genres[0] || '__unknown__';
+}
+
+function getArtistKey(song: SongRow): string {
+  return song.artist_id || '__unknown_artist__';
+}
+
 function dedupeSongsById(songs: SongRow[]): SongRow[] {
   const seen = new Set<string>();
   return songs.filter((song) => {
@@ -345,7 +395,12 @@ function pushFromPool(
   pool: SongRow[],
   cursor: number,
   take: number,
-  usedSongIds: Set<string>
+  usedSongIds: Set<string>,
+  songGenres: SongGenreMap,
+  mixGenreCounts: Map<string, number>,
+  maxPerGenre: number,
+  mixArtistCounts: Map<string, number>,
+  maxPerArtist: number
 ): number {
   let picked = 0;
   let nextCursor = cursor;
@@ -354,8 +409,16 @@ function pushFromPool(
     const candidate = pool[nextCursor];
     nextCursor += 1;
     if (!candidate?.id || usedSongIds.has(candidate.id)) continue;
+    const genre = getPrimaryGenre(candidate, songGenres);
+    const currentGenreCount = mixGenreCounts.get(genre) || 0;
+    if (currentGenreCount >= maxPerGenre) continue;
+    const artistKey = getArtistKey(candidate);
+    const currentArtistCount = mixArtistCounts.get(artistKey) || 0;
+    if (currentArtistCount >= maxPerArtist) continue;
     target.push(candidate);
     usedSongIds.add(candidate.id);
+    mixGenreCounts.set(genre, currentGenreCount + 1);
+    mixArtistCounts.set(artistKey, currentArtistCount + 1);
     picked += 1;
   }
 
@@ -366,16 +429,45 @@ function fillFromFallbackPools(
   target: SongRow[],
   desiredCount: number,
   pools: SongRow[][],
-  usedSongIds: Set<string>
+  usedSongIds: Set<string>,
+  songGenres: SongGenreMap,
+  mixGenreCounts: Map<string, number>,
+  maxPerGenre: number,
+  mixArtistCounts: Map<string, number>,
+  maxPerArtist: number
 ): void {
   if (target.length >= desiredCount) return;
 
+  // First pass: enforce diversity.
   for (const pool of pools) {
     for (const song of pool) {
       if (target.length >= desiredCount) return;
       if (!song?.id || usedSongIds.has(song.id)) continue;
+      const genre = getPrimaryGenre(song, songGenres);
+      const currentGenreCount = mixGenreCounts.get(genre) || 0;
+      if (currentGenreCount >= maxPerGenre) continue;
+      const artistKey = getArtistKey(song);
+      const currentArtistCount = mixArtistCounts.get(artistKey) || 0;
+      if (currentArtistCount >= maxPerArtist) continue;
       target.push(song);
       usedSongIds.add(song.id);
+      mixGenreCounts.set(genre, currentGenreCount + 1);
+      mixArtistCounts.set(artistKey, currentArtistCount + 1);
+    }
+  }
+
+  // Second pass: relax cap only when needed to fill to target size.
+  if (target.length >= desiredCount) return;
+  for (const pool of pools) {
+    for (const song of pool) {
+      if (target.length >= desiredCount) return;
+      if (!song?.id || usedSongIds.has(song.id)) continue;
+      const genre = getPrimaryGenre(song, songGenres);
+      const artistKey = getArtistKey(song);
+      target.push(song);
+      usedSongIds.add(song.id);
+      mixGenreCounts.set(genre, (mixGenreCounts.get(genre) || 0) + 1);
+      mixArtistCounts.set(artistKey, (mixArtistCounts.get(artistKey) || 0) + 1);
     }
   }
 }
@@ -384,6 +476,49 @@ function getRotatingTitle(mixIndex: number, nowIso: string): string {
   const daySeed = new Date(nowIso).getDate();
   const start = (daySeed * 4) % CREATIVE_MIX_TITLES.length;
   return CREATIVE_MIX_TITLES[(start + mixIndex) % CREATIVE_MIX_TITLES.length];
+}
+
+function ensureMinimumDistinctArtists(
+  songs: SongRow[],
+  pools: SongRow[][],
+  minDistinctArtists: number,
+  usedSongIds: Set<string>
+): void {
+  const artistSet = new Set<string>(songs.map((song) => getArtistKey(song)));
+  if (artistSet.size >= minDistinctArtists) return;
+
+  const byArtist = new Map<string, SongRow[]>();
+  for (const pool of pools) {
+    for (const song of pool) {
+      if (!song?.id || usedSongIds.has(song.id)) continue;
+      const artistKey = getArtistKey(song);
+      const list = byArtist.get(artistKey) || [];
+      list.push(song);
+      byArtist.set(artistKey, list);
+    }
+  }
+
+  const currentArtists = new Set<string>(songs.map((song) => getArtistKey(song)));
+  const candidateArtists = Array.from(byArtist.keys()).filter((artist) => !currentArtists.has(artist));
+  if (!candidateArtists.length) return;
+
+  for (const candidateArtist of candidateArtists) {
+    if (new Set<string>(songs.map((song) => getArtistKey(song))).size >= minDistinctArtists) break;
+    const replacement = byArtist.get(candidateArtist)?.[0];
+    if (!replacement) continue;
+
+    // Replace from the end to minimize impact on primary ranking at top positions.
+    const replaceIndex = songs.length - 1;
+    if (replaceIndex < 0) break;
+
+    const removed = songs[replaceIndex];
+    songs[replaceIndex] = replacement;
+    usedSongIds.add(replacement.id);
+    // Keep removed song ID available for future mixes only if it was unique to this mix.
+    if (removed?.id) {
+      usedSongIds.delete(removed.id);
+    }
+  }
 }
 
 /**
