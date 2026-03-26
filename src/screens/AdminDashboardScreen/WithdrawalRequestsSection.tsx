@@ -68,6 +68,27 @@ export const WithdrawalRequestsSection = (): JSX.Element => {
   const [isExporting, setIsExporting] = useState(false);
   const [anomalies, setAnomalies] = useState<Map<string, {type: string, severity: string, difference: number}>>(new Map());
 
+  const formatRpcError = (err: any): string => {
+    if (!err) return 'Unknown error';
+    if (typeof err === 'string') return err;
+    // Supabase/PostgREST errors commonly have: message, details, hint, code
+    const msg = err.message || err.error_description || err.error || 'Request failed';
+    const details = err.details || err.hint || err.code;
+    return details ? `${msg} (${details})` : msg;
+  };
+
+  const ensureRpcJsonOk = (data: any): void => {
+    // Many admin RPCs return jsonb like { success: true } or { error: "..." }.
+    // Some Supabase client versions may return arrays, so handle both.
+    const payload = Array.isArray(data) ? data[0] : data;
+    if (payload && typeof payload === 'object' && 'error' in payload && payload.error) {
+      throw new Error(String(payload.error));
+    }
+    if (payload && typeof payload === 'object' && 'success' in payload && payload.success === false) {
+      throw new Error(payload.message ? String(payload.message) : 'Operation failed');
+    }
+  };
+
   useEffect(() => {
     fetchWithdrawalRequests();
   }, []);
@@ -182,12 +203,19 @@ export const WithdrawalRequestsSection = (): JSX.Element => {
       setWithdrawalError(null);
       setWithdrawalActionSuccess(null);
 
-      let result;
+      let result: { data: any; error: any } | null = null;
       if (withdrawalAction === 'approve') {
         result = await supabase.rpc('admin_approve_withdrawal', {
           request_id: selectedWithdrawal.id,
           admin_notes: adminNotes
         });
+        // Back-compat: some deployments used request_uuid/notes parameter names.
+        if (result.error && /request_uuid|notes|function admin_approve_withdrawal/i.test(result.error.message ?? '')) {
+          result = await supabase.rpc('admin_approve_withdrawal', {
+            request_uuid: selectedWithdrawal.id,
+            notes: adminNotes,
+          } as any);
+        }
       } else if (withdrawalAction === 'complete') {
         result = await supabase.rpc('admin_complete_withdrawal_payment', {
           p_withdrawal_id: selectedWithdrawal.id,
@@ -201,7 +229,8 @@ export const WithdrawalRequestsSection = (): JSX.Element => {
         });
       }
 
-      if (result.error) throw result.error;
+      if (result?.error) throw result.error;
+      ensureRpcJsonOk(result?.data);
 
       setShowNotesModal(false);
       setSelectedWithdrawal(null);
@@ -211,11 +240,12 @@ export const WithdrawalRequestsSection = (): JSX.Element => {
       setDuplicateWarning(null);
 
       // Show detailed success message
-      if (withdrawalAction === 'approve' && result.data?.[0]?.details) {
-        setWithdrawalActionSuccess(result.data[0].details);
-      } else if (withdrawalAction === 'complete' && result.data?.[0]?.payment_reference) {
+      const payload = Array.isArray(result?.data) ? result?.data?.[0] : result?.data;
+      if (withdrawalAction === 'approve' && payload?.details) {
+        setWithdrawalActionSuccess(String(payload.details));
+      } else if (withdrawalAction === 'complete' && payload?.payment_reference) {
         setWithdrawalActionSuccess(
-          `Payment completed successfully! Reference: ${result.data[0].payment_reference}`
+          `Payment completed successfully! Reference: ${String(payload.payment_reference)}`
         );
       } else {
         setWithdrawalActionSuccess(
@@ -230,7 +260,7 @@ export const WithdrawalRequestsSection = (): JSX.Element => {
       fetchWithdrawalRequests();
     } catch (err) {
       console.error(`Error ${withdrawalAction}ing withdrawal:`, err);
-      setWithdrawalError(`Failed to ${withdrawalAction} withdrawal request`);
+      setWithdrawalError(formatRpcError(err));
     } finally {
       setProcessingWithdrawal(null);
     }
@@ -433,61 +463,61 @@ export const WithdrawalRequestsSection = (): JSX.Element => {
   };
 
   return (
-    <div className="space-y-4">
+    <div className="space-y-6">
       <div className="flex items-center justify-between">
-        <div className="flex items-center gap-2.5">
-          <div className="w-8 h-8 rounded-lg bg-yellow-50 flex items-center justify-center flex-shrink-0">
-            <DollarSign className="w-4 h-4 text-yellow-600" />
-          </div>
-          <div>
-            <h3 className="text-sm font-semibold text-gray-900 leading-tight">Withdrawal Requests</h3>
-            <p className="text-xs text-gray-400 mt-0.5">Review and process user withdrawal requests</p>
-          </div>
-        </div>
+        <h3 className="text-xl font-semibold text-gray-900 flex items-center">
+          <DollarSign className="w-5 h-5 mr-2 text-yellow-600" />
+          Withdrawal Requests
+        </h3>
 
-        <div className="flex items-center gap-2 flex-shrink-0">
+        <div className="flex items-center gap-4">
           <select
             value={withdrawalStatusFilter}
             onChange={(e) => setWithdrawalStatusFilter(e.target.value)}
-            className="px-3 py-2 bg-gray-50 border border-gray-200 rounded-lg text-sm text-gray-700 focus:outline-none focus:ring-2 focus:ring-[#309605]"
+            className="px-3 py-2 bg-white border border-gray-300 rounded-lg text-gray-700 focus:outline-none focus:ring-2 focus:ring-[#309605]"
           >
-            <option value="pending">Pending</option>
+            <option value="pending">Pending (Need Approval)</option>
             <option value="approved">Approved (Need Payment)</option>
-            <option value="completed">Completed</option>
+            <option value="completed">Completed (Paid)</option>
             <option value="rejected">Rejected</option>
             <option value="all">All Requests</option>
           </select>
+
           <button
             onClick={fetchWithdrawalRequests}
-            className="p-2 bg-gray-50 hover:bg-gray-100 border border-gray-200 rounded-lg text-gray-600 transition-colors"
+            className="p-2 bg-gray-100 hover:bg-gray-200 rounded-lg text-gray-700"
             title="Refresh"
           >
-            <RefreshCw className="w-4 h-4" />
+            <RefreshCw className="w-5 h-5" />
           </button>
         </div>
       </div>
 
       {/* Bulk Actions Bar */}
       {withdrawalStatusFilter === 'pending' && withdrawalRequests.length > 0 && (
-        <div className="flex items-center justify-between p-3 bg-blue-50 border border-blue-100 rounded-lg">
-          <span className="text-sm text-gray-600">
-            {selectedWithdrawals.size > 0 ? `${selectedWithdrawals.size} selected` : 'No withdrawals selected'}
-          </span>
-          <div className="flex items-center gap-2">
+        <div className="flex items-center justify-between p-4 bg-blue-50 border border-blue-200 rounded-lg">
+          <div className="flex items-center gap-4">
+            <span className="text-gray-700 font-medium">
+              {selectedWithdrawals.size > 0
+                ? `${selectedWithdrawals.size} selected`
+                : 'No withdrawals selected'}
+            </span>
+          </div>
+          <div className="flex items-center gap-3">
             <button
               onClick={handleBulkApprove}
               disabled={selectedWithdrawals.size === 0 || processingWithdrawal === 'bulk'}
-              className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium bg-green-600 hover:bg-green-700 text-white rounded-lg disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+              className="px-4 py-2 bg-green-600 hover:bg-green-700 text-white rounded-lg font-medium disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-2"
             >
-              <Check className="w-3.5 h-3.5" />
+              <Check className="w-4 h-4" />
               Approve Selected
             </button>
             <button
               onClick={handleBulkReject}
               disabled={selectedWithdrawals.size === 0 || processingWithdrawal === 'bulk'}
-              className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium bg-red-600 hover:bg-red-700 text-white rounded-lg disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+              className="px-4 py-2 bg-red-600 hover:bg-red-700 text-white rounded-lg font-medium disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-2"
             >
-              <X className="w-3.5 h-3.5" />
+              <X className="w-4 h-4" />
               Reject Selected
             </button>
           </div>
@@ -500,92 +530,94 @@ export const WithdrawalRequestsSection = (): JSX.Element => {
           <button
             onClick={exportToCSV}
             disabled={isExporting}
-            className="inline-flex items-center gap-1.5 px-3 py-2 text-xs font-medium bg-[#309605] hover:bg-[#3ba208] text-white rounded-lg disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+            className="px-4 py-2 bg-gradient-to-r from-[#309605] to-[#3ba208] hover:from-[#3ba208] hover:to-[#309605] text-white rounded-lg font-medium disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-2"
           >
-            <Download className="w-3.5 h-3.5" />
+            <Download className="w-4 h-4" />
             {isExporting ? 'Exporting...' : 'Export for Bank Processing'}
           </button>
         </div>
       )}
 
       {withdrawalActionSuccess && (
-        <div className="p-3 bg-green-50 border border-green-100 rounded-lg">
-          <p className="text-sm text-green-700">{withdrawalActionSuccess}</p>
+        <div className="p-4 bg-green-100 border border-green-200 rounded-lg">
+          <p className="text-green-700">{withdrawalActionSuccess}</p>
         </div>
       )}
 
       {withdrawalError && (
-        <div className="p-3 bg-red-50 border border-red-100 rounded-lg">
-          <p className="text-sm text-red-700">{withdrawalError}</p>
+        <div className="p-4 bg-red-100 border border-red-200 rounded-lg">
+          <p className="text-red-700">{withdrawalError}</p>
         </div>
       )}
 
       {isLoadingWithdrawals ? (
-        <div className="flex items-center gap-3 py-10 justify-center">
-          <LoadingLogo variant="pulse" size={24} />
-          <p className="text-sm text-gray-500">Loading withdrawal requests...</p>
+        <div className="flex items-center justify-center py-12">
+          <LoadingLogo variant="pulse" size={32} />
+          <p className="ml-4 text-gray-700">Loading withdrawal requests...</p>
         </div>
       ) : withdrawalRequests.length === 0 ? (
-        <div className="p-8 bg-white rounded-xl border border-gray-100 text-center">
-          <p className="text-sm text-gray-500">
+        <div className="p-6 bg-gray-100 rounded-lg text-center">
+          <p className="text-gray-700">
             No {withdrawalStatusFilter === 'all' ? '' : withdrawalStatusFilter} withdrawal requests found.
           </p>
         </div>
       ) : (
-        <div className="overflow-x-auto bg-white rounded-xl border border-gray-100 shadow-sm">
+        <div className="overflow-x-auto scrollbar-hide">
           <table className="w-full border-collapse">
             <thead>
-              <tr className="bg-gray-50 border-b border-gray-100">
+              <tr className="bg-gray-100 text-left">
                 {withdrawalStatusFilter === 'pending' && (
-                  <th className="px-4 py-3 w-10">
+                  <th className="p-4 text-gray-700 font-medium w-12">
                     <button
                       onClick={toggleSelectAll}
-                      className="p-0.5 hover:bg-gray-100 rounded"
+                      className="p-1 hover:bg-gray-200 rounded"
                       title={selectedWithdrawals.size === withdrawalRequests.length ? 'Deselect All' : 'Select All'}
                     >
                       {selectedWithdrawals.size === withdrawalRequests.length ? (
-                        <CheckSquare className="w-4 h-4 text-[#309605]" />
+                        <CheckSquare className="w-5 h-5 text-[#309605]" />
                       ) : (
-                        <Square className="w-4 h-4 text-gray-400" />
+                        <Square className="w-5 h-5 text-gray-600" />
                       )}
                     </button>
                   </th>
                 )}
-                <th className="px-4 py-3 text-left text-xs font-semibold text-gray-500 uppercase tracking-wide">Transaction ID</th>
-                <th className="px-4 py-3 text-left text-xs font-semibold text-gray-500 uppercase tracking-wide">User</th>
-                <th className="px-4 py-3 text-left text-xs font-semibold text-gray-500 uppercase tracking-wide">Country</th>
-                <th className="px-4 py-3 text-left text-xs font-semibold text-gray-500 uppercase tracking-wide">Amount Details</th>
-                <th className="px-4 py-3 text-left text-xs font-semibold text-gray-500 uppercase tracking-wide">Method</th>
-                <th className="px-4 py-3 text-left text-xs font-semibold text-gray-500 uppercase tracking-wide">Destination</th>
-                <th className="px-4 py-3 text-left text-xs font-semibold text-gray-500 uppercase tracking-wide">Date</th>
-                <th className="px-4 py-3 text-left text-xs font-semibold text-gray-500 uppercase tracking-wide">Status</th>
-                <th className="px-4 py-3 text-left text-xs font-semibold text-gray-500 uppercase tracking-wide">Actions</th>
+                <th className="p-4 text-gray-700 font-medium">Transaction ID</th>
+                <th className="p-4 text-gray-700 font-medium">User</th>
+                <th className="p-4 text-gray-700 font-medium">Country</th>
+                <th className="p-4 text-gray-700 font-medium">Amount Details</th>
+                <th className="p-4 text-gray-700 font-medium">Method</th>
+                <th className="p-4 text-gray-700 font-medium">Destination</th>
+                <th className="p-4 text-gray-700 font-medium">Date</th>
+                <th className="p-4 text-gray-700 font-medium">Status</th>
+                <th className="p-4 text-gray-700 font-medium">Actions</th>
               </tr>
             </thead>
-            <tbody className="divide-y divide-gray-50">
+            <tbody>
               {withdrawalRequests.map((request) => {
                 const anomaly = anomalies.get(request.id);
                 const hasAnomaly = anomaly !== undefined;
                 return (
                 <tr
                   key={request.id}
-                  className={`hover:bg-gray-50 transition-colors ${hasAnomaly ? 'bg-yellow-50/50' : ''}`}
+                  className={`border-b border-gray-200 hover:bg-gray-50 ${
+                    hasAnomaly ? 'bg-yellow-50' : ''
+                  }`}
                 >
                   {withdrawalStatusFilter === 'pending' && (
-                    <td className="px-4 py-3">
+                    <td className="p-4">
                       <button
                         onClick={() => toggleWithdrawalSelection(request.id)}
-                        className="p-0.5 hover:bg-gray-100 rounded"
+                        className="p-1 hover:bg-gray-200 rounded"
                       >
                         {selectedWithdrawals.has(request.id) ? (
-                          <CheckSquare className="w-4 h-4 text-[#309605]" />
+                          <CheckSquare className="w-5 h-5 text-[#309605]" />
                         ) : (
-                          <Square className="w-4 h-4 text-gray-400" />
+                          <Square className="w-5 h-5 text-gray-600" />
                         )}
                       </button>
                     </td>
                   )}
-                  <td className="px-4 py-3">
+                  <td className="p-4">
                     <div className="flex items-center gap-2">
                       <div className="font-mono text-xs text-gray-700 font-semibold">
                         {request.transaction_id || 'N/A'}
@@ -605,13 +637,13 @@ export const WithdrawalRequestsSection = (): JSX.Element => {
                       )}
                     </div>
                   </td>
-                  <td className="px-4 py-3">
+                  <td className="p-4">
                     <div>
-                      <p className="text-sm font-medium text-gray-900">{request.user_display_name || 'Unnamed User'}</p>
-                      <p className="text-xs text-gray-500">{request.user_email}</p>
+                      <p className="font-medium text-gray-900">{request.user_display_name || 'Unnamed User'}</p>
+                      <p className="text-gray-600 text-sm">{request.user_email}</p>
                     </div>
                   </td>
-                  <td className="px-4 py-3">
+                  <td className="p-4">
                     <div className="text-sm">
                       <p className="font-medium text-gray-900">{request.user_country || 'N/A'}</p>
                       {request.currency_code && (
@@ -624,7 +656,7 @@ export const WithdrawalRequestsSection = (): JSX.Element => {
                       )}
                     </div>
                   </td>
-                  <td className="px-4 py-3">
+                  <td className="p-4">
                     <div className="text-sm space-y-1">
                       <div className="flex justify-between gap-2">
                         <span className="text-gray-600">Gross (USD):</span>
@@ -658,7 +690,7 @@ export const WithdrawalRequestsSection = (): JSX.Element => {
                       )}
                     </div>
                   </td>
-                  <td className="px-4 py-3">
+                  <td className="p-4">
                     <span className={`px-2 py-1 rounded text-xs font-medium ${
                       request.method_type === 'usdt_wallet'
                         ? 'bg-blue-100 text-blue-700'
@@ -667,7 +699,7 @@ export const WithdrawalRequestsSection = (): JSX.Element => {
                       {request.method_type === 'usdt_wallet' ? 'USDT Wallet' : request.method_type === 'bank_account' ? 'Bank Account' : 'Legacy'}
                     </span>
                   </td>
-                  <td className="px-4 py-3">
+                  <td className="p-4">
                     {request.method_type === 'usdt_wallet' ? (
                       <div className="text-gray-700 font-mono text-sm">
                         {request.wallet_address && request.wallet_address.length > 16
@@ -690,8 +722,8 @@ export const WithdrawalRequestsSection = (): JSX.Element => {
                       </div>
                     )}
                   </td>
-                  <td className="px-4 py-3 text-xs text-gray-500">{formatDate(request.requested_date)}</td>
-                  <td className="px-4 py-3">
+                  <td className="p-4 text-gray-700 text-sm">{formatDate(request.requested_date)}</td>
+                  <td className="p-4">
                     <div>
                       <span className={`px-2 py-1 rounded-full text-xs font-medium ${
                         request.status === 'pending'
@@ -709,31 +741,31 @@ export const WithdrawalRequestsSection = (): JSX.Element => {
                       )}
                     </div>
                   </td>
-                  <td className="px-4 py-3">
+                  <td className="p-4">
                     {request.status === 'pending' ? (
-                      <div className="flex gap-1.5">
+                      <div className="flex space-x-2">
                         <button
                           onClick={() => handleApproveWithdrawal(request)}
                           disabled={processingWithdrawal === request.id}
-                          className="p-1.5 bg-green-50 hover:bg-green-100 rounded-lg text-green-600 disabled:opacity-50 transition-colors"
+                          className="p-2 bg-green-100 hover:bg-green-200 rounded-lg text-green-700 disabled:opacity-50"
                           title="Approve"
                         >
-                          <Check className="w-4 h-4" />
+                          <Check className="w-5 h-5" />
                         </button>
                         <button
                           onClick={() => handleRejectWithdrawal(request)}
                           disabled={processingWithdrawal === request.id}
-                          className="p-1.5 bg-red-50 hover:bg-red-100 rounded-lg text-red-500 disabled:opacity-50 transition-colors"
+                          className="p-2 bg-red-100 hover:bg-red-200 rounded-lg text-red-700 disabled:opacity-50"
                           title="Reject"
                         >
-                          <X className="w-4 h-4" />
+                          <X className="w-5 h-5" />
                         </button>
                       </div>
                     ) : request.status === 'approved' ? (
                       <button
                         onClick={() => handleCompletePayment(request)}
                         disabled={processingWithdrawal === request.id}
-                        className="px-2.5 py-1.5 bg-[#309605] hover:bg-[#3ba208] rounded-lg text-white text-xs font-medium disabled:opacity-50 transition-colors"
+                        className="px-3 py-2 bg-gradient-to-r from-[#309605] to-[#3ba208] hover:from-[#3ba208] hover:to-[#309605] rounded-lg text-white text-sm font-medium disabled:opacity-50"
                         title="Mark as Paid"
                       >
                         Mark as Paid
