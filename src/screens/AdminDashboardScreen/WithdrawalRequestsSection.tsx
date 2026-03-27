@@ -63,7 +63,7 @@ export const WithdrawalRequestsSection = (): JSX.Element => {
   const [duplicateWarning, setDuplicateWarning] = useState<string | null>(null);
   const [selectedWithdrawals, setSelectedWithdrawals] = useState<Set<string>>(new Set());
   const [showBulkNotesModal, setShowBulkNotesModal] = useState<boolean>(false);
-  const [bulkAction, setBulkAction] = useState<'approve' | 'reject' | null>(null);
+  const [bulkAction, setBulkAction] = useState<'approve' | 'reject' | 'complete' | null>(null);
   const [bulkAdminNotes, setBulkAdminNotes] = useState<string>('');
   const [isExporting, setIsExporting] = useState(false);
   const [anomalies, setAnomalies] = useState<Map<string, {type: string, severity: string, difference: number}>>(new Map());
@@ -304,6 +304,22 @@ export const WithdrawalRequestsSection = (): JSX.Element => {
     setShowBulkNotesModal(true);
   };
 
+  const handleBulkComplete = () => {
+    if (selectedWithdrawals.size === 0) {
+      setWithdrawalError('Please select at least one withdrawal to mark as paid');
+      return;
+    }
+    setBulkAction('complete');
+    setBulkAdminNotes('');
+    setShowBulkNotesModal(true);
+  };
+
+  const createBulkPaymentReference = (withdrawalId: string, index: number): string => {
+    const ts = new Date().toISOString().replace(/[-:TZ.]/g, '').slice(0, 14);
+    const shortId = withdrawalId.replace(/-/g, '').slice(0, 8).toUpperCase();
+    return `BULK-${ts}-${index + 1}-${shortId}`;
+  };
+
   const confirmBulkAction = async () => {
     if (!bulkAction || selectedWithdrawals.size === 0) return;
 
@@ -320,11 +336,51 @@ export const WithdrawalRequestsSection = (): JSX.Element => {
           p_withdrawal_ids: withdrawalIds,
           p_admin_notes: bulkAdminNotes || null
         });
-      } else {
+      } else if (bulkAction === 'reject') {
         result = await supabase.rpc('admin_bulk_reject_withdrawals', {
           p_withdrawal_ids: withdrawalIds,
           p_admin_notes: bulkAdminNotes || null
         });
+      } else {
+        // Bulk "Mark as Paid": process one-by-one and auto-generate payment references.
+        let successCount = 0;
+        const failures: string[] = [];
+        for (let i = 0; i < withdrawalIds.length; i += 1) {
+          const id = withdrawalIds[i];
+          const autoReference = createBulkPaymentReference(id, i);
+          const completeRes = await supabase.rpc('admin_complete_withdrawal_payment', {
+            p_withdrawal_id: id,
+            p_payment_reference: autoReference,
+            p_admin_notes: bulkAdminNotes || null
+          });
+          if (completeRes.error) {
+            failures.push(`${id.slice(0, 8)}: ${formatRpcError(completeRes.error)}`);
+          } else {
+            successCount += 1;
+          }
+        }
+
+        if (successCount === 0) {
+          throw new Error(failures.join(' | ') || 'Failed to mark selected withdrawals as paid');
+        }
+
+        setShowBulkNotesModal(false);
+        setBulkAction(null);
+        setBulkAdminNotes('');
+        setSelectedWithdrawals(new Set());
+
+        setWithdrawalActionSuccess(
+          failures.length > 0
+            ? `Marked ${successCount}/${withdrawalIds.length} as paid. Some failed: ${failures.slice(0, 2).join(' | ')}`
+            : `Marked ${successCount} withdrawal request${successCount > 1 ? 's' : ''} as paid successfully`
+        );
+
+        setTimeout(() => {
+          setWithdrawalActionSuccess(null);
+        }, 6000);
+
+        fetchWithdrawalRequests();
+        return;
       }
 
       if (result.error) throw result.error;
@@ -347,7 +403,7 @@ export const WithdrawalRequestsSection = (): JSX.Element => {
       fetchWithdrawalRequests();
     } catch (err) {
       console.error(`Error in bulk ${bulkAction}:`, err);
-      setWithdrawalError(`Failed to ${bulkAction} selected withdrawal requests`);
+      setWithdrawalError(`Failed to ${bulkAction} selected withdrawal requests: ${formatRpcError(err)}`);
     } finally {
       setProcessingWithdrawal(null);
     }
@@ -494,7 +550,7 @@ export const WithdrawalRequestsSection = (): JSX.Element => {
       </div>
 
       {/* Bulk Actions Bar */}
-      {withdrawalStatusFilter === 'pending' && withdrawalRequests.length > 0 && (
+      {(withdrawalStatusFilter === 'pending' || withdrawalStatusFilter === 'approved') && withdrawalRequests.length > 0 && (
         <div className="flex items-center justify-between p-4 bg-blue-50 border border-blue-200 rounded-lg">
           <div className="flex items-center gap-4">
             <span className="text-gray-700 font-medium">
@@ -506,7 +562,7 @@ export const WithdrawalRequestsSection = (): JSX.Element => {
           <div className="flex items-center gap-3">
             <button
               onClick={handleBulkApprove}
-              disabled={selectedWithdrawals.size === 0 || processingWithdrawal === 'bulk'}
+              disabled={withdrawalStatusFilter !== 'pending' || selectedWithdrawals.size === 0 || processingWithdrawal === 'bulk'}
               className="px-4 py-2 bg-green-600 hover:bg-green-700 text-white rounded-lg font-medium disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-2"
             >
               <Check className="w-4 h-4" />
@@ -514,11 +570,19 @@ export const WithdrawalRequestsSection = (): JSX.Element => {
             </button>
             <button
               onClick={handleBulkReject}
-              disabled={selectedWithdrawals.size === 0 || processingWithdrawal === 'bulk'}
+              disabled={withdrawalStatusFilter !== 'pending' || selectedWithdrawals.size === 0 || processingWithdrawal === 'bulk'}
               className="px-4 py-2 bg-red-600 hover:bg-red-700 text-white rounded-lg font-medium disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-2"
             >
               <X className="w-4 h-4" />
               Reject Selected
+            </button>
+            <button
+              onClick={handleBulkComplete}
+              disabled={withdrawalStatusFilter !== 'approved' || selectedWithdrawals.size === 0 || processingWithdrawal === 'bulk'}
+              className="px-4 py-2 bg-[#309605] hover:bg-[#3ba208] text-white rounded-lg font-medium disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-2"
+            >
+              <Check className="w-4 h-4" />
+              Mark Paid Selected
             </button>
           </div>
         </div>
@@ -566,7 +630,7 @@ export const WithdrawalRequestsSection = (): JSX.Element => {
           <table className="w-full border-collapse">
             <thead>
               <tr className="bg-gray-100 text-left">
-                {withdrawalStatusFilter === 'pending' && (
+                {(withdrawalStatusFilter === 'pending' || withdrawalStatusFilter === 'approved') && (
                   <th className="p-4 text-gray-700 font-medium w-12">
                     <button
                       onClick={toggleSelectAll}
@@ -603,7 +667,7 @@ export const WithdrawalRequestsSection = (): JSX.Element => {
                     hasAnomaly ? 'bg-yellow-50' : ''
                   }`}
                 >
-                  {withdrawalStatusFilter === 'pending' && (
+                  {(withdrawalStatusFilter === 'pending' || withdrawalStatusFilter === 'approved') && (
                     <td className="p-4">
                       <button
                         onClick={() => toggleWithdrawalSelection(request.id)}
@@ -682,12 +746,14 @@ export const WithdrawalRequestsSection = (): JSX.Element => {
                           </span>
                         </div>
                       )}
-                      {request.balance_after !== null && (
-                        <div className="flex justify-between gap-2 text-xs text-gray-500">
-                          <span>Balance After:</span>
-                          <span>${request.balance_after.toFixed(2)}</span>
-                        </div>
-                      )}
+                      <div className="flex justify-between gap-2 text-xs text-gray-500">
+                        <span>Balance Before:</span>
+                        <span>{request.balance_before !== null ? `$${request.balance_before.toFixed(2)}` : 'N/A'}</span>
+                      </div>
+                      <div className="flex justify-between gap-2 text-xs text-gray-500">
+                        <span>Balance After:</span>
+                        <span>{request.balance_after !== null ? `$${request.balance_after.toFixed(2)}` : 'N/A'}</span>
+                      </div>
                     </div>
                   </td>
                   <td className="p-4">
@@ -794,7 +860,7 @@ export const WithdrawalRequestsSection = (): JSX.Element => {
       {/* Notes Modal for Withdrawal Actions */}
       {showNotesModal && selectedWithdrawal && (
         <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
-          <div className="bg-white rounded-lg shadow-xl max-w-lg w-full p-6">
+          <div className="bg-white rounded-lg shadow-xl max-w-lg w-full p-6 max-h-[90vh] overflow-y-auto">
             <div className="flex items-center justify-between mb-4">
               <h3 className="text-xl font-bold text-gray-900">
                 {withdrawalAction === 'approve' ? 'Approve' : withdrawalAction === 'complete' ? 'Mark as Paid' : 'Reject'} Withdrawal
@@ -978,10 +1044,10 @@ export const WithdrawalRequestsSection = (): JSX.Element => {
       {/* Bulk Action Confirmation Modal */}
       {showBulkNotesModal && bulkAction && (
         <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
-          <div className="bg-white rounded-lg shadow-xl max-w-lg w-full p-6">
+          <div className="bg-white rounded-lg shadow-xl max-w-lg w-full p-6 max-h-[90vh] overflow-y-auto">
             <div className="flex items-center justify-between mb-4">
               <h3 className="text-xl font-bold text-gray-900">
-                Bulk {bulkAction === 'approve' ? 'Approve' : 'Reject'} {selectedWithdrawals.size} Withdrawal{selectedWithdrawals.size > 1 ? 's' : ''}
+                Bulk {bulkAction === 'approve' ? 'Approve' : bulkAction === 'complete' ? 'Mark as Paid' : 'Reject'} {selectedWithdrawals.size} Withdrawal{selectedWithdrawals.size > 1 ? 's' : ''}
               </h3>
               <button
                 onClick={() => {
@@ -997,10 +1063,12 @@ export const WithdrawalRequestsSection = (): JSX.Element => {
 
             <div className="mb-4 p-4 bg-blue-50 border border-blue-200 rounded-lg">
               <p className="text-blue-900 font-medium">
-                You are about to {bulkAction} {selectedWithdrawals.size} withdrawal request{selectedWithdrawals.size > 1 ? 's' : ''}.
+                You are about to {bulkAction === 'complete' ? 'mark as paid' : bulkAction} {selectedWithdrawals.size} withdrawal request{selectedWithdrawals.size > 1 ? 's' : ''}.
               </p>
               <p className="text-blue-700 text-sm mt-2">
-                Each withdrawal will be processed individually. If any fail, the operation will continue with the remaining withdrawals.
+                {bulkAction === 'complete'
+                  ? 'Each payment reference will be auto-generated per withdrawal. If any fail, processing continues for the rest.'
+                  : 'Each withdrawal will be processed individually. If any fail, the operation will continue with the remaining withdrawals.'}
               </p>
             </div>
 
@@ -1036,10 +1104,12 @@ export const WithdrawalRequestsSection = (): JSX.Element => {
                 className={`flex-1 px-4 py-2 rounded-lg text-white transition-all duration-200 ${
                   bulkAction === 'approve'
                     ? 'bg-green-600 hover:bg-green-700'
+                    : bulkAction === 'complete'
+                    ? 'bg-[#309605] hover:bg-[#3ba208]'
                     : 'bg-red-600 hover:bg-red-700'
                 } disabled:opacity-50 disabled:cursor-not-allowed`}
               >
-                {processingWithdrawal === 'bulk' ? 'Processing...' : `${bulkAction === 'approve' ? 'Approve' : 'Reject'} ${selectedWithdrawals.size} Withdrawal${selectedWithdrawals.size > 1 ? 's' : ''}`}
+                {processingWithdrawal === 'bulk' ? 'Processing...' : `${bulkAction === 'approve' ? 'Approve' : bulkAction === 'complete' ? 'Mark Paid' : 'Reject'} ${selectedWithdrawals.size} Withdrawal${selectedWithdrawals.size > 1 ? 's' : ''}`}
               </button>
             </div>
           </div>
