@@ -176,6 +176,29 @@ export const EmailManagementTab = (): JSX.Element => {
         payment_method: 'Bank Transfer',
         account_details: '**** **** **** 1234'
       },
+      completed_withdrawal: {
+        user_name: 'John Doe',
+        transaction_id: 'WD-20260327-0001',
+        amount: '245.00',
+        currency: 'USD',
+        currency_symbol: '$',
+        payment_method: 'Bank Transfer',
+        account_details: 'John Doe • ****1234',
+        payment_reference: 'BANK-REF-12345',
+        completed_at: new Date().toLocaleString('en-US', { year: 'numeric', month: 'long', day: 'numeric' })
+      },
+      creator_approved: {
+        user_name: 'John Doe',
+        user_email: 'john.doe@example.com',
+        app_url: 'https://airaplay.com'
+      },
+      promotion_active: {
+        user_name: 'John Doe',
+        content_title: 'My New Track',
+        section: 'Trending',
+        duration: '7',
+        treats_spent: '500'
+      },
       newsletter: {
         user_name: 'John Doe',
         trending_content: 'Check out the hottest tracks this week!',
@@ -206,7 +229,7 @@ export const EmailManagementTab = (): JSX.Element => {
 
       const { data, error } = await supabase.functions.invoke('process-email-queue', {
         method: 'POST',
-        body: {},
+        body: { ignore_scheduled_for: true },
       });
 
       if (error) {
@@ -404,6 +427,9 @@ export const EmailManagementTab = (): JSX.Element => {
       welcome: 'Welcome Email',
       purchase_treat: 'Treat Purchase',
       approved_withdrawal: 'Withdrawal Approved',
+      completed_withdrawal: 'Withdrawal Receipt (Paid)',
+      creator_approved: 'Creator Approved',
+      promotion_active: 'Promotion Activated',
       newsletter: 'Weekly Newsletter',
       weekly_report: 'Creator Weekly Report'
     };
