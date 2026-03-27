@@ -59,7 +59,6 @@ export const EmailManagementTab = (): JSX.Element => {
   const [selectedTemplate, setSelectedTemplate] = useState<EmailTemplate | null>(null);
   const [isEditingTemplate, setIsEditingTemplate] = useState(false);
   const [isPreviewingTemplate, setIsPreviewingTemplate] = useState(false);
-  const [showLivePreview, setShowLivePreview] = useState(false);
   const [templateFormData, setTemplateFormData] = useState({
     subject: '',
     html_content: ''
@@ -73,8 +72,6 @@ export const EmailManagementTab = (): JSX.Element => {
     from_name: '',
     bounce_address: ''
   });
-  const [isTestingConnection, setIsTestingConnection] = useState(false);
-  const [connectionTestResult, setConnectionTestResult] = useState<{ success: boolean; message: string } | null>(null);
 
   const [isSaving, setIsSaving] = useState(false);
   const [saveSuccess, setSaveSuccess] = useState<string | null>(null);
@@ -88,6 +85,10 @@ export const EmailManagementTab = (): JSX.Element => {
   });
   const [isSendingTest, setIsSendingTest] = useState(false);
   const [testResult, setTestResult] = useState<{ success: boolean; message: string } | null>(null);
+
+  // Email queue processing state
+  const [isProcessingQueue, setIsProcessingQueue] = useState(false);
+  const [queueResult, setQueueResult] = useState<{ processed: number; sent: number; failed: number } | null>(null);
 
   useEffect(() => {
     fetchData();
@@ -196,6 +197,40 @@ export const EmailManagementTab = (): JSX.Element => {
     return samples[templateType] || {};
   };
 
+  const handleRunEmailQueue = async () => {
+    try {
+      setIsProcessingQueue(true);
+      setQueueResult(null);
+      setError(null);
+
+      const { data, error } = await supabase.functions.invoke('process-email-queue', {
+        method: 'POST',
+        body: {},
+      });
+
+      if (error) {
+        console.error('Error running email queue:', error);
+        setError(error.message || 'Failed to run email queue');
+        return;
+      }
+
+      const processed = data?.processed ?? 0;
+      const sent = data?.sent ?? 0;
+      const failed = data?.failed ?? 0;
+      setQueueResult({ processed, sent, failed });
+
+      // Refresh logs so admin can see the latest sends/failures.
+      await fetchEmailLogs();
+    } catch (err: any) {
+      console.error('Error running email queue:', err);
+      setError(err?.message || 'Failed to run email queue');
+    } finally {
+      setIsProcessingQueue(false);
+      // Auto-clear queue result after a short delay
+      setTimeout(() => setQueueResult(null), 6000);
+    }
+  };
+
   const handlePreviewTemplate = (template: EmailTemplate) => {
     setSelectedTemplate(template);
     setIsPreviewingTemplate(true);
@@ -210,10 +245,10 @@ export const EmailManagementTab = (): JSX.Element => {
     setIsEditingTemplate(true);
   };
 
-  const getPreviewContent = (template: EmailTemplate, customSubject?: string, customHtml?: string): { subject: string; html: string } => {
+  const getPreviewContent = (template: EmailTemplate): { subject: string; html: string } => {
     const sampleVars = getSampleVariables(template.template_type);
-    let subject = customSubject || template.subject;
-    let html = customHtml || template.html_content;
+    let subject = template.subject;
+    let html = template.html_content;
 
     // Replace variables with sample data
     for (const [key, value] of Object.entries(sampleVars)) {
@@ -223,16 +258,6 @@ export const EmailManagementTab = (): JSX.Element => {
     }
 
     return { subject, html };
-  };
-
-  const insertVariable = (variableName: string) => {
-    if (!selectedTemplate) return;
-    
-    const placeholder = `{{${variableName}}}`;
-    setTemplateFormData(prev => ({
-      ...prev,
-      html_content: prev.html_content + placeholder
-    }));
   };
 
   const handleSaveTemplate = async () => {
@@ -274,21 +299,6 @@ export const EmailManagementTab = (): JSX.Element => {
     setSaveSuccess(null);
 
     try {
-      // Validate email format
-      const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
-      if (!emailRegex.test(configFormData.from_email)) {
-        throw new Error('Invalid from_email format');
-      }
-      
-      if (configFormData.bounce_address && !emailRegex.test(configFormData.bounce_address)) {
-        throw new Error('Invalid bounce_address format');
-      }
-
-      // Validate API token format (basic check)
-      if (!configFormData.api_token || configFormData.api_token.length < 10) {
-        throw new Error('API token appears invalid. Please check your ZeptoMail dashboard.');
-      }
-
       if (config) {
         // Update existing config
         const { error } = await supabase
@@ -328,49 +338,6 @@ export const EmailManagementTab = (): JSX.Element => {
       setSaveError(err instanceof Error ? err.message : 'Failed to save configuration');
     } finally {
       setIsSaving(false);
-    }
-  };
-
-  const handleTestConnection = async () => {
-    setIsTestingConnection(true);
-    setConnectionTestResult(null);
-
-    try {
-      // First verify config is saved
-      if (!config && !configFormData.api_token) {
-        throw new Error('Please save the configuration first');
-      }
-
-      // For testing, we'll try to fetch the current config to verify database connection
-      const { data: testConfig, error: configError } = await supabase
-        .from('zeptomail_config')
-        .select('*')
-        .eq('is_active', true)
-        .single();
-
-      if (configError || !testConfig) {
-        throw new Error('Configuration not found. Please save it first.');
-      }
-
-      // Verify all required fields are present
-      if (!testConfig.api_token || !testConfig.from_email || !testConfig.from_name) {
-        throw new Error('Configuration is incomplete. Please check all required fields.');
-      }
-
-      setConnectionTestResult({
-        success: true,
-        message: 'ZeptoMail configuration is valid and active. Use "Send Test Email" to verify email delivery.'
-      });
-
-      setTimeout(() => setConnectionTestResult(null), 5000);
-    } catch (err) {
-      console.error('Connection test error:', err);
-      setConnectionTestResult({
-        success: false,
-        message: err instanceof Error ? err.message : 'Connection test failed'
-      });
-    } finally {
-      setIsTestingConnection(false);
     }
   };
 
@@ -453,17 +420,13 @@ export const EmailManagementTab = (): JSX.Element => {
   };
 
   const formatDate = (dateString: string) => {
-    try {
-      return new Date(dateString).toLocaleString('en-US', {
-        month: 'short',
-        day: 'numeric',
-        year: 'numeric',
-        hour: '2-digit',
-        minute: '2-digit'
-      });
-    } catch {
-      return 'Invalid date';
-    }
+    return new Date(dateString).toLocaleString('en-US', {
+      month: 'short',
+      day: 'numeric',
+      year: 'numeric',
+      hour: '2-digit',
+      minute: '2-digit'
+    });
   };
 
   return (
@@ -664,61 +627,17 @@ export const EmailManagementTab = (): JSX.Element => {
       {activeSubTab === 'config' && (
         <div className="bg-white rounded-lg shadow p-6">
           <div className="flex items-center justify-between mb-4">
-            <div>
-              <h3 className="text-xl font-semibold text-gray-900">ZeptoMail Configuration</h3>
-              <p className="text-sm text-gray-500 mt-1">Configure your ZeptoMail API credentials for sending emails</p>
-            </div>
-            {!isEditingConfig && config && (
-              <div className="flex items-center gap-2">
-                <button
-                  onClick={handleTestConnection}
-                  disabled={isTestingConnection}
-                  className="px-4 py-2 bg-green-600 hover:bg-green-700 text-white rounded-lg flex items-center gap-2 disabled:opacity-50"
-                >
-                  {isTestingConnection ? (
-                    <>
-                      <LoadingLogo variant="pulse" size={16} />
-                      Testing...
-                    </>
-                  ) : (
-                    <>
-                      <CheckCircle className="w-4 h-4" />
-                      Test Connection
-                    </>
-                  )}
-                </button>
-                <button
-                  onClick={() => setIsEditingConfig(true)}
-                  className="px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-lg flex items-center gap-2"
-                >
-                  <Edit className="w-4 h-4" />
-                  Edit Config
-                </button>
-              </div>
+            <h3 className="text-xl font-semibold text-gray-900">ZeptoMail Configuration</h3>
+            {!isEditingConfig && (
+              <button
+                onClick={() => setIsEditingConfig(true)}
+                className="px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-lg flex items-center gap-2"
+              >
+                <Edit className="w-4 h-4" />
+                Edit Config
+              </button>
             )}
           </div>
-
-          {/* Connection Test Result */}
-          {connectionTestResult && (
-            <div className={`mb-4 p-4 rounded-lg border ${
-              connectionTestResult.success
-                ? 'bg-green-50 border-green-200'
-                : 'bg-red-50 border-red-200'
-            }`}>
-              <div className="flex items-start gap-2">
-                {connectionTestResult.success ? (
-                  <CheckCircle className="w-5 h-5 text-green-600 flex-shrink-0 mt-0.5" />
-                ) : (
-                  <AlertTriangle className="w-5 h-5 text-red-600 flex-shrink-0 mt-0.5" />
-                )}
-                <p className={`text-sm ${
-                  connectionTestResult.success ? 'text-green-700' : 'text-red-700'
-                }`}>
-                  {connectionTestResult.message}
-                </p>
-              </div>
-            </div>
-          )}
 
           {isLoading ? (
             <div className="flex items-center justify-center py-12">
@@ -732,101 +651,77 @@ export const EmailManagementTab = (): JSX.Element => {
             </div>
           ) : isEditingConfig ? (
             <div className="space-y-4">
-              <div className="bg-blue-50 border border-blue-200 rounded-lg p-4 mb-4">
-                <div className="flex items-start gap-2">
-                  <Settings className="w-5 h-5 text-blue-600 flex-shrink-0 mt-0.5" />
-                  <div className="flex-1">
-                    <p className="text-sm text-blue-900 font-medium">Important Configuration Notes:</p>
-                    <ul className="text-xs text-blue-700 mt-2 space-y-1 list-disc list-inside">
-                      <li>Get your API token from the <a href="https://www.zeptomail.zoho.com" target="_blank" rel="noopener noreferrer" className="underline font-medium">ZeptoMail Dashboard</a></li>
-                      <li>Ensure your from_email domain is verified in ZeptoMail</li>
-                      <li>Test the configuration after saving to verify it works</li>
-                      <li>All fields marked with * are required</li>
-                    </ul>
-                  </div>
-                </div>
-              </div>
-
               <div>
-                <label className="block text-gray-700 text-sm font-semibold mb-2">
-                  API Token * <span className="text-red-500">Required</span>
+                <label className="block text-gray-700 text-sm font-medium mb-2">
+                  API Token *
                 </label>
                 <input
                   type="password"
                   value={configFormData.api_token}
                   onChange={(e) => setConfigFormData({ ...configFormData, api_token: e.target.value })}
-                  className="w-full px-4 py-2.5 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
-                  placeholder="Zoho-enczapikey xxxxxxxxxx..."
+                  className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500"
+                  placeholder="Your ZeptoMail API token"
                 />
-                <p className="mt-1.5 text-xs text-gray-500">
-                  Your ZeptoMail API token (starts with "Zoho-enczapikey")
+                <p className="mt-1 text-xs text-gray-500">
+                  Get your API token from <a href="https://www.zeptomail.zoho.com" target="_blank" rel="noopener noreferrer" className="text-blue-600 hover:underline">ZeptoMail Dashboard</a>
                 </p>
               </div>
 
               <div>
-                <label className="block text-gray-700 text-sm font-semibold mb-2">
-                  From Email * <span className="text-red-500">Required</span>
+                <label className="block text-gray-700 text-sm font-medium mb-2">
+                  From Email *
                 </label>
                 <input
                   type="email"
                   value={configFormData.from_email}
                   onChange={(e) => setConfigFormData({ ...configFormData, from_email: e.target.value })}
-                  className="w-full px-4 py-2.5 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
+                  className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500"
                   placeholder="noreply@yourdomain.com"
                 />
-                <p className="mt-1.5 text-xs text-gray-500">
-                  The sender email address (must be verified in ZeptoMail)
-                </p>
               </div>
 
               <div>
-                <label className="block text-gray-700 text-sm font-semibold mb-2">
-                  From Name * <span className="text-red-500">Required</span>
+                <label className="block text-gray-700 text-sm font-medium mb-2">
+                  From Name *
                 </label>
                 <input
                   type="text"
                   value={configFormData.from_name}
                   onChange={(e) => setConfigFormData({ ...configFormData, from_name: e.target.value })}
-                  className="w-full px-4 py-2.5 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
+                  className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500"
                   placeholder="Airaplay"
                 />
-                <p className="mt-1.5 text-xs text-gray-500">
-                  The display name that recipients will see
-                </p>
               </div>
 
               <div>
-                <label className="block text-gray-700 text-sm font-semibold mb-2">
-                  Bounce Address <span className="text-gray-500">(Optional)</span>
+                <label className="block text-gray-700 text-sm font-medium mb-2">
+                  Bounce Address (Optional)
                 </label>
                 <input
                   type="email"
                   value={configFormData.bounce_address}
                   onChange={(e) => setConfigFormData({ ...configFormData, bounce_address: e.target.value })}
-                  className="w-full px-4 py-2.5 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
+                  className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500"
                   placeholder="bounce@yourdomain.com"
                 />
-                <p className="mt-1.5 text-xs text-gray-500">
-                  Email address to receive bounce notifications (optional)
-                </p>
               </div>
 
               <div className="flex gap-3 pt-4">
                 <button
                   onClick={() => setIsEditingConfig(false)}
-                  className="px-6 py-2.5 border border-gray-300 rounded-lg text-gray-700 hover:bg-gray-50 transition-colors"
+                  className="px-4 py-2 border border-gray-300 rounded-lg text-gray-700 hover:bg-gray-50"
                 >
                   Cancel
                 </button>
                 <button
                   onClick={handleSaveConfig}
                   disabled={isSaving || !configFormData.api_token || !configFormData.from_email || !configFormData.from_name}
-                  className="flex-1 px-6 py-2.5 bg-blue-600 hover:bg-blue-700 text-white rounded-lg disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center gap-2 transition-colors"
+                  className="px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-lg disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-2"
                 >
                   {isSaving ? (
                     <>
                       <LoadingLogo variant="pulse" size={16} />
-                      Saving Configuration...
+                      Saving...
                     </>
                   ) : (
                     <>
@@ -842,70 +737,38 @@ export const EmailManagementTab = (): JSX.Element => {
               <div className="flex items-center justify-between p-4 bg-green-50 border border-green-200 rounded-lg">
                 <div className="flex items-center gap-2">
                   <CheckCircle className="w-5 h-5 text-green-600" />
-                  <div>
-                    <span className="text-green-700 font-medium">ZeptoMail is configured and active</span>
-                    <p className="text-xs text-green-600 mt-0.5">Configuration last updated: {formatDate(config.updated_at || config.created_at)}</p>
-                  </div>
+                  <span className="text-green-700">ZeptoMail is configured and active</span>
                 </div>
                 <button
                   onClick={() => setIsTestEmailOpen(true)}
                   className="px-3 py-1.5 bg-green-600 hover:bg-green-700 text-white text-sm rounded-lg flex items-center gap-2"
                 >
                   <Send className="w-3.5 h-3.5" />
-                  Send Test Email
+                  Test Connection
                 </button>
               </div>
 
-              <div className="grid grid-cols-2 gap-6">
-                <div className="bg-gray-50 border border-gray-200 rounded-lg p-4">
-                  <p className="text-xs font-medium text-gray-500 mb-1">From Email</p>
+              <div className="grid grid-cols-2 gap-4">
+                <div>
+                  <p className="text-sm text-gray-500">From Email</p>
                   <p className="text-gray-900 font-medium">{config.from_email}</p>
                 </div>
-                <div className="bg-gray-50 border border-gray-200 rounded-lg p-4">
-                  <p className="text-xs font-medium text-gray-500 mb-1">From Name</p>
+                <div>
+                  <p className="text-sm text-gray-500">From Name</p>
                   <p className="text-gray-900 font-medium">{config.from_name}</p>
                 </div>
                 {config.bounce_address && (
-                  <div className="bg-gray-50 border border-gray-200 rounded-lg p-4 col-span-2">
-                    <p className="text-xs font-medium text-gray-500 mb-1">Bounce Address</p>
+                  <div>
+                    <p className="text-sm text-gray-500">Bounce Address</p>
                     <p className="text-gray-900 font-medium">{config.bounce_address}</p>
                   </div>
                 )}
-                <div className="bg-gray-50 border border-gray-200 rounded-lg p-4">
-                  <p className="text-xs font-medium text-gray-500 mb-1">API Token</p>
-                  <p className="text-gray-900 font-mono text-sm">{'•'.repeat(20)}...{config.api_token.slice(-6)}</p>
-                </div>
-                <div className="bg-gray-50 border border-gray-200 rounded-lg p-4">
-                  <p className="text-xs font-medium text-gray-500 mb-1">Status</p>
-                  <span className="inline-flex items-center gap-1 px-2 py-1 bg-green-100 text-green-700 rounded text-xs font-medium">
-                    <CheckCircle className="w-3 h-3" />
-                    Active
-                  </span>
-                </div>
-              </div>
-
-              <div className="bg-yellow-50 border border-yellow-200 rounded-lg p-4 mt-4">
-                <div className="flex items-start gap-2">
-                  <AlertTriangle className="w-5 h-5 text-yellow-600 flex-shrink-0 mt-0.5" />
-                  <div>
-                    <p className="text-sm text-yellow-900 font-medium">Testing Recommendations:</p>
-                    <ul className="text-xs text-yellow-700 mt-1.5 space-y-1 list-disc list-inside">
-                      <li>Use "Test Connection" to verify configuration is valid</li>
-                      <li>Use "Send Test Email" to send an actual test email and verify delivery</li>
-                      <li>Check Email Logs tab to see delivery status</li>
-                      <li>Monitor your ZeptoMail dashboard for detailed delivery information</li>
-                    </ul>
-                  </div>
-                </div>
               </div>
             </div>
           ) : (
             <div className="p-6 bg-yellow-50 border border-yellow-200 rounded-lg text-center">
               <AlertTriangle className="w-8 h-8 text-yellow-600 mx-auto mb-2" />
-              <p className="text-yellow-700 mb-4 font-medium">ZeptoMail is not configured</p>
-              <p className="text-sm text-yellow-600 mb-4">
-                Configure ZeptoMail to start sending emails to your users
-              </p>
+              <p className="text-yellow-700 mb-4">ZeptoMail is not configured</p>
               <button
                 onClick={() => setIsEditingConfig(true)}
                 className="px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-lg flex items-center gap-2 mx-auto"
@@ -918,171 +781,68 @@ export const EmailManagementTab = (): JSX.Element => {
         </div>
       )}
 
-      {/* Template Edit Modal - Enhanced with Live Preview */}
+      {/* Template Edit Modal */}
       {isEditingTemplate && selectedTemplate && (
         <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
-          <div className="bg-white rounded-lg shadow-xl max-w-7xl w-full max-h-[90vh] overflow-hidden flex flex-col">
-            <div className="p-6 border-b border-gray-200">
-              <div className="flex items-center justify-between">
-                <div>
-                  <h3 className="text-xl font-bold text-gray-900">
-                    Edit {getTemplateTypeName(selectedTemplate.template_type)}
-                  </h3>
-                  <p className="text-sm text-gray-500 mt-1">
-                    Template ID: {selectedTemplate.id} • Version {selectedTemplate.version}
-                  </p>
-                </div>
-                <div className="flex items-center gap-2">
-                  <button
-                    onClick={() => setShowLivePreview(!showLivePreview)}
-                    className={`px-3 py-1.5 rounded-lg text-sm flex items-center gap-2 ${
-                      showLivePreview
-                        ? 'bg-blue-100 text-blue-700'
-                        : 'bg-gray-100 text-gray-700 hover:bg-gray-200'
-                    }`}
-                  >
-                    <Eye className="w-4 h-4" />
-                    {showLivePreview ? 'Hide Preview' : 'Show Preview'}
-                  </button>
-                  <button
-                    onClick={() => {
-                      setIsEditingTemplate(false);
-                      setSelectedTemplate(null);
-                      setShowLivePreview(false);
-                    }}
-                    className="p-2 hover:bg-gray-100 rounded-lg"
-                  >
-                    <X className="w-5 h-5 text-gray-500" />
-                  </button>
-                </div>
-              </div>
-            </div>
-
-            <div className="flex-1 overflow-y-auto p-6">
-              <div className={`grid gap-6 ${showLivePreview ? 'grid-cols-2' : 'grid-cols-1'}`}>
-                {/* Editor Column */}
-                <div className="space-y-4">
-                  {/* Available Variables Panel */}
-                  <div className="bg-blue-50 border border-blue-200 rounded-lg p-4">
-                    <p className="text-xs font-semibold text-blue-900 mb-2">Available Variables:</p>
-                    <div className="flex flex-wrap gap-2">
-                      {selectedTemplate.variables.map((variable) => (
-                        <button
-                          key={variable}
-                          onClick={() => insertVariable(variable)}
-                          className="px-2 py-1 bg-white border border-blue-300 rounded text-xs font-mono text-blue-700 hover:bg-blue-100 transition-colors"
-                          title={`Click to insert {{${variable}}}`}
-                        >
-                          {`{{${variable}}}`}
-                        </button>
-                      ))}
-                    </div>
-                    <p className="text-xs text-blue-600 mt-2">
-                      Click any variable to insert it into the HTML content
-                    </p>
-                  </div>
-
-                  {/* Subject Field */}
-                  <div>
-                    <label className="block text-gray-700 text-sm font-semibold mb-2">
-                      Email Subject
-                    </label>
-                    <input
-                      type="text"
-                      value={templateFormData.subject}
-                      onChange={(e) => setTemplateFormData({ ...templateFormData, subject: e.target.value })}
-                      className="w-full px-4 py-2.5 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
-                      placeholder="Email subject line..."
-                    />
-                  </div>
-
-                  {/* HTML Content Field */}
-                  <div>
-                    <label className="block text-gray-700 text-sm font-semibold mb-2">
-                      HTML Content
-                    </label>
-                    <textarea
-                      value={templateFormData.html_content}
-                      onChange={(e) => setTemplateFormData({ ...templateFormData, html_content: e.target.value })}
-                      rows={showLivePreview ? 25 : 30}
-                      className="w-full px-4 py-3 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500 font-mono text-sm leading-relaxed resize-none"
-                      placeholder="<html>...</html>"
-                    />
-                    <div className="flex items-center justify-between mt-2">
-                      <p className="text-xs text-gray-500">
-                        Character count: {templateFormData.html_content.length}
-                      </p>
-                      <p className="text-xs text-gray-500">
-                        Lines: {templateFormData.html_content.split('\n').length}
-                      </p>
-                    </div>
-                  </div>
-                </div>
-
-                {/* Live Preview Column */}
-                {showLivePreview && (
-                  <div className="space-y-4">
-                    <div className="bg-gray-50 border border-gray-300 rounded-lg p-4">
-                      <p className="text-xs font-semibold text-gray-700 mb-2">Live Preview (with sample data):</p>
-                      
-                      {/* Preview Subject */}
-                      <div className="bg-white border border-gray-200 rounded-lg p-3 mb-3">
-                        <p className="text-xs font-medium text-gray-500 mb-1">Subject:</p>
-                        <p className="text-sm text-gray-900 font-medium">
-                          {getPreviewContent(selectedTemplate, templateFormData.subject, templateFormData.html_content).subject}
-                        </p>
-                      </div>
-                      
-                      {/* Preview Body */}
-                      <div className="border border-gray-300 rounded-lg overflow-hidden bg-white">
-                        <div className="bg-gray-100 px-3 py-2 border-b border-gray-300">
-                          <p className="text-xs font-medium text-gray-700">Email Body:</p>
-                        </div>
-                        <div className="p-4 max-h-[600px] overflow-y-auto">
-                          <iframe
-                            srcDoc={getPreviewContent(selectedTemplate, templateFormData.subject, templateFormData.html_content).html}
-                            className="w-full min-h-[500px] border-0"
-                            title="Live Email Preview"
-                            sandbox="allow-same-origin"
-                          />
-                        </div>
-                      </div>
-                    </div>
-                  </div>
-                )}
-              </div>
-            </div>
-
-            {/* Action Buttons */}
-            <div className="p-6 border-t border-gray-200 bg-gray-50">
-              <div className="flex items-center justify-between">
+          <div className="bg-white rounded-lg shadow-xl max-w-4xl w-full max-h-[90vh] overflow-y-auto">
+            <div className="p-6">
+              <div className="flex items-center justify-between mb-4">
+                <h3 className="text-xl font-bold text-gray-900">
+                  Edit {getTemplateTypeName(selectedTemplate.template_type)}
+                </h3>
                 <button
                   onClick={() => {
                     setIsEditingTemplate(false);
                     setSelectedTemplate(null);
-                    setShowLivePreview(false);
                   }}
-                  className="px-6 py-2.5 border border-gray-300 rounded-lg text-gray-700 hover:bg-white transition-colors"
+                  className="p-2 hover:bg-gray-100 rounded-lg"
                 >
-                  Cancel
+                  <X className="w-5 h-5 text-gray-500" />
                 </button>
-                <div className="flex items-center gap-3">
+              </div>
+
+              <div className="space-y-4">
+                <div>
+                  <label className="block text-gray-700 text-sm font-medium mb-2">
+                    Subject
+                  </label>
+                  <input
+                    type="text"
+                    value={templateFormData.subject}
+                    onChange={(e) => setTemplateFormData({ ...templateFormData, subject: e.target.value })}
+                    className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500"
+                  />
+                </div>
+
+                <div>
+                  <label className="block text-gray-700 text-sm font-medium mb-2">
+                    HTML Content
+                  </label>
+                  <textarea
+                    value={templateFormData.html_content}
+                    onChange={(e) => setTemplateFormData({ ...templateFormData, html_content: e.target.value })}
+                    rows={20}
+                    className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 font-mono text-sm"
+                  />
+                  <p className="mt-2 text-xs text-gray-500">
+                    Available variables: {selectedTemplate.variables.map(v => `{{${v}}}`).join(', ')}
+                  </p>
+                </div>
+
+                <div className="flex gap-3 pt-4">
                   <button
                     onClick={() => {
-                      const previewContent = getPreviewContent(selectedTemplate, templateFormData.subject, templateFormData.html_content);
-                      setSelectedTemplate({...selectedTemplate, subject: templateFormData.subject, html_content: templateFormData.html_content});
-                      setIsPreviewingTemplate(true);
                       setIsEditingTemplate(false);
+                      setSelectedTemplate(null);
                     }}
-                    className="px-6 py-2.5 bg-green-100 hover:bg-green-200 text-green-700 rounded-lg flex items-center gap-2 transition-colors"
+                    className="px-4 py-2 border border-gray-300 rounded-lg text-gray-700 hover:bg-gray-50"
                   >
-                    <Eye className="w-4 h-4" />
-                    Full Preview
+                    Cancel
                   </button>
                   <button
                     onClick={handleSaveTemplate}
-                    disabled={isSaving || !templateFormData.subject.trim() || !templateFormData.html_content.trim()}
-                    className="px-6 py-2.5 bg-blue-600 hover:bg-blue-700 text-white rounded-lg disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-2 transition-colors"
+                    disabled={isSaving}
+                    className="px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-lg disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-2"
                   >
                     {isSaving ? (
                       <>
