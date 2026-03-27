@@ -10,7 +10,8 @@ import {
   Clock,
   Settings,
   Save,
-  X
+  X,
+  RefreshCw
 } from 'lucide-react';
 import { supabase } from '../../lib/supabase';
 import { LoadingLogo } from '../../components/LoadingLogo';
@@ -564,7 +565,35 @@ export const EmailManagementTab = (): JSX.Element => {
       {/* Email Logs Tab */}
       {activeSubTab === 'logs' && (
         <div className="bg-white rounded-lg shadow p-6">
-          <h3 className="text-xl font-semibold text-gray-900 mb-4">Email Logs</h3>
+          <div className="flex items-center justify-between mb-4">
+            <h3 className="text-xl font-semibold text-gray-900">Email Logs</h3>
+            <button
+              onClick={handleRunEmailQueue}
+              disabled={isProcessingQueue}
+              className="px-4 py-2 bg-[#309605] hover:bg-[#3ba208] text-white rounded-lg disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-2"
+              title="Process pending emails now"
+            >
+              {isProcessingQueue ? (
+                <>
+                  <LoadingLogo variant="pulse" size={16} />
+                  Running...
+                </>
+              ) : (
+                <>
+                  <RefreshCw className="w-4 h-4" />
+                  Run email queue now
+                </>
+              )}
+            </button>
+          </div>
+
+          {queueResult && (
+            <div className="mb-4 p-3 bg-green-50 border border-green-200 rounded-lg">
+              <p className="text-green-700 text-sm">
+                Queue run complete: processed {queueResult.processed}, sent {queueResult.sent}, failed {queueResult.failed}.
+              </p>
+            </div>
+          )}
 
           {isLoading ? (
             <div className="flex items-center justify-center py-12">
