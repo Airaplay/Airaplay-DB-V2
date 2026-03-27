@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import { useState, useEffect } from 'react';
 import {
   DollarSign,
   Check,
@@ -67,6 +67,17 @@ export const WithdrawalRequestsSection = (): JSX.Element => {
   const [bulkAdminNotes, setBulkAdminNotes] = useState<string>('');
   const [isExporting, setIsExporting] = useState(false);
   const [anomalies, setAnomalies] = useState<Map<string, {type: string, severity: string, difference: number}>>(new Map());
+
+  const runEmailQueueNowBestEffort = async (): Promise<void> => {
+    try {
+      await supabase.functions.invoke('process-email-queue', {
+        method: 'POST',
+        body: { ignore_scheduled_for: true },
+      });
+    } catch {
+      // Never block admin actions on email delivery; failures are visible in Email Logs.
+    }
+  };
 
   const formatRpcError = (err: any): string => {
     if (!err) return 'Unknown error';
@@ -258,6 +269,8 @@ export const WithdrawalRequestsSection = (): JSX.Element => {
       }, 5000);
 
       fetchWithdrawalRequests();
+      // Ensure user email is delivered immediately (approved/paid triggers queue rows).
+      void runEmailQueueNowBestEffort();
     } catch (err) {
       console.error(`Error ${withdrawalAction}ing withdrawal:`, err);
       setWithdrawalError(formatRpcError(err));
@@ -380,6 +393,8 @@ export const WithdrawalRequestsSection = (): JSX.Element => {
         }, 6000);
 
         fetchWithdrawalRequests();
+        // Ensure receipt emails deliver immediately after bulk paid.
+        void runEmailQueueNowBestEffort();
         return;
       }
 
@@ -401,6 +416,8 @@ export const WithdrawalRequestsSection = (): JSX.Element => {
       }, 5000);
 
       fetchWithdrawalRequests();
+      // Ensure approval emails deliver immediately after bulk approve/reject.
+      void runEmailQueueNowBestEffort();
     } catch (err) {
       console.error(`Error in bulk ${bulkAction}:`, err);
       setWithdrawalError(`Failed to ${bulkAction} selected withdrawal requests: ${formatRpcError(err)}`);
