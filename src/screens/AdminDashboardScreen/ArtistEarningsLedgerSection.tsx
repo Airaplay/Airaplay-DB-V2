@@ -11,9 +11,17 @@ import {
   ArrowDownCircle,
   Wallet,
   Info,
+  FileSpreadsheet,
+  FileText,
 } from 'lucide-react';
 import { supabase } from '../../lib/supabase';
 import { format, parseISO } from 'date-fns';
+import {
+  buildExportFilenameBase,
+  exportArtistLedgerExcel,
+  exportArtistLedgerPdf,
+  type LedgerExportPayload,
+} from '../../lib/artistLedgerExport';
 
 type LedgerCategory =
   | 'stream_earning'
@@ -147,6 +155,57 @@ export const ArtistEarningsLedgerSection = (): JSX.Element => {
   const [ledger, setLedger] = useState<LedgerPayload | null>(null);
   const [loadingLedger, setLoadingLedger] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [exporting, setExporting] = useState<'excel' | 'pdf' | null>(null);
+
+  const getExportPayload = useCallback((): LedgerExportPayload | null => {
+    if (!ledger?.success || !ledger.user || !ledger.totals) return null;
+    return {
+      user: ledger.user,
+      artist: ledger.artist,
+      totals: ledger.totals,
+      entries: (ledger.entries || []).map((e) => ({
+        category: e.category,
+        label: e.label,
+        amount_usd: e.amount_usd,
+        amount_treats: e.amount_treats,
+        currency: e.currency,
+        occurred_at: e.occurred_at,
+        ref_id: e.ref_id,
+      })),
+    };
+  }, [ledger]);
+
+  const handleExportExcel = useCallback(() => {
+    const payload = getExportPayload();
+    if (!payload) return;
+    try {
+      setExporting('excel');
+      setError(null);
+      const base = buildExportFilenameBase(payload.user.display_name);
+      exportArtistLedgerExcel(payload, base);
+    } catch (e) {
+      console.error(e);
+      setError(e instanceof Error ? e.message : 'Excel export failed');
+    } finally {
+      setExporting(null);
+    }
+  }, [getExportPayload]);
+
+  const handleExportPdf = useCallback(() => {
+    const payload = getExportPayload();
+    if (!payload) return;
+    try {
+      setExporting('pdf');
+      setError(null);
+      const base = buildExportFilenameBase(payload.user.display_name);
+      exportArtistLedgerPdf(payload, base);
+    } catch (e) {
+      console.error(e);
+      setError(e instanceof Error ? e.message : 'PDF export failed');
+    } finally {
+      setExporting(null);
+    }
+  }, [getExportPayload]);
 
   const runSearch = useCallback(async (q: string) => {
     const term = q.trim();
@@ -299,15 +358,39 @@ export const ArtistEarningsLedgerSection = (): JSX.Element => {
             </p>
           </div>
         </div>
-        <button
-          type="button"
-          onClick={() => selected && loadLedger(selected.id)}
-          disabled={!selected || loadingLedger}
-          className="inline-flex items-center gap-2 px-3 py-2 bg-gray-100 hover:bg-gray-200 rounded-lg text-gray-700 text-sm disabled:opacity-50"
-        >
-          <RefreshCw className={`w-4 h-4 ${loadingLedger ? 'animate-spin' : ''}`} />
-          Refresh
-        </button>
+        <div className="flex flex-wrap items-center gap-2">
+          <button
+            type="button"
+            onClick={() => selected && loadLedger(selected.id)}
+            disabled={!selected || loadingLedger}
+            className="inline-flex items-center gap-2 px-3 py-2 bg-gray-100 hover:bg-gray-200 rounded-lg text-gray-700 text-sm disabled:opacity-50"
+          >
+            <RefreshCw className={`w-4 h-4 ${loadingLedger ? 'animate-spin' : ''}`} />
+            Refresh
+          </button>
+          {ledger?.success && ledger.user && ledger.totals && !loadingLedger && (
+            <>
+              <button
+                type="button"
+                onClick={handleExportExcel}
+                disabled={exporting !== null}
+                className="inline-flex items-center gap-2 px-3 py-2 bg-[#309605] hover:bg-[#3ba208] text-white rounded-lg text-sm font-medium disabled:opacity-50"
+              >
+                <FileSpreadsheet className={`w-4 h-4 ${exporting === 'excel' ? 'animate-pulse' : ''}`} />
+                {exporting === 'excel' ? 'Exporting…' : 'Export Excel'}
+              </button>
+              <button
+                type="button"
+                onClick={handleExportPdf}
+                disabled={exporting !== null}
+                className="inline-flex items-center gap-2 px-3 py-2 bg-gray-800 hover:bg-gray-900 text-white rounded-lg text-sm font-medium disabled:opacity-50"
+              >
+                <FileText className={`w-4 h-4 ${exporting === 'pdf' ? 'animate-pulse' : ''}`} />
+                {exporting === 'pdf' ? 'Exporting…' : 'Export PDF'}
+              </button>
+            </>
+          )}
+        </div>
       </div>
 
       <div className="bg-blue-50 border border-blue-100 rounded-lg p-4 flex gap-3">
