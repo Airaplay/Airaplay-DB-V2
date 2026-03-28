@@ -113,6 +113,15 @@ function normalizeLedgerRpcData(data: unknown): LedgerPayload | null {
   return data as LedgerPayload;
 }
 
+function formatLedgerWhen(iso: string | null | undefined): string {
+  if (!iso) return '—';
+  try {
+    return format(parseISO(iso), 'MMM d, yyyy HH:mm');
+  } catch {
+    return iso;
+  }
+}
+
 const fmtUsd = (n: number | null | undefined): string =>
   new Intl.NumberFormat('en-US', {
     style: 'currency',
@@ -255,11 +264,19 @@ export const ArtistEarningsLedgerSection = (): JSX.Element => {
     const pattern = `%${term.replace(/%/g, '')}%`;
 
     try {
-      const byUserFields = await supabase
+      let byUserFields = await supabase
         .from('users')
         .select('id, display_name, email, artist_profiles!inner(stage_name, artist_id)')
         .or(`display_name.ilike.${pattern},email.ilike.${pattern},username.ilike.${pattern}`)
         .limit(25);
+
+      if (byUserFields.error) {
+        byUserFields = await supabase
+          .from('users')
+          .select('id, display_name, email, artist_profiles!inner(stage_name, artist_id)')
+          .or(`display_name.ilike.${pattern},email.ilike.${pattern}`)
+          .limit(25);
+      }
 
       if (byUserFields.error) throw byUserFields.error;
 
@@ -352,8 +369,13 @@ export const ArtistEarningsLedgerSection = (): JSX.Element => {
         setLedger(null);
         return;
       }
-      if (!payload.success && payload.error) {
-        setError(String(payload.error));
+      if (!payload.success) {
+        setError(payload.error ? String(payload.error) : 'Ledger request was not successful');
+        setLedger(null);
+        return;
+      }
+      if (!payload.user || !payload.totals) {
+        setError('Incomplete ledger data from server (missing user or totals)');
         setLedger(null);
         return;
       }
@@ -583,21 +605,20 @@ export const ArtistEarningsLedgerSection = (): JSX.Element => {
                 </thead>
                 <tbody>
                   {(ledger.entries || []).map((row, idx) => {
-                    const when = row.occurred_at
-                      ? format(parseISO(row.occurred_at), 'MMM d, yyyy HH:mm')
-                      : '—';
+                    const when = formatLedgerWhen(row.occurred_at);
                     const amt =
                       row.currency === 'USD'
                         ? fmtUsd(row.amount_usd ?? 0)
                         : fmtTreats(row.amount_treats ?? 0);
+                    const cat = row.category as LedgerCategory;
                     return (
                       <tr key={`${row.ref_id}-${idx}`} className="border-t border-gray-50 hover:bg-gray-50/80">
                         <td className="px-3 py-2 text-gray-600 whitespace-nowrap">{when}</td>
                         <td className="px-3 py-2">
                           <span
-                            className={`inline-block px-2 py-0.5 rounded text-xs border ${categoryBadge(row.category)}`}
+                            className={`inline-block px-2 py-0.5 rounded text-xs border ${categoryBadge(cat)}`}
                           >
-                            {row.category.replace(/_/g, ' ')}
+                            {String(cat).replace(/_/g, ' ')}
                           </span>
                         </td>
                         <td className="px-3 py-2 text-gray-800">{row.label}</td>
