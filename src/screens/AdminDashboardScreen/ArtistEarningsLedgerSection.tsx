@@ -147,6 +147,40 @@ const categoryBadge = (c: LedgerCategory): string => {
   }
 };
 
+function LedgerExportButtonRow({
+  onExcel,
+  onPdf,
+  exporting,
+}: {
+  onExcel: () => void;
+  onPdf: () => void;
+  exporting: 'excel' | 'pdf' | null;
+}): JSX.Element {
+  const busy = exporting !== null;
+  return (
+    <div className="flex flex-wrap gap-2">
+      <button
+        type="button"
+        onClick={onExcel}
+        disabled={busy}
+        className="inline-flex items-center justify-center gap-2 min-h-[44px] px-4 py-2.5 bg-[#309605] hover:bg-[#3ba208] text-white rounded-lg text-sm font-semibold shadow-sm disabled:opacity-50"
+      >
+        <FileSpreadsheet className={`w-4 h-4 shrink-0 ${exporting === 'excel' ? 'animate-pulse' : ''}`} />
+        {exporting === 'excel' ? 'Exporting…' : 'Export Excel'}
+      </button>
+      <button
+        type="button"
+        onClick={onPdf}
+        disabled={busy}
+        className="inline-flex items-center justify-center gap-2 min-h-[44px] px-4 py-2.5 bg-gray-800 hover:bg-gray-900 text-white rounded-lg text-sm font-semibold shadow-sm disabled:opacity-50"
+      >
+        <FileText className={`w-4 h-4 shrink-0 ${exporting === 'pdf' ? 'animate-pulse' : ''}`} />
+        {exporting === 'pdf' ? 'Exporting…' : 'Export PDF'}
+      </button>
+    </div>
+  );
+}
+
 export const ArtistEarningsLedgerSection = (): JSX.Element => {
   const [search, setSearch] = useState('');
   const [searching, setSearching] = useState(false);
@@ -342,6 +376,8 @@ export const ArtistEarningsLedgerSection = (): JSX.Element => {
   }, [selected?.id, loadLedger]);
 
   const totals = ledger?.totals;
+  const canExport =
+    Boolean(ledger?.success && ledger.user && totals && !loadingLedger);
 
   return (
     <div className="space-y-6">
@@ -358,39 +394,15 @@ export const ArtistEarningsLedgerSection = (): JSX.Element => {
             </p>
           </div>
         </div>
-        <div className="flex flex-wrap items-center gap-2">
-          <button
-            type="button"
-            onClick={() => selected && loadLedger(selected.id)}
-            disabled={!selected || loadingLedger}
-            className="inline-flex items-center gap-2 px-3 py-2 bg-gray-100 hover:bg-gray-200 rounded-lg text-gray-700 text-sm disabled:opacity-50"
-          >
-            <RefreshCw className={`w-4 h-4 ${loadingLedger ? 'animate-spin' : ''}`} />
-            Refresh
-          </button>
-          {ledger?.success && ledger.user && ledger.totals && !loadingLedger && (
-            <>
-              <button
-                type="button"
-                onClick={handleExportExcel}
-                disabled={exporting !== null}
-                className="inline-flex items-center gap-2 px-3 py-2 bg-[#309605] hover:bg-[#3ba208] text-white rounded-lg text-sm font-medium disabled:opacity-50"
-              >
-                <FileSpreadsheet className={`w-4 h-4 ${exporting === 'excel' ? 'animate-pulse' : ''}`} />
-                {exporting === 'excel' ? 'Exporting…' : 'Export Excel'}
-              </button>
-              <button
-                type="button"
-                onClick={handleExportPdf}
-                disabled={exporting !== null}
-                className="inline-flex items-center gap-2 px-3 py-2 bg-gray-800 hover:bg-gray-900 text-white rounded-lg text-sm font-medium disabled:opacity-50"
-              >
-                <FileText className={`w-4 h-4 ${exporting === 'pdf' ? 'animate-pulse' : ''}`} />
-                {exporting === 'pdf' ? 'Exporting…' : 'Export PDF'}
-              </button>
-            </>
-          )}
-        </div>
+        <button
+          type="button"
+          onClick={() => selected && loadLedger(selected.id)}
+          disabled={!selected || loadingLedger}
+          className="inline-flex items-center gap-2 px-3 py-2 bg-gray-100 hover:bg-gray-200 rounded-lg text-gray-700 text-sm disabled:opacity-50 self-start"
+        >
+          <RefreshCw className={`w-4 h-4 ${loadingLedger ? 'animate-spin' : ''}`} />
+          Refresh
+        </button>
       </div>
 
       <div className="bg-blue-50 border border-blue-100 rounded-lg p-4 flex gap-3">
@@ -464,6 +476,25 @@ export const ArtistEarningsLedgerSection = (): JSX.Element => {
 
       {ledger?.success && totals && ledger.user && (
         <>
+          {canExport && (
+            <div className="rounded-xl border-2 border-[#309605]/50 bg-gradient-to-br from-[#e6f7f1] via-white to-white p-4 sm:p-5 shadow-sm">
+              <div className="flex flex-col gap-4 lg:flex-row lg:items-center lg:justify-between">
+                <div>
+                  <p className="text-xs font-bold uppercase tracking-wider text-[#309605]">Export report</p>
+                  <p className="mt-1 text-base font-semibold text-gray-900">Download this ledger</p>
+                  <p className="mt-0.5 text-sm text-gray-600">
+                    Excel includes Summary + Ledger sheets. PDF is a printable summary and table.
+                  </p>
+                </div>
+                <LedgerExportButtonRow
+                  onExcel={handleExportExcel}
+                  onPdf={handleExportPdf}
+                  exporting={exporting}
+                />
+              </div>
+            </div>
+          )}
+
           <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3">
             <div className="bg-white rounded-lg border border-gray-100 shadow-sm p-4">
               <div className="flex items-center gap-2 text-gray-500 text-xs font-medium uppercase">
@@ -525,8 +556,20 @@ export const ArtistEarningsLedgerSection = (): JSX.Element => {
           </div>
 
           <div className="bg-white rounded-lg border border-gray-200 shadow-sm overflow-hidden">
-            <div className="px-4 py-3 border-b border-gray-100 flex items-center justify-between">
-              <h3 className="font-semibold text-gray-900">Ledger (most recent 500)</h3>
+            <div className="px-4 py-3 border-b border-gray-100 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+              <h3 className="font-semibold text-gray-900 shrink-0">Ledger (most recent 500)</h3>
+              {canExport && (
+                <div className="sm:max-w-md w-full">
+                  <p className="mb-1.5 text-[10px] font-semibold uppercase tracking-wide text-gray-400 sm:text-right">
+                    Export
+                  </p>
+                  <LedgerExportButtonRow
+                    onExcel={handleExportExcel}
+                    onPdf={handleExportPdf}
+                    exporting={exporting}
+                  />
+                </div>
+              )}
             </div>
             <div className="overflow-x-auto">
               <table className="w-full text-sm">
