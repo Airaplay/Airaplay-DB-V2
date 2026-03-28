@@ -74,6 +74,37 @@ type ArtistSearchRow = {
     | null;
 };
 
+type StageSearchRow = {
+  user_id: string;
+  stage_name: string | null;
+  artist_id: string | null;
+  users:
+    | { id: string; display_name: string | null; email: string | null }
+    | { id: string; display_name: string | null; email: string | null }[];
+};
+
+function formatSupabaseError(err: unknown): string {
+  if (!err || typeof err !== 'object') return 'Request failed';
+  const e = err as { message?: string; details?: string; hint?: string; code?: string };
+  const parts = [e.message, e.details, e.hint].filter(Boolean);
+  return parts.length ? parts.join(' — ') : 'Request failed';
+}
+
+function normalizeLedgerRpcData(data: unknown): LedgerPayload | null {
+  if (data == null) return null;
+  if (typeof data === 'string') {
+    try {
+      return JSON.parse(data) as LedgerPayload;
+    } catch {
+      return null;
+    }
+  }
+  if (Array.isArray(data) && data.length > 0) {
+    return data[0] as LedgerPayload;
+  }
+  return data as LedgerPayload;
+}
+
 const fmtUsd = (n: number | null | undefined): string =>
   new Intl.NumberFormat('en-US', {
     style: 'currency',
@@ -125,31 +156,82 @@ export const ArtistEarningsLedgerSection = (): JSX.Element => {
     }
     setSearching(true);
     setError(null);
+    // PostgREST cannot OR filters across embedded resources (e.g. users.* on artist_profiles).
+    // Run two queries and merge: (1) users with artist profile by display/email/username,
+    // (2) artist_profiles by stage name.
+    const pattern = `%${term.replace(/%/g, '')}%`;
+
     try {
-      const { data, error: qErr } = await supabase
-        .from('artist_profiles')
-        .select('user_id, stage_name, artist_id, users!inner(id, display_name, email)')
-        .or(`stage_name.ilike.%${term}%,users.display_name.ilike.%${term}%,users.email.ilike.%${term}%`)
+      const byUserFields = await supabase
+        .from('users')
+        .select('id, display_name, email, artist_profiles!inner(stage_name, artist_id)')
+        .or(`display_name.ilike.${pattern},email.ilike.${pattern},username.ilike.${pattern}`)
         .limit(25);
 
-      if (qErr) throw qErr;
-      const rows = (data || []) as {
-        user_id: string;
-        stage_name: string | null;
-        artist_id: string | null;
-        users: { id: string; display_name: string | null; email: string | null };
+      if (byUserFields.error) throw byUserFields.error;
+
+      let stageRows: StageSearchRow[] | null = null;
+
+      const stageQuery = await supabase
+        .from('artist_profiles')
+        .select('user_id, stage_name, artist_id, users!artist_profiles_user_id_fkey(id, display_name, email)')
+        .ilike('stage_name', pattern)
+        .limit(25);
+
+      if (!stageQuery.error) {
+        stageRows = (stageQuery.data || []) as StageSearchRow[];
+      } else {
+        const fallback = await supabase
+          .from('artist_profiles')
+          .select('user_id, stage_name, artist_id, users(id, display_name, email)')
+          .ilike('stage_name', pattern)
+          .limit(25);
+        if (!fallback.error) {
+          stageRows = (fallback.data || []) as StageSearchRow[];
+        } else {
+          console.warn('[ArtistEarningsLedger] Stage name search failed:', stageQuery.error, fallback.error);
+        }
+      }
+
+      const map = new Map<string, ArtistSearchRow>();
+
+      const uRows = (byUserFields.data || []) as {
+        id: string;
+        display_name: string | null;
+        email: string | null;
+        artist_profiles:
+          | { stage_name: string | null; artist_id: string | null }
+          | { stage_name: string | null; artist_id: string | null }[]
+          | null;
       }[];
-      setSearchHits(
-        rows.map((r) => ({
-          id: r.user_id,
-          display_name: r.users?.display_name ?? null,
-          email: r.users?.email ?? null,
-          artist_profiles: { stage_name: r.stage_name, artist_id: r.artist_id },
-        }))
-      );
+
+      for (const row of uRows) {
+        const ap = Array.isArray(row.artist_profiles) ? row.artist_profiles[0] : row.artist_profiles;
+        if (!ap) continue;
+        map.set(row.id, {
+          id: row.id,
+          display_name: row.display_name,
+          email: row.email,
+          artist_profiles: ap,
+        });
+      }
+
+      for (const row of stageRows || []) {
+        if (map.has(row.user_id)) continue;
+        const u = Array.isArray(row.users) ? row.users[0] : row.users;
+        if (!u) continue;
+        map.set(row.user_id, {
+          id: row.user_id,
+          display_name: u.display_name,
+          email: u.email,
+          artist_profiles: { stage_name: row.stage_name, artist_id: row.artist_id },
+        });
+      }
+
+      setSearchHits(Array.from(map.values()).slice(0, 25));
     } catch (e) {
       console.error(e);
-      setError(e instanceof Error ? e.message : 'Search failed');
+      setError(formatSupabaseError(e));
       setSearchHits([]);
     } finally {
       setSearching(false);
@@ -171,8 +253,13 @@ export const ArtistEarningsLedgerSection = (): JSX.Element => {
         p_user_id: userId,
       });
       if (rpcErr) throw rpcErr;
-      const payload = data as LedgerPayload;
-      if (!payload?.success && payload?.error) {
+      const payload = normalizeLedgerRpcData(data);
+      if (!payload) {
+        setError('Empty response from ledger');
+        setLedger(null);
+        return;
+      }
+      if (!payload.success && payload.error) {
         setError(String(payload.error));
         setLedger(null);
         return;
@@ -180,7 +267,7 @@ export const ArtistEarningsLedgerSection = (): JSX.Element => {
       setLedger(payload);
     } catch (e) {
       console.error(e);
-      setError(e instanceof Error ? e.message : 'Failed to load ledger');
+      setError(formatSupabaseError(e));
       setLedger(null);
     } finally {
       setLoadingLedger(false);
