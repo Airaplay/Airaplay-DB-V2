@@ -633,7 +633,7 @@ export const ArtistEarningsLedgerSection = (): JSX.Element => {
               )}
             </div>
           </div>
-        </>
+        </> 
       )}
     </div>
   );
