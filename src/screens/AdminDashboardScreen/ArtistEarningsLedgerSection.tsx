@@ -130,6 +130,12 @@ const fmtTreats = (n: number | null | undefined): string => {
   return `${v.toLocaleString('en-US', { maximumFractionDigits: 2 })} Treats`;
 };
 
+/** Display label for the Description column (and exports). */
+function formatLedgerDescriptionLabel(label: string): string {
+  if (label.trim().toLowerCase() === 'ad revenue') return 'Revenue';
+  return label;
+}
+
 function ledgerToExportPayload(payload: LedgerPayload): LedgerExportPayload | null {
   if (!payload.user || !payload.totals) return null;
   return {
@@ -138,7 +144,7 @@ function ledgerToExportPayload(payload: LedgerPayload): LedgerExportPayload | nu
     totals: payload.totals,
     entries: (payload.entries || []).map((e) => ({
       category: e.category,
-      label: e.label,
+      label: formatLedgerDescriptionLabel(e.label),
       amount_usd: e.amount_usd,
       amount_treats: e.amount_treats,
       currency: e.currency,
@@ -591,7 +597,7 @@ export const ArtistEarningsLedgerSection = (): JSX.Element => {
                             {String(cat).replace(/_/g, ' ')}
                           </span>
                         </td>
-                        <td className="px-3 py-2 text-gray-800">{row.label}</td>
+                        <td className="px-3 py-2 text-gray-800">{formatLedgerDescriptionLabel(row.label)}</td>
                         <td className="px-3 py-2 text-right font-mono tabular-nums text-gray-900">{amt}</td>
                       </tr>
                     );
