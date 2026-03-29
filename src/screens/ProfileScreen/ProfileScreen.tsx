@@ -20,6 +20,8 @@ import {
   HelpCircle,
   Coins,
   Gift,
+  ShieldCheck,
+  Clock,
 } from 'lucide-react';
 import { AuthModal } from '../../components/AuthModal';
 import { HelpSupportModal } from '../../components/HelpSupportModal';
@@ -43,6 +45,7 @@ import {
 import { useNavigate } from 'react-router-dom';
 import { useTabPersistence } from '../../hooks/useTabPersistence';
 import { persistentCache } from '../../lib/persistentCache';
+import { safeHrefUrl } from '../../lib/sanitizeHtml';
 import { LazyImage } from '../../components/LazyImage';
 import { Skeleton } from '../../components/ui/skeleton';
 import { useMusicPlayer } from '../../contexts/MusicPlayerContext';
@@ -98,6 +101,21 @@ interface SocialLink {
   url: string;
 }
 
+interface WithdrawalHistoryItem {
+  id: string;
+  amount: number | null;
+  net_amount: number | null;
+  currency_code: string | null;
+  currency_symbol: string | null;
+  status: 'pending' | 'approved' | 'rejected' | 'completed';
+  requested_date: string | null;
+  request_date?: string | null;
+  created_at?: string | null;
+  processed_date: string | null;
+  payment_reference: string | null;
+  method_type: 'usdt_wallet' | 'bank_account' | null;
+}
+
 export const ProfileScreen = ({
   onFormVisibilityChange,
 }: ProfileScreenProps): JSX.Element => {
@@ -116,6 +134,7 @@ export const ProfileScreen = ({
   const [isLoadingUserProfile, setIsLoadingUserProfile] = useState(true);
   const [isLoadingArtistData, setIsLoadingArtistData] = useState(false);
   const [isLoadingCounts, setIsLoadingCounts] = useState(false);
+  const [isSigningOut, setIsSigningOut] = useState(false);
   const [showAuthModal, setShowAuthModal] = useState(false);
   const [authModalDismissed, setAuthModalDismissed] = useState(false);
   const [showArtistForm, setShowArtistForm] = useState(false);
@@ -132,6 +151,13 @@ export const ProfileScreen = ({
   const [activeTab, setActiveTab] = useState<
     'account' | 'privacy' | 'earnings' | 'analytics' | 'topfans'
   >('account');
+  const [admobRevenueStatus, setAdmobRevenueStatus] = useState<{
+    ready: boolean;
+    message: string;
+    has_successful_sync: boolean;
+  } | null>(null);
+  const [withdrawalHistory, setWithdrawalHistory] = useState<WithdrawalHistoryItem[]>([]);
+  const [isLoadingWithdrawalHistory, setIsLoadingWithdrawalHistory] = useState(false);
 
   // Handle form visibility changes (exclude auth modal - it's handled globally)
   useEffect(() => {
@@ -160,12 +186,15 @@ export const ProfileScreen = ({
   useEffect(() => {
     if (authIsAuthenticated && user) {
       loadProfileData();
+      loadAdmobRevenueStatus();
+      loadWithdrawalHistory();
     } else if (!authIsAuthenticated && isInitialized) {
       setUserProfile(null);
       setArtistProfile(null);
       setSocialLinks([]);
       setFollowerCount(0);
       setFollowingCount(0);
+      setWithdrawalHistory([]);
       setIsLoading(false);
     }
   }, [authIsAuthenticated, isInitialized, user]);
@@ -174,11 +203,13 @@ export const ProfileScreen = ({
     const handleFocus = () => {
       if (authIsAuthenticated && user) {
         loadProfileData();
+        loadWithdrawalHistory();
       }
     };
     const handleVisibilityChange = () => {
       if (!document.hidden && authIsAuthenticated && user) {
         loadProfileData();
+        loadWithdrawalHistory();
       }
     };
     window.addEventListener('focus', handleFocus);
@@ -319,6 +350,17 @@ export const ProfileScreen = ({
     }
   };
 
+  const loadAdmobRevenueStatus = async () => {
+    try {
+      const { data, error } = await supabase.rpc('get_admob_revenue_status');
+      if (error) throw error;
+      setAdmobRevenueStatus(data);
+    } catch (error) {
+      console.error('Error loading AdMob revenue status:', error);
+      setAdmobRevenueStatus({ ready: false, message: 'Unable to check revenue status', has_successful_sync: false });
+    }
+  };
+
   const fetchFreshProfileData = async (backgroundRefresh: boolean = false) => {
     if (!user?.id) return;
 
@@ -412,11 +454,75 @@ export const ProfileScreen = ({
     setIsLoading(false);
   };
 
+  const loadWithdrawalHistory = async () => {
+    if (!user?.id) return;
+    try {
+      setIsLoadingWithdrawalHistory(true);
+      const retentionCutoffMs = Date.now() - 45 * 24 * 60 * 60 * 1000;
+      const { data, error } = await supabase
+        .from('withdrawal_requests')
+        .select(
+          'id, amount, net_amount, currency_code, currency_symbol, status, requested_date, request_date, created_at, processed_date, payment_reference, method_type'
+        )
+        .eq('user_id', user.id)
+        .limit(50);
+
+      if (error) throw error;
+      const normalized = ((data || []) as WithdrawalHistoryItem[])
+        .map((row) => {
+          const effectiveDate = row.requested_date || row.request_date || row.created_at || null;
+          return {
+            ...row,
+            requested_date: effectiveDate,
+          };
+        })
+        .filter((row) => {
+          if (!row.requested_date) return false;
+          const ts = new Date(row.requested_date).getTime();
+          return !Number.isNaN(ts) && ts >= retentionCutoffMs;
+        })
+        .sort((a, b) => {
+          const aTs = new Date(a.requested_date || 0).getTime();
+          const bTs = new Date(b.requested_date || 0).getTime();
+          return bTs - aTs;
+        })
+        .slice(0, 10);
+      setWithdrawalHistory(normalized);
+    } catch (error) {
+      console.error('Error loading withdrawal history:', error);
+      setWithdrawalHistory([]);
+    } finally {
+      setIsLoadingWithdrawalHistory(false);
+    }
+  };
+
+  const formatWithdrawalAmount = (row: WithdrawalHistoryItem): string => {
+    const amount = row.net_amount ?? row.amount ?? 0;
+    const symbol = row.currency_symbol || '$';
+    return `${symbol}${Number(amount).toFixed(2)}`;
+  };
+
+  const formatWithdrawalDate = (value: string | null): string => {
+    if (!value) return '—';
+    const dt = new Date(value);
+    if (Number.isNaN(dt.getTime())) return '—';
+    return dt.toLocaleDateString(undefined, {
+      year: 'numeric',
+      month: 'short',
+      day: 'numeric',
+    });
+  };
+
   const handleSignOut = async () => {
     try {
+      setIsSigningOut(true);
       hideMiniPlayer();
       hideFullPlayer();
 
+      // Navigate immediately to prevent showing "Anonymous User"
+      navigate('/', { replace: true });
+
+      // Clear state after navigation to prevent flash
       setUserProfile(null);
       setArtistProfile(null);
       setSocialLinks([]);
@@ -424,8 +530,6 @@ export const ProfileScreen = ({
       setFollowingCount(0);
 
       await authSignOut();
-
-      navigate('/', { replace: true });
     } catch (error) {
       console.error('Error during sign out:', error);
       setUserProfile(null);
@@ -433,6 +537,8 @@ export const ProfileScreen = ({
       setSocialLinks([]);
       setFollowerCount(0);
       setFollowingCount(0);
+    } finally {
+      setIsSigningOut(false);
     }
   };
 
@@ -480,11 +586,13 @@ export const ProfileScreen = ({
     return `$${amount.toFixed(2)}`;
   };
 
-  // Profile Skeleton Component
+  // Profile Skeleton Component — InviteEarn design system
   const ProfileSkeleton = () => (
-    <div className="flex flex-col min-h-screen bg-gradient-to-b from-[#1a1a1a] via-[#0d0d0d] to-[#000000] text-white overflow-y-auto content-with-nav">
-      {/* Header Skeleton */}
-      <header className="w-full py-4 px-5 sticky top-0 z-20 bg-gradient-to-b from-[#1a1a1a] to-transparent backdrop-blur-sm">
+    <div className="flex flex-col min-h-screen bg-gradient-to-b from-[#1a1a1a] via-[#0d0d0d] to-[#000000] text-white overflow-y-auto content-with-nav font-['Inter',sans-serif]">
+      <header
+        className="w-full py-5 px-5 sticky top-0 z-20 bg-gradient-to-b from-[#1a1a1a] to-transparent backdrop-blur-sm border-b border-white/10"
+        style={{ paddingTop: 'calc(1.25rem + env(safe-area-inset-top, 0px) * 0.25)', paddingBottom: '1.25rem' }}
+      >
         <div className="flex items-center justify-between">
           <Skeleton variant="circular" width={40} height={40} className="bg-white/10" />
           <Skeleton variant="text" height={24} width={100} className="bg-white/10" />
@@ -493,8 +601,7 @@ export const ProfileScreen = ({
       </header>
 
       <div className="flex-1 px-5 py-6 space-y-6">
-        {/* Profile Header Card Skeleton */}
-        <div className="relative rounded-3xl overflow-hidden bg-gradient-to-br from-white/10 to-white/5 backdrop-blur-md border border-white/10 shadow-2xl p-6">
+        <div className="relative rounded-3xl overflow-hidden bg-white/5 border border-white/10 p-6">
           <div className="relative z-10">
             {/* Avatar Skeleton */}
             <div className="flex justify-center mb-4">
@@ -597,33 +704,42 @@ export const ProfileScreen = ({
   }
 
   return (
-    <div ref={containerRef} className="flex flex-col min-h-screen min-h-[100dvh] bg-gradient-to-b from-[#1a1a1a] via-[#0d0d0d] to-[#000000] text-white overflow-y-auto content-with-nav">
-      {/* Header */}
-      <header className="w-full py-4 px-5 sticky top-0 z-20 bg-gradient-to-b from-[#1a1a1a] to-transparent backdrop-blur-sm">
+    <div ref={containerRef} className="flex flex-col min-h-screen min-h-[100dvh] bg-gradient-to-b from-[#1a1a1a] via-[#0d0d0d] to-[#000000] text-white overflow-y-auto content-with-nav font-['Inter',sans-serif]">
+      {/* Header — matches InviteEarnScreen design system */}
+      <header
+        className="w-full py-5 px-5 sticky top-0 z-20 bg-gradient-to-b from-[#1a1a1a] to-transparent backdrop-blur-sm border-b border-white/10"
+        style={{ paddingTop: 'calc(1.25rem + env(safe-area-inset-top, 0px) * 0.25)', paddingBottom: '1.25rem' }}
+      >
         <div className="flex items-center justify-between">
           <button
-            onClick={() => navigate(-1)}
+            onClick={() => (window.history.length > 1 ? navigate(-1) : navigate('/'))}
             aria-label="Go back"
-            className="p-2 hover:bg-white/10 rounded-full transition-all"
+            className="min-w-[44px] min-h-[44px] p-2 rounded-full hover:bg-white/10 active:bg-white/15 transition-colors flex items-center justify-center -ml-1"
           >
-            <ArrowLeft className="w-6 h-6" />
+            <ArrowLeft className="w-5 h-5 text-white/80" />
           </button>
-          <h1 className="font-bold text-lg">Profile</h1>
+          <div className="text-center min-w-0 flex-1">
+            <p className="text-[11px] font-bold uppercase tracking-[0.18em] text-white/60 mb-0.5">
+              Account
+            </p>
+            <h1 className="text-[15px] font-black tracking-tight text-white leading-none">
+              Profile
+            </h1>
+          </div>
           <button
             onClick={handleSignOut}
             aria-label="Logout"
-            className="p-2 hover:bg-red-600/20 rounded-full transition-all"
+            className="min-w-[44px] min-h-[44px] p-2 rounded-full hover:bg-red-500/20 active:bg-red-500/30 transition-colors flex items-center justify-center"
           >
-            <LogOut className="w-6 h-6 text-red-500" />
+            <LogOut className="w-5 h-5 text-red-400" />
           </button>
         </div>
       </header>
 
       <div className="flex-1 px-5 py-6 space-y-6">
-        {/* Profile Header Card */}
-        <div className="relative rounded-3xl overflow-hidden bg-gradient-to-br from-white/10 to-white/5 backdrop-blur-md border border-white/10 shadow-2xl p-6">
-          {/* Background Gradient Overlay */}
-          <div className="absolute inset-0 bg-gradient-to-br from-[#309605]/10 to-transparent pointer-events-none"></div>
+        {/* Profile Header Card — InviteEarn design system */}
+        <div className="relative rounded-3xl overflow-hidden bg-white/5 border border-white/10 p-6">
+          <div className="absolute inset-0 bg-[radial-gradient(ellipse_at_top_right,rgba(48,150,5,0.12),transparent_60%)] pointer-events-none" />
 
           <div className="relative z-10">
             {/* Avatar + Edit Button */}
@@ -635,7 +751,7 @@ export const ProfileScreen = ({
                   <LazyImage
                     src={artistProfile?.profile_photo_url || userProfile?.avatar_url || ''}
                     alt="Profile"
-                    className="w-24 h-24 object-cover rounded-full border-4 border-white/20 shadow-2xl"
+                    className="w-24 h-24 object-cover rounded-full border-4 border-white/10"
                     width={96}
                     height={96}
                     loading="eager"
@@ -653,9 +769,9 @@ export const ProfileScreen = ({
                 {!isLoadingUserProfile && (
                   <button
                     onClick={() => navigate('/edit-profile')}
-                    className="absolute bottom-0 right-0 w-10 h-10 bg-white/20 backdrop-blur-md rounded-full flex items-center justify-center shadow-xl hover:bg-white/30 transition-all border border-white/30"
+                    className="absolute bottom-0 right-0 w-11 h-11 bg-white/10 rounded-full flex items-center justify-center hover:bg-white/20 transition-all border border-white/10"
                   >
-                    <Camera className="w-5 h-5 text-white" />
+                    <Camera className="w-5 h-5 text-white/80" />
                   </button>
                 )}
               </div>
@@ -672,17 +788,15 @@ export const ProfileScreen = ({
               ) : (
                 <>
                   <h2 className="font-bold text-white text-2xl mb-1">
-                    {userProfile?.display_name ||
-                      artistProfile?.stage_name ||
-                      'Anonymous User'}
+                    {isSigningOut ? 'Signing out...' : userProfile?.display_name || ''}
                   </h2>
                   {userProfile?.username && (
-                    <p className="text-gray-400 text-sm mb-2">
+                    <p className="text-white/50 text-sm mb-2">
                       @{userProfile.username}
                     </p>
                   )}
                   {userProfile?.role && (
-                    <div className="inline-flex mt-2 px-4 py-1.5 bg-white/10 backdrop-blur-sm rounded-full border border-white/20">
+                    <div className="inline-flex mt-2 px-4 py-1.5 bg-white/10 rounded-full border border-white/10">
                       <p className="text-white text-xs font-medium">
                         {userProfile.role.charAt(0).toUpperCase() + userProfile.role.slice(1)}
                       </p>
@@ -701,7 +815,7 @@ export const ProfileScreen = ({
 
             {/* Country */}
             {userProfile?.country && (
-              <p className="text-gray-400 text-sm text-center mb-4">
+              <p className="text-white/50 text-sm text-center mb-4">
                 📍 {userProfile.country}
               </p>
             )}
@@ -711,7 +825,7 @@ export const ProfileScreen = ({
               {isLoadingCounts ? (
                 <>
                   {[1, 2].map((i) => (
-                    <div key={i} className="text-center p-3 bg-white/5 rounded-xl backdrop-blur-sm">
+                    <div key={i} className="text-center p-3 bg-white/5 rounded-xl border border-white/10">
                       <Skeleton variant="text" height={24} width={50} className="mx-auto mb-2 bg-white/10" />
                       <Skeleton variant="text" height={14} width={60} className="mx-auto bg-white/10" />
                     </div>
@@ -719,13 +833,13 @@ export const ProfileScreen = ({
                 </>
               ) : (
                 <>
-                  <div className="text-center p-3 bg-white/5 rounded-xl backdrop-blur-sm">
+                  <div className="text-center p-3 bg-white/5 rounded-xl border border-white/10">
                     <p className="font-bold text-white text-lg">{formatNumber(followerCount)}</p>
-                    <p className="text-gray-400 text-xs">Followers</p>
+                    <p className="text-white/50 text-xs">Followers</p>
                   </div>
-                  <div className="text-center p-3 bg-white/5 rounded-xl backdrop-blur-sm">
+                  <div className="text-center p-3 bg-white/5 rounded-xl border border-white/10">
                     <p className="font-bold text-white text-lg">{formatNumber(followingCount)}</p>
-                    <p className="text-gray-400 text-xs">Following</p>
+                    <p className="text-white/50 text-xs">Following</p>
                   </div>
                 </>
               )}
@@ -744,10 +858,11 @@ export const ProfileScreen = ({
             ) : socialLinks.length > 0 ? (
               <div className="flex flex-col items-center gap-2 justify-center w-full">
                 {socialLinks.map((link) => {
-                  return (
+                  const safeUrl = safeHrefUrl(link.url);
+                  return safeUrl ? (
                     <a
                       key={link.id}
-                      href={link.url}
+                      href={safeUrl}
                       target="_blank"
                       rel="noopener noreferrer"
                       className="flex items-center justify-center gap-2 hover:opacity-70 transition-opacity group"
@@ -757,6 +872,11 @@ export const ProfileScreen = ({
                         {link.url}
                       </span>
                     </a>
+                  ) : (
+                    <span key={link.id} className="flex items-center justify-center gap-2 text-white/80 text-xs truncate max-w-xs">
+                      <Link2 className="w-4 h-4 text-white/70 flex-shrink-0" />
+                      {link.url}
+                    </span>
                   );
                 })}
               </div>
@@ -764,14 +884,14 @@ export const ProfileScreen = ({
           </div>
         </div>
 
-        {/* Tab Navigation */}
+        {/* Tab Navigation — InviteEarn design system */}
         <div className="flex gap-2 overflow-x-auto pb-1 -mx-1 px-1 scrollbar-hide">
           {[
             { id: 'account', icon: User, label: 'Account' },
             { id: 'topfans', icon: Trophy, label: 'Top Fans' },
             { id: 'privacy', icon: Shield, label: 'Privacy' },
             { id: 'earnings', icon: DollarSign, label: 'Earnings' },
-            ...(artistProfile ? [{ id: 'analytics', icon: BarChart, label: 'Analytics' }] : []),
+            ...(userProfile?.role === 'creator' ? [{ id: 'analytics', icon: BarChart, label: 'Analytics' }] : []),
           ].map((tab) => {
             const IconComponent = tab.icon;
             const isActive = activeTab === tab.id;
@@ -779,7 +899,7 @@ export const ProfileScreen = ({
               <button
                 key={tab.id}
                 onClick={() => setActiveTab(tab.id as any)}
-                className={`flex items-center justify-center gap-1.5 py-3 px-4 rounded-full text-xs font-medium transition-all whitespace-nowrap flex-shrink-0 ${
+                className={`flex items-center justify-center gap-1.5 py-3 px-4 rounded-full text-xs font-semibold transition-all whitespace-nowrap flex-shrink-0 ${
                   isActive
                     ? 'bg-white text-black'
                     : 'bg-white/10 text-white hover:bg-white/20'
@@ -797,119 +917,120 @@ export const ProfileScreen = ({
           {/* Account Tab */}
           {activeTab === 'account' && (
             <div className="space-y-4">
+              {/* Treat System — same colors as TreatWalletCard (yellow/orange gradient) */}
               <div
                 onClick={() => navigate('/treats')}
-                className="relative rounded-2xl overflow-hidden bg-gradient-to-r from-yellow-600/20 to-orange-600/20 backdrop-blur-md border border-yellow-500/30 hover:border-yellow-500/50 transition-all duration-300 cursor-pointer group p-5"
+                className="relative rounded-2xl overflow-hidden bg-gradient-to-r from-yellow-600/20 to-orange-600/20 backdrop-blur-sm border border-yellow-500/30 hover:border-yellow-500/50 transition-all cursor-pointer group p-5"
               >
-                <div className="flex items-center justify-between">
+                <div className="relative flex items-center justify-between">
                   <div className="flex items-center gap-4">
-                    <div className="w-14 h-14 bg-gradient-to-r from-yellow-600 to-orange-600 rounded-2xl flex items-center justify-center shadow-xl shadow-yellow-600/25 group-hover:scale-105 transition-transform duration-200">
+                    <div className="w-14 h-14 bg-gradient-to-r from-yellow-600 to-orange-600 rounded-2xl flex items-center justify-center shadow-lg shadow-yellow-600/25 group-hover:scale-105 transition-transform">
                       <Coins className="w-7 h-7 text-white" />
                     </div>
                     <div>
-                      <h4 className="text-white text-base font-semibold mb-1">
+                      <h4 className="font-['Inter',sans-serif] font-bold text-white text-base mb-1">
                         Treat System
                       </h4>
-                      <p className="text-white/70 text-sm">
+                      <p className="font-['Inter',sans-serif] text-white/70 text-sm">
                         Manage treats, tips & promotions
                       </p>
                     </div>
                   </div>
-                  <ChevronRight className="w-5 h-5 text-yellow-400 group-hover:translate-x-1 transition-transform duration-200" />
+                  <ChevronRight className="w-5 h-5 text-white/50 group-hover:translate-x-0.5 transition-transform" />
                 </div>
               </div>
 
               <div className="space-y-3">
                 <div
                   onClick={() => navigate('/edit-profile')}
-                  className="rounded-2xl bg-white/[0.03] backdrop-blur-sm border border-white/10 hover:bg-white/[0.05] transition-all duration-300 cursor-pointer p-4"
+                  className="rounded-2xl bg-white/5 border border-white/10 hover:bg-white/5 hover:border-white/20 transition-all cursor-pointer p-4 active:scale-[0.98]"
                 >
                   <div className="flex items-center justify-between">
                     <div className="flex items-center gap-3">
                       <div className="w-11 h-11 bg-white/10 rounded-xl flex items-center justify-center">
-                        <User className="w-5 h-5 text-white" />
+                        <User className="w-5 h-5 text-white/80" />
                       </div>
                       <span className="text-white text-sm font-medium">
                         Edit Information
                       </span>
                     </div>
-                    <ChevronRight className="w-5 h-5 text-gray-400" />
+                    <ChevronRight className="w-5 h-5 text-white/50" />
                   </div>
                 </div>
 
                 {userProfile && (
                   <div
                     onClick={handleViewPublicProfile}
-                    className="rounded-2xl bg-white/[0.03] backdrop-blur-sm border border-white/10 hover:bg-white/[0.05] transition-all duration-300 cursor-pointer p-4"
+                    className="rounded-2xl bg-white/5 border border-white/10 hover:bg-white/5 hover:border-white/20 transition-all cursor-pointer p-4 active:scale-[0.98]"
                   >
                     <div className="flex items-center justify-between">
                       <div className="flex items-center gap-3">
                         <div className="w-11 h-11 bg-white/10 rounded-xl flex items-center justify-center">
-                          <ExternalLink className="w-5 h-5 text-white" />
+                          <ExternalLink className="w-5 h-5 text-white/80" />
                         </div>
                         <span className="text-white text-sm font-medium">
                           View Profile
                         </span>
                       </div>
-                      <ChevronRight className="w-5 h-5 text-gray-400" />
+                      <ChevronRight className="w-5 h-5 text-white/50" />
                     </div>
                   </div>
                 )}
 
                 <div
                   onClick={() => setShowNotificationSettingsModal(true)}
-                  className="rounded-2xl bg-white/[0.03] backdrop-blur-sm border border-white/10 hover:bg-white/[0.05] transition-all duration-300 cursor-pointer p-4"
+                  className="rounded-2xl bg-white/5 border border-white/10 hover:bg-white/5 hover:border-white/20 transition-all cursor-pointer p-4 active:scale-[0.98]"
                 >
                   <div className="flex items-center justify-between">
                     <div className="flex items-center gap-3">
                       <div className="w-11 h-11 bg-white/10 rounded-xl flex items-center justify-center">
-                        <Bell className="w-5 h-5 text-white" />
+                        <Bell className="w-5 h-5 text-white/80" />
                       </div>
                       <span className="text-white text-sm font-medium">
                         Notifications
                       </span>
                     </div>
-                    <ChevronRight className="w-5 h-5 text-gray-400" />
+                    <ChevronRight className="w-5 h-5 text-white/50" />
                   </div>
                 </div>
 
                 <div
                   onClick={() => navigate('/invite-earn')}
-                  className="rounded-2xl bg-white/[0.03] backdrop-blur-sm border border-white/10 hover:bg-white/[0.05] transition-all duration-300 cursor-pointer p-4"
+                  className="rounded-2xl bg-white/5 border border-white/10 hover:bg-white/5 hover:border-white/20 transition-all cursor-pointer p-4 active:scale-[0.98]"
                 >
                   <div className="flex items-center justify-between">
                     <div className="flex items-center gap-3">
                       <div className="w-11 h-11 bg-white/10 rounded-xl flex items-center justify-center">
-                        <Gift className="w-5 h-5 text-white" />
+                        <Gift className="w-5 h-5 text-white/80" />
                       </div>
                       <span className="text-white text-sm font-medium">
                         Invite & Earn
                       </span>
                     </div>
-                    <ChevronRight className="w-5 h-5 text-gray-400" />
+                    <ChevronRight className="w-5 h-5 text-white/50" />
                   </div>
                 </div>
 
                 <div
                   onClick={() => setShowHelpSupportModal(true)}
-                  className="rounded-2xl bg-white/[0.03] backdrop-blur-sm border border-white/10 hover:bg-white/[0.05] transition-all duration-300 cursor-pointer p-4"
+                  className="rounded-2xl bg-white/5 border border-white/10 hover:bg-white/5 hover:border-white/20 transition-all cursor-pointer p-4 active:scale-[0.98]"
                 >
                   <div className="flex items-center justify-between">
                     <div className="flex items-center gap-3">
                       <div className="w-11 h-11 bg-white/10 rounded-xl flex items-center justify-center">
-                        <HelpCircle className="w-5 h-5 text-white" />
+                        <HelpCircle className="w-5 h-5 text-white/80" />
                       </div>
                       <span className="text-white text-sm font-medium">
                         Help & Support
                       </span>
                     </div>
-                    <ChevronRight className="w-5 h-5 text-gray-400" />
+                    <ChevronRight className="w-5 h-5 text-white/50" />
                   </div>
                 </div>
 
                 <button
                   onClick={handleSignOut}
-                  className="w-full h-14 bg-gradient-to-r from-red-600 to-red-700 hover:from-red-700 hover:to-red-800 border border-red-500 hover:border-red-600 rounded-2xl font-medium text-white transition-all duration-200 flex items-center justify-center gap-3 mt-6"
+                  className="w-full min-h-[48px] bg-red-500/20 hover:bg-red-500/30 border border-red-500/30 rounded-2xl font-semibold text-red-400 transition-all flex items-center justify-center gap-3 mt-6 active:scale-[0.98]"
                 >
                   <LogOut className="w-5 h-5" />
                   Sign Out
@@ -919,7 +1040,7 @@ export const ProfileScreen = ({
               {userProfile?.role === 'listener' && (
                 <button
                   onClick={() => setShowArtistForm(true)}
-                  className="w-full h-14 bg-white hover:bg-white/90 rounded-2xl font-medium text-black transition-all duration-200 flex items-center justify-center gap-2 mt-4"
+                  className="w-full min-h-[48px] bg-white hover:opacity-90 text-black rounded-2xl font-bold transition-all flex items-center justify-center gap-2 mt-4 active:scale-[0.98]"
                 >
                   <Star className="w-5 h-5" />
                   Become an Artist
@@ -942,23 +1063,23 @@ export const ProfileScreen = ({
             <div className="space-y-3">
               <div
                 onClick={() => setShowPrivacySettingsModal(true)}
-                className="rounded-2xl bg-white/[0.03] backdrop-blur-sm border border-white/10 hover:bg-white/[0.05] transition-all duration-300 cursor-pointer p-4"
+                className="rounded-2xl bg-white/5 border border-white/10 hover:border-white/20 transition-all cursor-pointer p-4 active:scale-[0.98]"
               >
                 <div className="flex items-center justify-between">
                   <div className="flex items-center gap-3">
                     <div className="w-11 h-11 bg-white/10 rounded-xl flex items-center justify-center">
-                      <Shield className="w-5 h-5 text-white" />
+                      <Shield className="w-5 h-5 text-white/80" />
                     </div>
                     <div>
                       <h4 className="text-white text-sm font-medium">
                         Profile Visibility
                       </h4>
-                      <p className="text-gray-400 text-xs">
+                      <p className="text-white/50 text-xs">
                         Control who can see your profile
                       </p>
                     </div>
                   </div>
-                  <ChevronRight className="w-5 h-5 text-gray-400" />
+                  <ChevronRight className="w-5 h-5 text-white/50" />
                 </div>
               </div>
 
@@ -966,92 +1087,107 @@ export const ProfileScreen = ({
             </div>
           )}
 
-          {/* Earnings Tab */}
+          {/* Earnings Tab — Live balance = net revenue (artist 50% share from 50/50 split with platform), not gross */}
           {activeTab === 'earnings' && (
             <div className="space-y-4">
-              <div className="relative rounded-3xl overflow-hidden bg-gradient-to-r from-[#309605]/20 to-[#3ba208]/20 backdrop-blur-sm border border-[#309605]/30 p-8 text-center shadow-2xl" >
-                <div className="absolute inset-0 bg-gradient-to-br from-green-500/20 to-transparent pointer-events-none"></div>
-                <div className="relative z-10">
-                  <div className="w-20 h-20 bg-gradient-to-br from-green-500 to-emerald-600 rounded-full flex items-center justify-center mx-auto mb-4 shadow-xl shadow-green-600/30">
-                    <DollarSign className="w-10 h-10 text-white" />
-                  </div>
-                  <h3 className="font-bold text-white text-4xl mb-2 whitespace-nowrap overflow-hidden text-ellipsis px-2">
-                    {formatEarnings(userProfile?.total_earnings || 0)}
-                  </h3>
-                  <p className="text-white/80 text-sm mb-4">
-                    Live Balance
-                  </p>
-                  <div className="flex items-center justify-center gap-2">
-                    <div className="w-2 h-2 bg-green-400 rounded-full animate-pulse"></div>
-                    <span className="text-green-400 text-sm font-medium">
-                      </span>
+              <div className="relative rounded-3xl overflow-hidden border border-[#00ad74]/20 bg-gradient-to-br from-[#00ad74]/15 via-[#009c68]/10 to-transparent">
+                <div className="absolute top-0 right-0 w-36 h-36 bg-[#00ad74]/8 rounded-full blur-3xl -translate-y-1/3 translate-x-1/3 pointer-events-none" />
+                <div className="relative px-5 py-5">
+                  <div className="flex items-start justify-between">
+                    <div>
+                      <p className="text-[10px] font-bold uppercase tracking-widest text-[#00ad74]/50 mb-0.5">
+                        Available Earnings
+                      </p>
+                      <p
+                        className="font-['Inter',sans-serif] font-black text-[#00ad74] leading-none tabular-nums"
+                        style={{ fontSize: 'clamp(2rem, 10vw, 3rem)' }}
+                      >
+                        ${(userProfile?.total_earnings ?? 0).toFixed(2)}
+                      </p>
+                      {admobRevenueStatus && !admobRevenueStatus.ready && (userProfile?.total_earnings ?? 0) === 0 && (
+                        <p className="text-[11px] text-white/40 mt-2 leading-tight">
+                          {admobRevenueStatus.message || 'Earnings will appear once confirmed with our ad partner'}
+                        </p>
+                      )}
+                      {admobRevenueStatus && !admobRevenueStatus.ready && (userProfile?.total_earnings ?? 0) > 0 && (
+                        <p className="text-[11px] text-white/40 mt-2 leading-tight">
+                          Ad earnings pending confirmation. Converted Treats and other balance can be withdrawn.
+                        </p>
+                      )}
+                    </div>
+                    <div className="flex flex-col items-end gap-1 pt-1">
+                      <div className="flex items-center gap-1.5">
+                        <ShieldCheck className="w-3 h-3 text-[#00ad74]/50" />
+                        <p className="text-[10px] text-white/30 font-semibold">Min. $10</p>
+                      </div>
+                      <div className="flex items-center gap-1.5">
+                        <Clock className="w-3 h-3 text-[#00ad74]/50" />
+                        <p className="text-[10px] text-white/30 font-semibold">1–3 business days</p>
+                      </div>
+                    </div>
                   </div>
                 </div>
               </div>
 
-              {/* Contribution Score Widget */}
               <ContributionScoreWidget userId={user?.id} />
 
               <button
                 onClick={() => navigate('/withdraw-earnings')}
                 disabled={(userProfile?.total_earnings || 0) < 10}
-                className="w-full h-14 bg-white hover:bg-white/90 disabled:opacity-50 disabled:cursor-not-allowed rounded-xl font-medium text-black transition-all duration-200 shadow-xl"
+                className="w-full min-h-[48px] bg-white hover:opacity-90 disabled:opacity-50 disabled:cursor-not-allowed rounded-2xl font-bold text-black transition-all active:scale-[0.98]"
               >
                 Withdraw Earnings
               </button>
 
-              <div className="rounded-2xl bg-white/5 backdrop-blur-sm border border-white/10 p-6">
-                <h4 className="font-['Inter',sans-serif] font-semibold text-white text-lg mb-5 tracking-tight">
-                  How You Earn
-                </h4>
-                <ul className="space-y-4">
-                  <li className="flex items-start gap-4 group">
-                    <div className="w-8 h-8 bg-white/10 rounded-full flex items-center justify-center flex-shrink-0 group-hover:bg-white/20 transition-colors duration-200">
-                      <div className="w-2 h-2 bg-white rounded-full"></div>
-                    </div>
-                    <div className="flex-1 pt-1">
-                      <p className="font-['Inter',sans-serif] text-white/90 text-[15px] leading-relaxed">
-                        <strong>Creator Earnings:</strong> Earn from streams, plays, and engagement with your content
-                      </p>
-                    </div>
-                  </li>
-                  <li className="flex items-start gap-4 group">
-                    <div className="w-8 h-8 bg-white/10 rounded-full flex items-center justify-center flex-shrink-0 group-hover:bg-white/20 transition-colors duration-200">
-                      <div className="w-2 h-2 bg-white rounded-full"></div>
-                    </div>
-                    <div className="flex-1 pt-1">
-                      <p className="font-['Inter',sans-serif] text-white/90 text-[15px] leading-relaxed">
-                        <strong>Listener Contributions:</strong> Earn by creating playlists, discovering new music, and staying active
-                      </p>
-                    </div>
-                  </li>
-                  <li className="flex items-start gap-4 group">
-                    <div className="w-8 h-8 bg-white/10 rounded-full flex items-center justify-center flex-shrink-0 group-hover:bg-white/20 transition-colors duration-200">
-                      <div className="w-2 h-2 bg-white rounded-full"></div>
-                    </div>
-                    <div className="flex-1 pt-1">
-                      <p className="font-['Inter',sans-serif] text-white/90 text-[15px] leading-relaxed">
-                        <strong>Tips & Treats:</strong> Receive direct support from fans through tips and donations
-                      </p>
-                    </div>
-                  </li>
-                  <li className="flex items-start gap-4 group">
-                    <div className="w-8 h-8 bg-white/10 rounded-full flex items-center justify-center flex-shrink-0 group-hover:bg-white/20 transition-colors duration-200">
-                      <div className="w-2 h-2 bg-white rounded-full"></div>
-                    </div>
-                    <div className="flex-1 pt-1">
-                      <p className="font-['Inter',sans-serif] text-white/90 text-[15px] leading-relaxed">
-                        <strong>Community Pool:</strong> Your contribution score determines your share of the monthly community earnings pool
-                      </p>
-                    </div>
-                  </li>
-                </ul>
+              <div className="rounded-2xl bg-white/5 border border-white/10 p-6">
+                <p className="text-[11px] font-bold uppercase tracking-[0.18em] text-white/60 mb-3 px-1">
+                  Users Withdrawal History
+                </p>
+                <p className="text-white/50 text-[11px] mb-3 px-1">
+                  History is automatically deleted every 45 days.
+                </p>
+                {isLoadingWithdrawalHistory ? (
+                  <div className="space-y-2">
+                    {Array.from({ length: 3 }).map((_, i) => (
+                      <div key={i} className="h-12 rounded-xl bg-white/5 animate-pulse" />
+                    ))}
+                  </div>
+                ) : withdrawalHistory.length === 0 ? (
+                  <p className="text-white/60 text-sm px-1">No withdrawal history yet.</p>
+                ) : (
+                  <div className="space-y-2">
+                    {withdrawalHistory.map((row) => (
+                      <div
+                        key={row.id}
+                        className="rounded-xl border border-white/10 bg-white/[0.03] px-3 py-2.5"
+                      >
+                        <div className="flex items-center justify-between gap-3">
+                          <div>
+                            <p className="text-white/90 text-sm font-semibold">
+                              {formatWithdrawalAmount(row)}
+                            </p>
+                            <p className="text-white/50 text-[11px]">
+                              {formatWithdrawalDate(row.requested_date)}
+                              {row.method_type ? ` • ${row.method_type === 'usdt_wallet' ? 'USDT Wallet' : 'Bank'}` : ''}
+                            </p>
+                          </div>
+                          <div className="text-right">
+                            <p className="text-[11px] uppercase tracking-wide text-white/70">{row.status}</p>
+                            {row.payment_reference ? (
+                              <p className="text-[10px] text-white/40">Ref: {row.payment_reference}</p>
+                            ) : null}
+                          </div>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                )}
               </div>
             </div>
           )}
 
-          {/* Analytics Tab */}
-          {activeTab === 'analytics' && artistProfile && (
+          {/* Analytics Tab - Only visible for creators/artists, not listeners */}
+          {activeTab === 'analytics' && userProfile?.role === 'creator' && (
             <AnalyticsTab />
           )}
         </div>
