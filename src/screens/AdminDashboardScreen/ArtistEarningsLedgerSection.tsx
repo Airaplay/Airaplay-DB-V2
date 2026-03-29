@@ -11,17 +11,9 @@ import {
   ArrowDownCircle,
   Wallet,
   Info,
-  FileSpreadsheet,
-  FileText,
 } from 'lucide-react';
 import { supabase } from '../../lib/supabase';
 import { format, parseISO } from 'date-fns';
-import {
-  buildExportFilenameBase,
-  exportArtistLedgerExcel,
-  exportArtistLedgerPdf,
-  type LedgerExportPayload,
-} from '../../lib/artistLedgerExport';
 
 type LedgerCategory =
   | 'stream_earning'
@@ -156,40 +148,6 @@ const categoryBadge = (c: LedgerCategory): string => {
   }
 };
 
-function LedgerExportButtonRow({
-  onExcel,
-  onPdf,
-  exporting,
-}: {
-  onExcel: () => void;
-  onPdf: () => void;
-  exporting: 'excel' | 'pdf' | null;
-}): JSX.Element {
-  const busy = exporting !== null;
-  return (
-    <div className="flex flex-wrap gap-2">
-      <button
-        type="button"
-        onClick={onExcel}
-        disabled={busy}
-        className="inline-flex items-center justify-center gap-2 min-h-[44px] px-4 py-2.5 bg-[#309605] hover:bg-[#3ba208] text-white rounded-lg text-sm font-semibold shadow-sm disabled:opacity-50"
-      >
-        <FileSpreadsheet className={`w-4 h-4 shrink-0 ${exporting === 'excel' ? 'animate-pulse' : ''}`} />
-        {exporting === 'excel' ? 'Exporting…' : 'Export Excel'}
-      </button>
-      <button
-        type="button"
-        onClick={onPdf}
-        disabled={busy}
-        className="inline-flex items-center justify-center gap-2 min-h-[44px] px-4 py-2.5 bg-gray-800 hover:bg-gray-900 text-white rounded-lg text-sm font-semibold shadow-sm disabled:opacity-50"
-      >
-        <FileText className={`w-4 h-4 shrink-0 ${exporting === 'pdf' ? 'animate-pulse' : ''}`} />
-        {exporting === 'pdf' ? 'Exporting…' : 'Export PDF'}
-      </button>
-    </div>
-  );
-}
-
 export const ArtistEarningsLedgerSection = (): JSX.Element => {
   const [search, setSearch] = useState('');
   const [searching, setSearching] = useState(false);
@@ -198,57 +156,6 @@ export const ArtistEarningsLedgerSection = (): JSX.Element => {
   const [ledger, setLedger] = useState<LedgerPayload | null>(null);
   const [loadingLedger, setLoadingLedger] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [exporting, setExporting] = useState<'excel' | 'pdf' | null>(null);
-
-  const getExportPayload = useCallback((): LedgerExportPayload | null => {
-    if (!ledger?.success || !ledger.user || !ledger.totals) return null;
-    return {
-      user: ledger.user,
-      artist: ledger.artist,
-      totals: ledger.totals,
-      entries: (ledger.entries || []).map((e) => ({
-        category: e.category,
-        label: e.label,
-        amount_usd: e.amount_usd,
-        amount_treats: e.amount_treats,
-        currency: e.currency,
-        occurred_at: e.occurred_at,
-        ref_id: e.ref_id,
-      })),
-    };
-  }, [ledger]);
-
-  const handleExportExcel = useCallback(() => {
-    const payload = getExportPayload();
-    if (!payload) return;
-    try {
-      setExporting('excel');
-      setError(null);
-      const base = buildExportFilenameBase(payload.user.display_name);
-      exportArtistLedgerExcel(payload, base);
-    } catch (e) {
-      console.error(e);
-      setError(e instanceof Error ? e.message : 'Excel export failed');
-    } finally {
-      setExporting(null);
-    }
-  }, [getExportPayload]);
-
-  const handleExportPdf = useCallback(() => {
-    const payload = getExportPayload();
-    if (!payload) return;
-    try {
-      setExporting('pdf');
-      setError(null);
-      const base = buildExportFilenameBase(payload.user.display_name);
-      exportArtistLedgerPdf(payload, base);
-    } catch (e) {
-      console.error(e);
-      setError(e instanceof Error ? e.message : 'PDF export failed');
-    } finally {
-      setExporting(null);
-    }
-  }, [getExportPayload]);
 
   const runSearch = useCallback(async (q: string) => {
     const term = q.trim();
@@ -398,8 +305,6 @@ export const ArtistEarningsLedgerSection = (): JSX.Element => {
   }, [selected?.id, loadLedger]);
 
   const totals = ledger?.totals;
-  const canExport =
-    Boolean(ledger?.success && ledger.user && totals && !loadingLedger);
 
   return (
     <div className="space-y-6">
@@ -498,25 +403,6 @@ export const ArtistEarningsLedgerSection = (): JSX.Element => {
 
       {ledger?.success && totals && ledger.user && (
         <>
-          {canExport && (
-            <div className="rounded-xl border-2 border-[#309605]/50 bg-gradient-to-br from-[#e6f7f1] via-white to-white p-4 sm:p-5 shadow-sm">
-              <div className="flex flex-col gap-4 lg:flex-row lg:items-center lg:justify-between">
-                <div>
-                  <p className="text-xs font-bold uppercase tracking-wider text-[#309605]">Export report</p>
-                  <p className="mt-1 text-base font-semibold text-gray-900">Download this ledger</p>
-                  <p className="mt-0.5 text-sm text-gray-600">
-                    Excel includes Summary + Ledger sheets. PDF is a printable summary and table.
-                  </p>
-                </div>
-                <LedgerExportButtonRow
-                  onExcel={handleExportExcel}
-                  onPdf={handleExportPdf}
-                  exporting={exporting}
-                />
-              </div>
-            </div>
-          )}
-
           <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3">
             <div className="bg-white rounded-lg border border-gray-100 shadow-sm p-4">
               <div className="flex items-center gap-2 text-gray-500 text-xs font-medium uppercase">
@@ -580,18 +466,6 @@ export const ArtistEarningsLedgerSection = (): JSX.Element => {
           <div className="bg-white rounded-lg border border-gray-200 shadow-sm overflow-hidden">
             <div className="px-4 py-3 border-b border-gray-100 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
               <h3 className="font-semibold text-gray-900 shrink-0">Ledger (most recent 500)</h3>
-              {canExport && (
-                <div className="sm:max-w-md w-full">
-                  <p className="mb-1.5 text-[10px] font-semibold uppercase tracking-wide text-gray-400 sm:text-right">
-                    Export
-                  </p>
-                  <LedgerExportButtonRow
-                    onExcel={handleExportExcel}
-                    onPdf={handleExportPdf}
-                    exporting={exporting}
-                  />
-                </div>
-              )}
             </div>
             <div className="overflow-x-auto">
               <table className="w-full text-sm">
