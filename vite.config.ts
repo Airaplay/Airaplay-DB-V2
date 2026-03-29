@@ -1,6 +1,9 @@
 import path from "path";
+import { createRequire } from "node:module";
 import { fileURLToPath } from "url";
 import { existsSync } from "fs";
+
+const require = createRequire(import.meta.url);
 import react from "@vitejs/plugin-react";
 import tailwind from "tailwindcss";
 import { defineConfig } from "vite";
@@ -29,8 +32,8 @@ export default defineConfig({
       ...(pluginEntry && {
         "@capgo/capacitor-media-session": pluginEntry,
       }),
-      // SheetJS: package "main" is CJS; explicit ESM entry avoids Rollup "failed to resolve" on some CI installs.
-      xlsx: path.resolve(__dirname, "node_modules/xlsx/xlsx.mjs"),
+      // SheetJS: bare "xlsx" → CJS main confuses some Rollup installs; lock to ESM file via Node resolver (hoist/pnpm-safe).
+      xlsx: require.resolve("xlsx/xlsx.mjs"),
     },
   },
   build: {
