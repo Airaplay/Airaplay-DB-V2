@@ -1,6 +1,6 @@
 import { useState, useEffect, useCallback, useRef } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { Users, FileText, HelpCircle, BarChart, Settings, LogOut, Home, DollarSign, BarChart2, Bell, UserCog, Zap, Image, Coins, Wallet, Calendar, UserPlus, Megaphone, Flag, Star, Music, Tags, Sparkles, ListMusic, Shield, Award, Trophy, TrendingUp, Activity, Gift, Globe, Monitor, ChevronDown, ChevronRight, Menu, X, BookOpen, ScrollText } from 'lucide-react';
+import { Users, FileText, HelpCircle, BarChart, Settings, LogOut, Home, DollarSign, BarChart2, Bell, UserCog, Zap, Image, Coins, Wallet, Calendar, UserPlus, Megaphone, Flag, Star, Music, Tags, Sparkles, ListMusic, Shield, Award, Trophy, TrendingUp, Activity, Gift, Globe, Monitor, ChevronDown, ChevronRight, Menu, X, BookOpen, ScrollText, Headphones } from 'lucide-react';
 import { supabase, getUserRole } from '../../lib/supabase';
 import { cacheInvalidation } from '../../lib/enhancedDataFetching';
 import { performCompleteLogout } from '../../lib/logoutService';
@@ -40,8 +40,9 @@ import { WebAdsSection } from './WebAdsSection';
 import { BlogManagementSection } from './BlogManagementSection';
 import { AccountingSection } from './AccountingSection';
 import { ArtistEarningsLedgerSection } from './ArtistEarningsLedgerSection';
+import { ListenerEarningsLedgerSection } from './ListenerEarningsLedgerSection';
 
-type SectionType = 'users' | 'content' | 'faqs' | 'analytics' | 'country_performance' | 'settings' | 'earnings' | 'analysis' | 'announcements' | 'admin_settings' | 'ad_management' | 'native_ads' | 'web_ads' | 'feature_banners' | 'treat_manager' | 'daily_checkin' | 'referral_management' | 'promotion_manager' | 'reports' | 'featured_artists' | 'mix_manager' | 'daily_mix_manager' | 'global_daily_mix_manager' | 'genre_manager' | 'payment_monitoring' | 'mood_analysis' | 'listener_curations' | 'contribution_rewards' | 'content_thresholds' | 'financial_controls' | 'promotional_credits' | 'support' | 'blog' | 'accounting' | 'artist_earnings_ledger';
+type SectionType = 'users' | 'content' | 'faqs' | 'analytics' | 'country_performance' | 'settings' | 'earnings' | 'analysis' | 'announcements' | 'admin_settings' | 'ad_management' | 'native_ads' | 'web_ads' | 'feature_banners' | 'treat_manager' | 'daily_checkin' | 'referral_management' | 'promotion_manager' | 'reports' | 'featured_artists' | 'mix_manager' | 'daily_mix_manager' | 'global_daily_mix_manager' | 'genre_manager' | 'payment_monitoring' | 'mood_analysis' | 'listener_curations' | 'contribution_rewards' | 'content_thresholds' | 'financial_controls' | 'promotional_credits' | 'support' | 'blog' | 'accounting' | 'artist_earnings_ledger' | 'listener_earnings_ledger';
 
 const ADMIN_ROLES = ['admin', 'manager', 'editor', 'account'];
 
@@ -88,6 +89,7 @@ const getSectionLabel = (section: SectionType): string => {
     blog: 'Blog',
       accounting: 'Accounting',
     artist_earnings_ledger: 'Artist Earnings Ledger',
+    listener_earnings_ledger: 'Listener Earnings Ledger',
     mood_analysis: 'Mood Analysis',
     promotional_credits: 'Promo Credits',
     settings: 'Settings',
@@ -256,7 +258,7 @@ export const AdminDashboardScreen = (): JSX.Element => {
       return ['content', 'faqs', 'blog'].includes(section);
     }
     if (userRole === 'account') {
-      return ['analytics', 'earnings', 'support', 'payment_monitoring', 'financial_controls', 'promotional_credits', 'treat_manager', 'country_performance', 'accounting', 'artist_earnings_ledger'].includes(section);
+      return ['analytics', 'earnings', 'support', 'payment_monitoring', 'financial_controls', 'promotional_credits', 'treat_manager', 'country_performance', 'accounting', 'artist_earnings_ledger', 'listener_earnings_ledger'].includes(section);
     }
     return false;
   };
@@ -302,6 +304,7 @@ export const AdminDashboardScreen = (): JSX.Element => {
         case 'promotional_credits': return <PromotionalCreditsSection />;
         case 'accounting': return <AccountingSection />;
         case 'artist_earnings_ledger': return <ArtistEarningsLedgerSection />;
+        case 'listener_earnings_ledger': return <ListenerEarningsLedgerSection />;
         case 'settings':
           return (
             <div className="p-6 bg-white rounded-xl border border-gray-100 shadow-sm">
@@ -458,6 +461,7 @@ export const AdminDashboardScreen = (): JSX.Element => {
           <NavGroup groupKey="monetization" label="Monetization">
             <NavItem section="earnings" icon={<DollarSign className="w-4 h-4" />} label="Earnings & Payouts" />
             <NavItem section="artist_earnings_ledger" icon={<ScrollText className="w-4 h-4" />} label="Artist Earnings Ledger" />
+            <NavItem section="listener_earnings_ledger" icon={<Headphones className="w-4 h-4" />} label="Listener Earnings Ledger" />
             <NavItem section="support" icon={<Wallet className="w-4 h-4" />} label="Support & Withdrawals" />
             <NavItem section="payment_monitoring" icon={<Activity className="w-4 h-4" />} label="Payment Monitoring" />
             <NavItem section="financial_controls" icon={<Shield className="w-4 h-4" />} label="Financial Controls" />
