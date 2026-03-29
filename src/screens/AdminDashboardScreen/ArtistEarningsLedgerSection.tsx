@@ -132,7 +132,10 @@ const fmtTreats = (n: number | null | undefined): string => {
 
 /** Display label for the Description column (and exports). */
 function formatLedgerDescriptionLabel(label: string): string {
-  if (label.trim().toLowerCase() === 'ad revenue') return 'Revenue';
+  const t = label.trim();
+  if (t.toLowerCase() === 'revenue (processed stream/impression)') {
+    return 'Ad revenue (processed stream/impression)';
+  }
   return label;
 }
 
