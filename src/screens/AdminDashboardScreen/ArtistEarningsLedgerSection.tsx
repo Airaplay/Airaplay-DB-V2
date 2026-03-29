@@ -11,9 +11,17 @@ import {
   ArrowDownCircle,
   Wallet,
   Info,
+  FileSpreadsheet,
+  FileDown,
 } from 'lucide-react';
 import { supabase } from '../../lib/supabase';
 import { format, parseISO } from 'date-fns';
+import {
+  buildExportFilenameBase,
+  exportArtistLedgerExcel,
+  exportArtistLedgerPdf,
+  type LedgerExportPayload,
+} from '../../lib/artistLedgerExport';
 
 type LedgerCategory =
   | 'stream_earning'
@@ -126,6 +134,24 @@ const fmtTreats = (n: number | null | undefined): string => {
   const v = Number(n ?? 0);
   return `${v.toLocaleString('en-US', { maximumFractionDigits: 2 })} Treats`;
 };
+
+function ledgerToExportPayload(payload: LedgerPayload): LedgerExportPayload | null {
+  if (!payload.user || !payload.totals) return null;
+  return {
+    user: payload.user,
+    artist: payload.artist,
+    totals: payload.totals,
+    entries: (payload.entries || []).map((e) => ({
+      category: e.category,
+      label: e.label,
+      amount_usd: e.amount_usd,
+      amount_treats: e.amount_treats,
+      currency: e.currency,
+      occurred_at: e.occurred_at,
+      ref_id: e.ref_id,
+    })),
+  };
+}
 
 const categoryBadge = (c: LedgerCategory): string => {
   switch (c) {
@@ -306,6 +332,25 @@ export const ArtistEarningsLedgerSection = (): JSX.Element => {
 
   const totals = ledger?.totals;
 
+  const handleExportExcel = useCallback(() => {
+    if (!ledger?.success || !ledger.user || !ledger.totals) return;
+    const exportPayload = ledgerToExportPayload(ledger);
+    if (!exportPayload) return;
+    const base = buildExportFilenameBase(ledger.user.display_name);
+    exportArtistLedgerExcel(exportPayload, base);
+  }, [ledger]);
+
+  const handleExportPdf = useCallback(() => {
+    if (!ledger?.success || !ledger.user || !ledger.totals) return;
+    const exportPayload = ledgerToExportPayload(ledger);
+    if (!exportPayload) return;
+    const base = buildExportFilenameBase(ledger.user.display_name);
+    exportArtistLedgerPdf(exportPayload, base);
+  }, [ledger]);
+
+  const canExport =
+    Boolean(ledger?.success && ledger.user && ledger.totals && !loadingLedger);
+
   return (
     <div className="space-y-6">
       <div className="flex flex-col sm:flex-row sm:items-start sm:justify-between gap-4">
@@ -321,15 +366,37 @@ export const ArtistEarningsLedgerSection = (): JSX.Element => {
             </p>
           </div>
         </div>
-        <button
-          type="button"
-          onClick={() => selected && loadLedger(selected.id)}
-          disabled={!selected || loadingLedger}
-          className="inline-flex items-center gap-2 px-3 py-2 bg-gray-100 hover:bg-gray-200 rounded-lg text-gray-700 text-sm disabled:opacity-50 self-start"
-        >
-          <RefreshCw className={`w-4 h-4 ${loadingLedger ? 'animate-spin' : ''}`} />
-          Refresh
-        </button>
+        <div className="flex flex-wrap items-center gap-2 self-start">
+          {canExport && (
+            <>
+              <button
+                type="button"
+                onClick={handleExportExcel}
+                className="inline-flex items-center gap-2 px-3 py-2 bg-white border border-gray-200 hover:bg-gray-50 rounded-lg text-gray-800 text-sm shadow-sm"
+              >
+                <FileSpreadsheet className="w-4 h-4 text-emerald-700" />
+                Export Excel
+              </button>
+              <button
+                type="button"
+                onClick={handleExportPdf}
+                className="inline-flex items-center gap-2 px-3 py-2 bg-white border border-gray-200 hover:bg-gray-50 rounded-lg text-gray-800 text-sm shadow-sm"
+              >
+                <FileDown className="w-4 h-4 text-rose-700" />
+                Export PDF
+              </button>
+            </>
+          )}
+          <button
+            type="button"
+            onClick={() => selected && loadLedger(selected.id)}
+            disabled={!selected || loadingLedger}
+            className="inline-flex items-center gap-2 px-3 py-2 bg-gray-100 hover:bg-gray-200 rounded-lg text-gray-700 text-sm disabled:opacity-50"
+          >
+            <RefreshCw className={`w-4 h-4 ${loadingLedger ? 'animate-spin' : ''}`} />
+            Refresh
+          </button>
+        </div>
       </div>
 
       <div className="bg-blue-50 border border-blue-100 rounded-lg p-4 flex gap-3">
@@ -466,6 +533,26 @@ export const ArtistEarningsLedgerSection = (): JSX.Element => {
           <div className="bg-white rounded-lg border border-gray-200 shadow-sm overflow-hidden">
             <div className="px-4 py-3 border-b border-gray-100 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
               <h3 className="font-semibold text-gray-900 shrink-0">Ledger (most recent 500)</h3>
+              {canExport && (
+                <div className="flex flex-wrap gap-2">
+                  <button
+                    type="button"
+                    onClick={handleExportExcel}
+                    className="inline-flex items-center gap-1.5 px-2.5 py-1.5 text-xs font-medium bg-emerald-50 text-emerald-900 border border-emerald-200 rounded-md hover:bg-emerald-100"
+                  >
+                    <FileSpreadsheet className="w-3.5 h-3.5" />
+                    Excel
+                  </button>
+                  <button
+                    type="button"
+                    onClick={handleExportPdf}
+                    className="inline-flex items-center gap-1.5 px-2.5 py-1.5 text-xs font-medium bg-rose-50 text-rose-900 border border-rose-200 rounded-md hover:bg-rose-100"
+                  >
+                    <FileDown className="w-3.5 h-3.5" />
+                    PDF
+                  </button>
+                </div>
+              )}
             </div>
             <div className="overflow-x-auto">
               <table className="w-full text-sm">
