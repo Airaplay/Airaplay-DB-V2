@@ -1,45 +1,16 @@
-import * as XLSX from 'xlsx/xlsx.mjs';
+/**
+ * Excel/PDF export for Artist Earnings Ledger.
+ * Import this module dynamically from the UI so xlsx/jspdf stay in an async chunk
+ * and Vite resolves `xlsx` via the alias in vite.config.ts (not `xlsx/xlsx.mjs` directly).
+ */
+import * as XLSX from 'xlsx';
 import { jsPDF } from 'jspdf';
 import autoTable from 'jspdf-autotable';
 import { format, parseISO } from 'date-fns';
 
-/** Mirrors RPC payload used by ArtistEarningsLedgerSection */
-export type LedgerExportEntry = {
-  category: string;
-  label: string;
-  amount_usd: number | null;
-  amount_treats: number | null;
-  currency: string;
-  occurred_at: string | null;
-  ref_id: string;
-};
+import type { LedgerExportEntry, LedgerExportPayload } from './artistLedgerExport.types';
 
-export type LedgerExportTotals = {
-  song_streams: number;
-  stream_earnings_usd: number;
-  stream_earnings_impression_usd: number;
-  creator_pool_payout_usd: number;
-  bonuses_treats: number;
-  contribution_rewards_usd: number;
-  referral_rewards_treats: number;
-  promotions_paid_treats: number;
-  withdrawals_usd: number;
-};
-
-export type LedgerExportPayload = {
-  user: {
-    id: string;
-    display_name: string | null;
-    email: string | null;
-    current_balance_usd: number;
-  };
-  artist?: {
-    artist_id: string | null;
-    stage_name: string | null;
-  };
-  totals: LedgerExportTotals;
-  entries: LedgerExportEntry[];
-};
+export type { LedgerExportEntry, LedgerExportTotals, LedgerExportPayload } from './artistLedgerExport.types';
 
 function safeFileSegment(s: string | null | undefined): string {
   const t = (s || 'artist').replace(/[^a-z0-9-_]+/gi, '_').replace(/_+/g, '_').replace(/^_|_$/g, '');

@@ -16,12 +16,7 @@ import {
 } from 'lucide-react';
 import { supabase } from '../../lib/supabase';
 import { format, parseISO } from 'date-fns';
-import {
-  buildExportFilenameBase,
-  exportArtistLedgerExcel,
-  exportArtistLedgerPdf,
-  type LedgerExportPayload,
-} from '../../lib/artistLedgerExport';
+import type { LedgerExportPayload } from '../../lib/artistLedgerExport.types';
 
 type LedgerCategory =
   | 'stream_earning'
@@ -332,20 +327,34 @@ export const ArtistEarningsLedgerSection = (): JSX.Element => {
 
   const totals = ledger?.totals;
 
-  const handleExportExcel = useCallback(() => {
+  const handleExportExcel = useCallback(async () => {
     if (!ledger?.success || !ledger.user || !ledger.totals) return;
     const exportPayload = ledgerToExportPayload(ledger);
     if (!exportPayload) return;
-    const base = buildExportFilenameBase(ledger.user.display_name);
-    exportArtistLedgerExcel(exportPayload, base);
+    try {
+      const { buildExportFilenameBase, exportArtistLedgerExcel } = await import(
+        '../../lib/artistLedgerExport'
+      );
+      exportArtistLedgerExcel(exportPayload, buildExportFilenameBase(ledger.user.display_name));
+    } catch (e) {
+      console.error('[ArtistEarningsLedger] Excel export failed:', e);
+      setError('Could not load export tools. Try refreshing the page.');
+    }
   }, [ledger]);
 
-  const handleExportPdf = useCallback(() => {
+  const handleExportPdf = useCallback(async () => {
     if (!ledger?.success || !ledger.user || !ledger.totals) return;
     const exportPayload = ledgerToExportPayload(ledger);
     if (!exportPayload) return;
-    const base = buildExportFilenameBase(ledger.user.display_name);
-    exportArtistLedgerPdf(exportPayload, base);
+    try {
+      const { buildExportFilenameBase, exportArtistLedgerPdf } = await import(
+        '../../lib/artistLedgerExport'
+      );
+      exportArtistLedgerPdf(exportPayload, buildExportFilenameBase(ledger.user.display_name));
+    } catch (e) {
+      console.error('[ArtistEarningsLedger] PDF export failed:', e);
+      setError('Could not load export tools. Try refreshing the page.');
+    }
   }, [ledger]);
 
   const canExport =
