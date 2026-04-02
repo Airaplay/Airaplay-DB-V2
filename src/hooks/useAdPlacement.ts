@@ -1,10 +1,10 @@
-import { useEffect, useState } from 'react';
+import { useCallback, useEffect, useState } from 'react';
 import { admobService } from '../lib/admobService';
 import { getActivePlacement, getActivePlacementsForScreen, checkPlacementConditions, AdPlacement } from '../lib/adPlacementService';
 import { BannerAdPosition } from '@capacitor-community/admob';
+import { getFullscreenAdCooldownMsSync } from '../lib/fullscreenAdCooldownConfig';
 
 // Global fullscreen ad cooldown so fullscreen ads (rewarded or interstitial) never appear too frequently across screens
-const FULLSCREEN_AD_COOLDOWN_MS = 2 * 60 * 1000; // 2 minutes
 let lastFullscreenAdTime = 0;
 let fullscreenAdLock = false;
 
@@ -49,191 +49,304 @@ export function useAdPlacement(screenName?: string) {
    * Revenue is attributed per song: when the ad is shown during song playback, always pass
    * context: { contentId: song.id, contentType: 'song' } so each ad impression is tied to that song.
    * margin: optional, in dp; for BOTTOM_CENTER = offset from bottom (e.g. 64 = just above nav+mini).
+   *
+   * Automatically adds margin for BOTTOM_CENTER position to prevent overlap with navigation bar.
+   *
+   * Stable reference (useCallback) so effects like `usePlayerBottomBanner` do not re-run on unrelated
+   * re-renders (e.g. isPlaying) — otherwise cleanup calls hideBanner and an immediate show can be
+   * skipped by admobService's same-unit throttle, leaving the banner hidden.
    */
-  const showBanner = async (
-    placementKey?: string,
-    position: BannerAdPosition = BannerAdPosition.BOTTOM_CENTER,
-    context?: Record<string, any>,
-    margin?: number
-  ) => {
-    try {
-      let placement: AdPlacement | null = null;
+  const showBanner = useCallback(
+    async (
+      placementKey?: string,
+      position: BannerAdPosition = BannerAdPosition.BOTTOM_CENTER,
+      context?: Record<string, any>,
+      margin?: number
+    ) => {
+      try {
+        // Automatically add margin for bottom banners to prevent overlap with navigation bar
+        // Navigation bar is 72dp high
+        let finalMargin = margin;
+        if (finalMargin === undefined && position === BannerAdPosition.BOTTOM_CENTER) {
+          finalMargin = 72; // 72dp = navigation bar height
+        }
 
-      if (placementKey) {
-        placement = await getActivePlacement(placementKey);
-      } else if (screenName && placements.length > 0) {
-        placement = placements.find(p => p.ad_type === 'banner' && checkPlacementConditions(p, context || {})) || null;
-      }
+        // Keyed placements: admobService resolves the unit (single getActivePlacement + skip duplicate work in hook).
+        if (placementKey) {
+          await admobService.showBanner(
+            position,
+            context?.contentId,
+            context?.contentType || 'general',
+            placementKey,
+            undefined,
+            finalMargin
+          );
+          return;
+        }
 
-      // When placement key is provided but DB has no placement, still try showBanner so admobService can use config.bannerAdId
-      if (placementKey && (!placement || placement.ad_type !== 'banner')) {
+        let placement: AdPlacement | null = null;
+        if (screenName && placements.length > 0) {
+          placement = placements.find(p => p.ad_type === 'banner' && checkPlacementConditions(p, context || {})) || null;
+        }
+
+        if (!placement || placement.ad_type !== 'banner') {
+          console.warn('No banner placement found for screen/conditions, falling back to default banner config');
+          await admobService.showBanner(
+            position,
+            context?.contentId,
+            context?.contentType || 'general',
+            undefined,
+            undefined,
+            finalMargin
+          );
+          return;
+        }
+
         await admobService.showBanner(
           position,
           context?.contentId,
           context?.contentType || 'general',
-          placementKey,
-          undefined,
-          margin
+          placement.placement_key,
+          placement.ad_unit_id || undefined,
+          finalMargin
         );
-        return;
+      } catch (error) {
+        console.error('Failed to show banner:', error);
       }
-
-      if (!placement || placement.ad_type !== 'banner') {
-        console.warn('No banner placement found for screen/conditions, falling back to default banner config');
-        // Fall back to default config-based banner (no admin placement needed)
-        await admobService.showBanner(
-          position,
-          context?.contentId,
-          context?.contentType || 'general',
-          undefined,
-          undefined,
-          margin
-        );
-        return;
-      }
-
-      await admobService.showBanner(
-        position,
-        context?.contentId,
-        context?.contentType || 'general',
-        placement.placement_key,
-        placement.ad_unit_id || undefined,
-        margin
-      );
-    } catch (error) {
-      console.error('Failed to show banner:', error);
-    }
-  };
+    },
+    [screenName, placements]
+  );
 
   /**
    * Show an interstitial ad by placement key or screen
    */
-  const showInterstitial = async (
-    placementKey?: string,
-    context?: Record<string, any>,
-    options?: { muteAppAudio?: boolean }
-  ) => {
-    try {
-      const now = Date.now();
-      if (fullscreenAdLock || (now - lastFullscreenAdTime) < FULLSCREEN_AD_COOLDOWN_MS) {
-        console.log('Fullscreen ad skipped by cooldown (interstitial).');
-        return;
-      }
-      fullscreenAdLock = true;
+  const showInterstitial = useCallback(
+    async (
+      placementKey?: string,
+      context?: Record<string, any>,
+      options?: { muteAppAudio?: boolean }
+    ) => {
+      try {
+        const now = Date.now();
+        if (fullscreenAdLock || (now - lastFullscreenAdTime) < getFullscreenAdCooldownMsSync()) {
+          console.log('Fullscreen ad skipped by cooldown (interstitial).');
+          return;
+        }
+        fullscreenAdLock = true;
 
-      let placement: AdPlacement | null = null;
+        let placement: AdPlacement | null = null;
 
-      if (placementKey) {
-        placement = await getActivePlacement(placementKey);
-      } else if (screenName && placements.length > 0) {
-        placement = placements.find(p => p.ad_type === 'interstitial' && checkPlacementConditions(p, context || {})) || null;
-      }
+        if (placementKey) {
+          placement = await getActivePlacement(placementKey);
+        } else if (screenName && placements.length > 0) {
+          placement = placements.find(p => p.ad_type === 'interstitial' && checkPlacementConditions(p, context || {})) || null;
+        }
 
-      if (placementKey && (!placement || placement.ad_type !== 'interstitial')) {
+        if (placementKey && (!placement || placement.ad_type !== 'interstitial')) {
+          await admobService.showInterstitial(
+            context?.contentId,
+            context?.contentType || 'general',
+            placementKey,
+            undefined,
+            options
+          );
+          lastFullscreenAdTime = Date.now();
+          return;
+        }
+
+        if (!placement || placement.ad_type !== 'interstitial') {
+          console.warn('No interstitial placement found');
+          return;
+        }
+
         await admobService.showInterstitial(
           context?.contentId,
           context?.contentType || 'general',
-          placementKey,
-          undefined,
+          placement.placement_key,
+          placement.ad_unit_id || undefined,
           options
         );
         lastFullscreenAdTime = Date.now();
-        return;
+      } catch (error) {
+        console.error('Failed to show interstitial:', error);
+      } finally {
+        fullscreenAdLock = false;
       }
-
-      if (!placement || placement.ad_type !== 'interstitial') {
-        console.warn('No interstitial placement found');
-        return;
-      }
-
-      await admobService.showInterstitial(
-        context?.contentId,
-        context?.contentType || 'general',
-        placement.placement_key,
-        placement.ad_unit_id || undefined,
-        options
-      );
-      lastFullscreenAdTime = Date.now();
-    } catch (error) {
-      console.error('Failed to show interstitial:', error);
-    } finally {
-      fullscreenAdLock = false;
-    }
-  };
+    },
+    [screenName, placements]
+  );
 
   /**
    * Show a rewarded ad by placement key or screen
    */
-  const showRewarded = async (
-    placementKey?: string,
-    context?: Record<string, any>
-  ): Promise<void> => {
-    try {
-      const now = Date.now();
-      if (fullscreenAdLock || (now - lastFullscreenAdTime) < FULLSCREEN_AD_COOLDOWN_MS) {
-        console.log('Fullscreen ad skipped by cooldown (rewarded).');
-        return;
-      }
-      fullscreenAdLock = true;
+  const showRewarded = useCallback(
+    async (placementKey?: string, context?: Record<string, any>): Promise<void> => {
+      try {
+        const now = Date.now();
+        if (fullscreenAdLock || (now - lastFullscreenAdTime) < getFullscreenAdCooldownMsSync()) {
+          console.log('Fullscreen ad skipped by cooldown (rewarded).');
+          return;
+        }
+        fullscreenAdLock = true;
 
-      let placement: AdPlacement | null = null;
+        let placement: AdPlacement | null = null;
 
-      if (placementKey) {
-        placement = await getActivePlacement(placementKey);
-      } else if (screenName && placements.length > 0) {
-        placement = placements.find(p => p.ad_type === 'rewarded' && checkPlacementConditions(p, context || {})) || null;
-      }
+        if (placementKey) {
+          placement = await getActivePlacement(placementKey);
+        } else if (screenName && placements.length > 0) {
+          placement = placements.find(p => p.ad_type === 'rewarded' && checkPlacementConditions(p, context || {})) || null;
+        }
 
-      if (placementKey && (!placement || placement.ad_type !== 'rewarded')) {
+        if (placementKey && (!placement || placement.ad_type !== 'rewarded')) {
+          await admobService.showRewardedAd(
+            context?.contentId,
+            context?.contentType || 'general',
+            placementKey,
+            undefined
+          );
+          lastFullscreenAdTime = Date.now();
+          return;
+        }
+
+        if (!placement || placement.ad_type !== 'rewarded') {
+          console.warn('No rewarded placement found');
+          return;
+        }
+
         await admobService.showRewardedAd(
           context?.contentId,
           context?.contentType || 'general',
-          placementKey,
-          undefined
+          placement.placement_key,
+          placement.ad_unit_id || undefined
         );
         lastFullscreenAdTime = Date.now();
+      } catch (error) {
+        console.error('Failed to show rewarded ad:', error);
+      } finally {
+        fullscreenAdLock = false;
+      }
+    },
+    [screenName, placements]
+  );
+
+  /**
+   * Song bonus card: uses placement key `song_bonus_rewarded` for analytics and
+   * explicit `VITE_ADMOB_REWARDED_ID` when set (see admobService direct pub id path).
+   */
+  const showSongBonusRewarded = useCallback(async (context: { contentId: string }): Promise<void> => {
+    try {
+      const now = Date.now();
+      if (fullscreenAdLock || (now - lastFullscreenAdTime) < getFullscreenAdCooldownMsSync()) {
+        console.log('Fullscreen ad skipped by cooldown (song bonus rewarded).');
         return;
       }
-
-      if (!placement || placement.ad_type !== 'rewarded') {
-        console.warn('No rewarded placement found');
-        return;
-      }
-
+      fullscreenAdLock = true;
+      const unitId = import.meta.env.VITE_ADMOB_REWARDED_ID?.trim();
       await admobService.showRewardedAd(
-        context?.contentId,
-        context?.contentType || 'general',
-        placement.placement_key,
-        placement.ad_unit_id || undefined
+        context.contentId,
+        'song',
+        'song_bonus_rewarded',
+        unitId
       );
       lastFullscreenAdTime = Date.now();
     } catch (error) {
-      console.error('Failed to show rewarded ad:', error);
+      console.error('Failed to show song bonus rewarded:', error);
     } finally {
       fullscreenAdLock = false;
     }
-  };
+  }, []);
+
+  /**
+   * Show a rewarded interstitial ad by placement key or screen
+   */
+  const showRewardedInterstitial = useCallback(
+    async (
+      placementKey?: string,
+      context?: Record<string, any>,
+      options?: { muteAppAudio?: boolean }
+    ): Promise<void> => {
+      try {
+        const now = Date.now();
+        if (fullscreenAdLock || (now - lastFullscreenAdTime) < getFullscreenAdCooldownMsSync()) {
+          console.log('Fullscreen ad skipped by cooldown (rewarded interstitial).');
+          return;
+        }
+        fullscreenAdLock = true;
+
+        let placement: AdPlacement | null = null;
+
+        if (placementKey) {
+          placement = await getActivePlacement(placementKey);
+        } else if (screenName && placements.length > 0) {
+          placement = placements.find(p => p.ad_type === 'rewarded_interstitial' && checkPlacementConditions(p, context || {})) || null;
+        }
+
+        if (placementKey && (!placement || placement.ad_type !== 'rewarded_interstitial')) {
+          await admobService.showRewardedInterstitial(
+            context?.contentId,
+            context?.contentType || 'general',
+            placementKey,
+            undefined,
+            options
+          );
+          lastFullscreenAdTime = Date.now();
+          return;
+        }
+
+        if (!placement || placement.ad_type !== 'rewarded_interstitial') {
+          console.warn('No rewarded interstitial placement found');
+          return;
+        }
+
+        await admobService.showRewardedInterstitial(
+          context?.contentId,
+          context?.contentType || 'general',
+          placement.placement_key,
+          placement.ad_unit_id || undefined,
+          options
+        );
+        lastFullscreenAdTime = Date.now();
+      } catch (error) {
+        console.error('Failed to show rewarded interstitial:', error);
+        throw error;
+      } finally {
+        fullscreenAdLock = false;
+      }
+    },
+    [screenName, placements]
+  );
 
   /**
    * Hide banner ad. Safe to call when no banner is shown; never throws.
+   * Returns a Promise so callers can await hide before show (avoids race where hide completes after show).
    */
-  const hideBanner = () => {
-    admobService.hideBanner().catch(() => {});
-  };
+  const hideBanner = useCallback((ownerPlacementKey?: string): Promise<void> => {
+    return admobService.hideBannerOwnedBy(ownerPlacementKey).catch(() => {});
+  }, []);
 
   /**
    * Remove banner ad. Safe to call when no banner is shown; never throws.
    */
-  const removeBanner = () => {
-    admobService.removeBanner().catch(() => {});
-  };
+  const removeBanner = useCallback((ownerPlacementKey?: string) => {
+    admobService.removeBannerOwnedBy(ownerPlacementKey).catch(() => {});
+  }, []);
 
   /** Show either an interstitial or a rewarded ad at random; single lock/cooldown so they never clash. Resolves when ad is dismissed. */
-  const showInterstitialOrRewarded = (
-    options?: { contentId?: string; contentType?: string; interstitialPlacementKey?: string; rewardedPlacementKey?: string }
-  ): Promise<void> => {
-    return admobService.showInterstitialOrRewarded(options ?? {}).catch(() => {});
-  };
+  const showInterstitialOrRewarded = useCallback(
+    (
+      options?: {
+        contentId?: string;
+        contentType?: string;
+        interstitialPlacementKey?: string;
+        rewardedPlacementKey?: string;
+        rewardedInterstitialPlacementKey?: string;
+        preferRewardedInterstitial?: boolean;
+      }
+    ): Promise<void> => {
+      return admobService.showInterstitialOrRewarded(options ?? {}).catch(() => {});
+    },
+    []
+  );
 
   return {
     placements,
@@ -241,6 +354,8 @@ export function useAdPlacement(screenName?: string) {
     showBanner,
     showInterstitial,
     showRewarded,
+    showSongBonusRewarded,
+    showRewardedInterstitial,
     showInterstitialOrRewarded,
     hideBanner,
     removeBanner,
