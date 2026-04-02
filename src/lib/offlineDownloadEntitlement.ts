@@ -26,10 +26,14 @@ function parseStatus(data: unknown): OfflineDownloadStatus {
   }
   const active = o.active === true;
   const expiresAt = parseExpiresAt(o.expires_at);
-  const cost =
-    typeof o.monthly_cost_treats === 'number'
-      ? o.monthly_cost_treats
-      : DEFAULT_OFFLINE_DOWNLOAD_MONTHLY_COST_TREATS;
+  const rawCost = o.monthly_cost_treats;
+  let cost = DEFAULT_OFFLINE_DOWNLOAD_MONTHLY_COST_TREATS;
+  if (typeof rawCost === 'number') {
+    cost = rawCost;
+  } else if (typeof rawCost === 'string') {
+    const n = Number(rawCost);
+    if (!Number.isNaN(n)) cost = n;
+  }
   return { active, expiresAt, monthlyCostTreats: cost };
 }
 
