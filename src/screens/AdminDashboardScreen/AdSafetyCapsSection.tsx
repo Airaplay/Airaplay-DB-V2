@@ -357,3 +357,4 @@ export const AdSafetyCapsSection = (): JSX.Element => {
     </div>
   );
 };
+ 
