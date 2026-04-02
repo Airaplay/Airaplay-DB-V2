@@ -1,11 +1,6 @@
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect } from 'react';
 import { Shield, DollarSign, Clock, TrendingUp, Save, AlertCircle, CheckCircle, Zap } from 'lucide-react';
 import { supabase } from '../../lib/supabase';
-import {
-  DEFAULT_FULLSCREEN_AD_COOLDOWN_SECONDS,
-  invalidateFullscreenAdCooldownCache,
-  refreshFullscreenAdCooldownConfig,
-} from '../../lib/fullscreenAdCooldownConfig';
 
 interface SafetyCaps {
   id: string;
@@ -39,41 +34,20 @@ export const AdSafetyCapsSection = (): JSX.Element => {
     platform_revenue_percentage: 50.00,
   });
 
-  const [clientAdSettingsId, setClientAdSettingsId] = useState<string | null>(null);
-  const [fullscreenCooldownInput, setFullscreenCooldownInput] = useState(DEFAULT_FULLSCREEN_AD_COOLDOWN_SECONDS);
-  const [committedFullscreenCooldown, setCommittedFullscreenCooldown] = useState(DEFAULT_FULLSCREEN_AD_COOLDOWN_SECONDS);
-  const [cooldownSaving, setCooldownSaving] = useState(false);
-  const [cooldownNotice, setCooldownNotice] = useState<{ type: 'ok' | 'err'; text: string } | null>(null);
-
-  const fetchFullscreenCooldownSettings = useCallback(async () => {
-    const { data, error: fetchError } = await supabase
-      .from('app_ad_client_settings')
-      .select('id, fullscreen_ad_cooldown_seconds')
-      .limit(1)
-      .maybeSingle();
-
-    if (fetchError) {
-      console.error('Error fetching app ad client settings:', fetchError);
-      return;
-    }
-    if (data) {
-      setClientAdSettingsId(data.id);
-      setFullscreenCooldownInput(data.fullscreen_ad_cooldown_seconds);
-      setCommittedFullscreenCooldown(data.fullscreen_ad_cooldown_seconds);
-    }
+  useEffect(() => {
+    fetchSafetyCaps();
   }, []);
 
-  const fetchSafetyCaps = useCallback(async () => {
+  const fetchSafetyCaps = async () => {
     try {
       setIsLoading(true);
       setError(null);
 
-      const [capsResult] = await Promise.all([
-        supabase.from('ad_safety_caps').select('*').eq('is_active', true).single(),
-        fetchFullscreenCooldownSettings(),
-      ]);
-
-      const { data, error: fetchError } = capsResult;
+      const { data, error: fetchError } = await supabase
+        .from('ad_safety_caps')
+        .select('*')
+        .eq('is_active', true)
+        .single();
 
       if (fetchError) throw fetchError;
 
@@ -87,17 +61,13 @@ export const AdSafetyCapsSection = (): JSX.Element => {
           platform_revenue_percentage: parseFloat(data.platform_revenue_percentage),
         });
       }
-    } catch (err: unknown) {
+    } catch (err: any) {
       console.error('Error fetching safety caps:', err);
-      setError(err instanceof Error ? err.message : 'Failed to load safety caps');
+      setError(err.message);
     } finally {
       setIsLoading(false);
     }
-  }, [fetchFullscreenCooldownSettings]);
-
-  useEffect(() => {
-    void fetchSafetyCaps();
-  }, [fetchSafetyCaps]);
+  };
 
   const handleChange = (field: keyof typeof formData, value: number) => {
     setFormData(prev => ({ ...prev, [field]: value }));
@@ -143,47 +113,6 @@ export const AdSafetyCapsSection = (): JSX.Element => {
     return null;
   };
 
-  const isCooldownDirty = fullscreenCooldownInput !== committedFullscreenCooldown;
-
-  const handleSaveFullscreenCooldown = async () => {
-    setCooldownNotice(null);
-    const sec = Math.round(Number(fullscreenCooldownInput));
-    if (!Number.isFinite(sec) || sec < 30 || sec > 600) {
-      setCooldownNotice({ type: 'err', text: 'Cooldown must be between 30 and 600 seconds.' });
-      return;
-    }
-    if (!clientAdSettingsId) {
-      setCooldownNotice({ type: 'err', text: 'Ad client settings row not loaded. Apply DB migration or refresh.' });
-      return;
-    }
-    try {
-      setCooldownSaving(true);
-      const { data: authData } = await supabase.auth.getUser();
-      const uid = authData?.user?.id;
-      const { error: upErr } = await supabase
-        .from('app_ad_client_settings')
-        .update({
-          fullscreen_ad_cooldown_seconds: sec,
-          ...(uid ? { updated_by: uid } : {}),
-        })
-        .eq('id', clientAdSettingsId);
-      if (upErr) throw upErr;
-      setCommittedFullscreenCooldown(sec);
-      setFullscreenCooldownInput(sec);
-      invalidateFullscreenAdCooldownCache();
-      await refreshFullscreenAdCooldownConfig();
-      setCooldownNotice({ type: 'ok', text: 'Global fullscreen ad cooldown updated. Apps pick up changes within a few minutes or on next open.' });
-    } catch (e: unknown) {
-      console.error('Save fullscreen cooldown:', e);
-      setCooldownNotice({
-        type: 'err',
-        text: e instanceof Error ? e.message : 'Failed to save cooldown.',
-      });
-    } finally {
-      setCooldownSaving(false);
-    }
-  };
-
   const handleSave = async () => {
     try {
       setIsSaving(true);
@@ -223,9 +152,9 @@ export const AdSafetyCapsSection = (): JSX.Element => {
       setSuccess('Safety caps and revenue split updated successfully!');
       setIsDirty(false);
       fetchSafetyCaps(); // Refresh data
-    } catch (err: unknown) {
+    } catch (err: any) {
       console.error('Error saving safety caps:', err);
-      setError(err instanceof Error ? err.message : 'Failed to save configuration');
+      setError(err.message);
     } finally {
       setIsSaving(false);
     }
@@ -291,51 +220,6 @@ export const AdSafetyCapsSection = (): JSX.Element => {
             </div>
           </div>
         </div>
-      </div>
-
-      {/* Global fullscreen ad spacing (client) */}
-      <div className="bg-white rounded-xl border border-gray-100 shadow-sm p-4">
-        <div className="flex items-center gap-2.5 mb-3">
-          <div className="w-7 h-7 rounded-lg bg-violet-50 flex items-center justify-center">
-            <Clock className="w-3.5 h-3.5 text-violet-600" />
-          </div>
-          <div>
-            <p className="text-sm font-semibold text-gray-900">Global fullscreen ad cooldown</p>
-            <p className="text-xs text-gray-400">
-              Minimum time between interstitial, rewarded, and rewarded-interstitial ads app-wide (native).
-            </p>
-          </div>
-        </div>
-        <label className={labelCls}>Cooldown (seconds)</label>
-        <div className="flex flex-col sm:flex-row sm:items-end gap-3">
-          <input
-            type="number"
-            min={30}
-            max={600}
-            value={fullscreenCooldownInput}
-            onChange={(e) => {
-              setFullscreenCooldownInput(parseInt(e.target.value, 10) || 0);
-              setCooldownNotice(null);
-            }}
-            className={`${inputCls} sm:max-w-[200px]`}
-          />
-          <button
-            type="button"
-            onClick={handleSaveFullscreenCooldown}
-            disabled={!isCooldownDirty || cooldownSaving}
-            className="inline-flex items-center justify-center gap-1.5 px-4 py-2 text-sm bg-violet-600 hover:bg-violet-700 disabled:bg-gray-300 disabled:cursor-not-allowed text-white rounded-lg font-medium transition-colors"
-          >
-            <Save className="w-3.5 h-3.5" />
-            {cooldownSaving ? 'Saving…' : 'Save cooldown'}
-          </button>
-        </div>
-        <p className="text-xs text-gray-400 mt-1.5">Allowed range: 30–600 seconds (30s–10m). Default seed: {DEFAULT_FULLSCREEN_AD_COOLDOWN_SECONDS}s.</p>
-        {cooldownNotice?.type === 'err' && (
-          <p className="text-xs text-red-600 mt-2">{cooldownNotice.text}</p>
-        )}
-        {cooldownNotice?.type === 'ok' && (
-          <p className="text-xs text-green-700 mt-2">{cooldownNotice.text}</p>
-        )}
       </div>
 
       {/* Alerts */}
