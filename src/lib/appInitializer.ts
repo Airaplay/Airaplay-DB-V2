@@ -2,6 +2,7 @@ import { persistentCache } from './persistentCache';
 import { backgroundPrefetcher } from './backgroundPrefetch';
 import { fetchHomeScreenData } from './dataFetching';
 import { getRequestTimeoutMs, shouldSkipBackgroundPrefetch } from './networkAwareConfig';
+import { refreshFullscreenAdCooldownConfig } from './fullscreenAdCooldownConfig';
 
 class AppInitializer {
   private initialized = false;
@@ -27,6 +28,8 @@ class AppInitializer {
       if (!shouldSkipBackgroundPrefetch()) {
         this.startBackgroundPrefetch();
       }
+
+      void refreshFullscreenAdCooldownConfig();
 
       this.setupVisibilityHandlers();
 

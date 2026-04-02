@@ -1,4 +1,5 @@
 import { Capacitor } from '@capacitor/core';
+import { App } from '@capacitor/app';
 import {
   AdMob,
   BannerAdSize,
@@ -12,14 +13,38 @@ import { supabase } from './supabase';
 import { logAdReward, logAdImpression, logAdRevenue } from './adLoggingService';
 import { getActivePlacement } from './adPlacementService';
 import { getUserLocation } from './locationDetection';
+import {
+  MAIN_APP_BOTTOM_BANNER_PLACEMENT,
+  isFullScreenPlayerBottomBannerKey,
+  isOverlayModalBannerPlacementKey,
+} from './adPlacementConstants';
+import { BANNER_PRELOAD_PARAMS_MAX_AGE_MS } from './bannerRefreshConstants';
+import { getFullscreenAdCooldownMsSync, refreshFullscreenAdCooldownConfig } from './fullscreenAdCooldownConfig';
 
 const isNative = Capacitor.isNativePlatform();
 
+/** Fully resolved banner request so native `showBanner` can run without awaiting Supabase (used for preload + scheduled swap). */
+type ResolvedBannerParams = {
+  position: BannerAdPosition;
+  contentId?: string;
+  contentType: string;
+  placementKey?: string;
+  adUnitId?: string;
+  margin?: number;
+  validAdId: string;
+  resolvedPlacementKey: string;
+  /** DB-resolved placement key for impression logging (may differ from `placementKey`). */
+  recordPlacementKey?: string;
+};
+
 export interface AdMobConfig {
   appId?: string; // AdMob App ID from database
-  bannerAdId?: string; // Fallback/test ad ID
+  bannerAdId?: string; // Fallback for main tab / general banners (e.g. main_app_bottom_banner)
+  /** Distinct unit for full-screen player bottom banners when DB maps the same unit as main — set via VITE_ADMOB_PLAYER_BANNER_ID */
+  playerBannerAdId?: string;
   interstitialAdId?: string; // Fallback/test ad ID
   rewardedAdId?: string; // Fallback/test ad ID
+  rewardedInterstitialAdId?: string; // Fallback/test ad ID for rewarded interstitial
   testMode?: boolean;
 }
 
@@ -27,6 +52,8 @@ class AdMobService {
   private config: AdMobConfig | null = null;
   private isInitialized = false;
   private bannerVisible = false; // Only call native hide/remove when we actually showed a banner (avoids native crash)
+  /** Tracks which placement last "owns" the banner surface (prevents cross-screen hide races). */
+  private activeBannerOwnerKey: string | null = null;
   private pendingBannerRequest: {
     position: BannerAdPosition;
     contentId?: string;
@@ -35,14 +62,59 @@ class AdMobService {
     adUnitId?: string;
     margin?: number;
   } | null = null;
+  /** Last show params so FailedToLoad can retry without re-querying screens (useAdPlacement swallows errors). */
+  private lastBannerForRetry: {
+    position: BannerAdPosition;
+    contentId?: string;
+    contentType: string;
+    placementKey?: string;
+    adUnitId?: string;
+    margin?: number;
+  } | null = null;
+  /** Next banner request prepared shortly before refresh (placement/ad unit/context/margin). */
+  /** Result of `resolveBannerForShow` + timestamp; consumed by `refreshBannerAd` for a fast native swap. */
+  private preloadedBannerForRefresh: (ResolvedBannerParams & { preparedAt: number }) | null = null;
+  private bannerFailRetryTimer: ReturnType<typeof setTimeout> | null = null;
+  private bannerFailRetryCount = 0;
+  /** Whether current route/screen expects banner to stay visible. */
+  private bannerShouldBeVisible = false;
+  private bannerKeepAliveTimer: ReturnType<typeof setInterval> | null = null;
+  private static readonly BANNER_KEEP_ALIVE_CHECK_MS = 20_000;
+  /** After a failed load, AdMob rate-limits rapid re-requests — honor a cooldown before calling showBanner again. */
+  private lastBannerFailureAt = 0;
+  private static readonly BANNER_FAILURE_COOLDOWN_MS = 25_000;
+  /** Dedupe overlapping calls (hook + screens) for the same ad unit. */
+  private lastBannerRequestAtByAdUnit = new Map<string, number>();
+  private static readonly MIN_MS_BETWEEN_BANNER_REQUESTS_SAME_UNIT = 4000;
+  /** Last requested placement key (even if banner didn't successfully show). */
+  private lastRequestedBannerPlacementKey: string | undefined;
+  /**
+   * Last placement that successfully showed a banner. Used to allow an immediate request when
+   * switching e.g. main_app_bottom_banner (Home) → music_player_bottom_banner (same ad unit ID in DB),
+   * otherwise the 4s throttle blocks the player right after the tab banner.
+   */
+  private lastSuccessfulBannerPlacementKey: string | undefined;
+  /** Last time native banner fired `bannerAdLoaded` — helps reason about refresh cadence. */
+  private lastBannerNativeLoadedAt = 0;
+  /** Resolved unit_id for main_app_bottom_banner — used to avoid player banners reusing the same native ad unit. */
+  private mainAppBannerAdUnitIdCache: string | null | undefined = undefined;
+  private appResumeListenerRegistered = false;
+  private bannerHandoffTimers: ReturnType<typeof setTimeout>[] = [];
+  /** When an overlay modal takes over the banner surface, stash previous params so dismiss can restore them. */
+  private bannerOverlayRestoreStack: Array<{
+    position: BannerAdPosition;
+    contentId?: string;
+    contentType: string;
+    placementKey?: string;
+    adUnitId?: string;
+    margin?: number;
+  }> = [];
   private userCountryCache: { country: string | null; timestamp: number } | null = null;
   private readonly COUNTRY_CACHE_DURATION = 5 * 60 * 1000; // 5 minutes
 
   /** Only one fullscreen ad (interstitial or rewarded) at a time; cooldown to avoid clash/crash */
   private fullscreenAdLock = false;
   private lastFullscreenAdTime = 0;
-  // Global cooldown so fullscreen ads can never stack on top of each other.
-  private static readonly FULLSCREEN_AD_COOLDOWN_MS = 2 * 60 * 1000; // 2 minutes
   private pendingFullscreenAd: { contentId?: string; contentType?: string; interstitialPlacementKey?: string; rewardedPlacementKey?: string } | null = null;
 
   /**
@@ -56,6 +128,8 @@ class AdMobService {
     }
 
     try {
+      await refreshFullscreenAdCooldownConfig();
+
       // Load AdMob configuration from database
       const { data: adNetwork, error } = await supabase
         .from('ad_networks')
@@ -88,6 +162,7 @@ class AdMobService {
       });
 
       this.setupBannerListeners();
+      this.registerAppResumeBannerRefresh();
       this.isInitialized = true;
       console.log('AdMob initialized successfully with App ID:', appId);
 
@@ -111,32 +186,166 @@ class AdMobService {
           pending.margin
         ).catch(() => {});
       }
+
+      // Warm the default interstitial in the background so the first show() is faster.
+      // After each dismiss we prepare again (see showInterstitial) so the next slot stays loaded.
+      void this.prepareInterstitial().catch(() => {});
     } catch (error) {
       console.error('Failed to initialize AdMob:', error);
       this.isInitialized = false;
     }
   }
 
-  private bannerListenerHandle: { remove: () => Promise<void> } | null = null;
+  private bannerEventsRegistered = false;
+  private bannerFailedListenerHandle: { remove: () => Promise<void> } | null = null;
+  private bannerLoadedListenerHandle: { remove: () => Promise<void> } | null = null;
+
+  private clearBannerRetryTimer(): void {
+    if (this.bannerFailRetryTimer) {
+      clearTimeout(this.bannerFailRetryTimer);
+      this.bannerFailRetryTimer = null;
+    }
+  }
+
+  private clearBannerKeepAliveTimer(): void {
+    if (this.bannerKeepAliveTimer) {
+      clearInterval(this.bannerKeepAliveTimer);
+      this.bannerKeepAliveTimer = null;
+    }
+  }
+
+  private clearBannerHandoffTimers(): void {
+    if (this.bannerHandoffTimers.length === 0) return;
+    for (const t of this.bannerHandoffTimers) {
+      clearTimeout(t);
+    }
+    this.bannerHandoffTimers = [];
+  }
+
+  /** Loads main app banner unit id once (for comparing player vs main placements). */
+  private async ensureMainAppBannerUnitIdCache(): Promise<string | null> {
+    if (this.mainAppBannerAdUnitIdCache !== undefined) {
+      return this.mainAppBannerAdUnitIdCache;
+    }
+    try {
+      const mp = await getActivePlacement(MAIN_APP_BOTTOM_BANNER_PLACEMENT);
+      const id = mp?.ad_unit?.unit_id?.trim() ?? null;
+      this.mainAppBannerAdUnitIdCache = id;
+      return id;
+    } catch {
+      this.mainAppBannerAdUnitIdCache = null;
+      return null;
+    }
+  }
+
+  /** Keep the requested banner present while a screen expects it to be visible. */
+  private ensureBannerKeepAlive(): void {
+    if (!isNative || !this.isInitialized) return;
+    if (!this.bannerShouldBeVisible) return;
+    if (this.bannerKeepAliveTimer) return;
+
+    this.bannerKeepAliveTimer = setInterval(() => {
+      if (!this.bannerShouldBeVisible || this.bannerVisible) return;
+      const p = this.lastBannerForRetry;
+      if (!p) return;
+      this.showBanner(
+        p.position,
+        p.contentId,
+        p.contentType,
+        p.placementKey,
+        p.adUnitId,
+        p.margin
+      ).catch(() => {});
+    }, AdMobService.BANNER_KEEP_ALIVE_CHECK_MS);
+  }
+
+  /**
+   * One slow retry after native FailedToLoad. Fast retries cause:
+   * "Too many recently failed requests for ad unit ID ... You must wait a few seconds"
+   */
+  private scheduleBannerRetryAfterFailure(): void {
+    if (!isNative || !this.isInitialized) return;
+    const params = this.lastBannerForRetry;
+    if (!params?.placementKey) return;
+    if (this.bannerFailRetryCount >= 1) return;
+
+    this.clearBannerRetryTimer();
+    this.bannerFailRetryCount += 1;
+    const delay = 60_000;
+    this.bannerFailRetryTimer = setTimeout(() => {
+      this.bannerFailRetryTimer = null;
+      this.showBanner(
+        params.position,
+        params.contentId,
+        params.contentType,
+        params.placementKey,
+        params.adUnitId,
+        params.margin
+      ).catch(() => {});
+    }, delay);
+  }
+
+  /** Re-show bottom player banner after returning from background (SDK often drops the view). */
+  private registerAppResumeBannerRefresh(): void {
+    if (!isNative || this.appResumeListenerRegistered) return;
+    this.appResumeListenerRegistered = true;
+    App.addListener('resume', () => {
+      const p = this.lastBannerForRetry;
+      if (!p?.placementKey || !/_bottom_banner$/.test(p.placementKey)) return;
+      if (Date.now() - this.lastBannerFailureAt < AdMobService.BANNER_FAILURE_COOLDOWN_MS) return;
+      this.bannerFailRetryCount = 0;
+      this.showBanner(
+        p.position,
+        p.contentId,
+        p.contentType,
+        p.placementKey,
+        p.adUnitId,
+        p.margin
+      ).catch(() => {});
+    }).catch(() => {
+      this.appResumeListenerRegistered = false;
+    });
+  }
 
   private setupBannerListeners(): void {
-    if (!isNative || this.bannerListenerHandle) return;
-    AdMob.addListener(
+    if (!isNative || this.bannerEventsRegistered) return;
+    this.bannerEventsRegistered = true;
+
+    void AdMob.addListener(
       BannerAdPluginEvents.FailedToLoad,
       (error: unknown) => {
         try {
+          // If we intentionally hid/removed the banner, the SDK may still emit FailedToLoad.
+          // Don't poison our "failure cooldown" in that case.
+          const wasBannerVisible = this.bannerVisible;
           this.bannerVisible = false; // Native reported failure; keep state in sync
+          if (!wasBannerVisible) return;
+
+          this.lastBannerFailureAt = Date.now();
           const err = error as { code?: number; message?: string } | null | undefined;
           console.warn('AdMob: Banner failed to load', { code: err?.code, message: err?.message ?? 'unknown' });
+          this.scheduleBannerRetryAfterFailure();
         } catch (e) {
           console.warn('AdMob: Banner failed to load (callback error)', e);
         }
       }
-    ).then((handle) => {
-      this.bannerListenerHandle = handle;
-    }).catch((err) => {
-      console.warn('AdMob: Could not add banner FailedToLoad listener', err);
-    });
+    )
+      .then((handle) => {
+        this.bannerFailedListenerHandle = handle;
+      })
+      .catch((err) => {
+        console.warn('AdMob: Could not add banner FailedToLoad listener', err);
+      });
+
+    void AdMob.addListener(BannerAdPluginEvents.Loaded, () => {
+      this.lastBannerNativeLoadedAt = Date.now();
+    })
+      .then((handle) => {
+        this.bannerLoadedListenerHandle = handle;
+      })
+      .catch((err) => {
+        console.warn('AdMob: Could not add banner Loaded listener', err);
+      });
   }
 
   /**
@@ -229,7 +438,8 @@ class AdMobService {
         });
       }
 
-      return data === true;
+      // Treat only explicit false as blocked; null/undefined from RPC should not hide ads (strict `=== true` was blocking mobile when DB returned null).
+      return data !== false;
     } catch (error) {
       console.error('Failed to check ad display rules:', error);
       // Default to showing ads on error to avoid revenue loss
@@ -237,64 +447,162 @@ class AdMobService {
     }
   }
 
-  /** Show banner. Pass contentId (song id) and contentType 'song' so revenue is attributed to that song. margin in dp: for BOTTOM_CENTER = margin from bottom (e.g. 64 = just above nav+mini). */
-  async showBanner(position: BannerAdPosition = BannerAdPosition.BOTTOM_CENTER, contentId?: string, contentType: string = 'general', placementKey?: string, adUnitId?: string, margin?: number) {
-    if (!isNative) return;
-    if (!this.isInitialized) {
-      // Queue the most recent banner request and retry after initialize() completes.
-      this.pendingBannerRequest = { position, contentId, contentType, placementKey, adUnitId, margin };
-      console.log('AdMob: Banner queued (not initialized yet)');
-      return;
-    }
+  /**
+   * Async resolution: display rules + placement/ad unit (Supabase). Used by showBanner and preload so
+   * scheduled refresh can call native show immediately without awaiting this work at swap time.
+   */
+  private async resolveBannerForShow(
+    position: BannerAdPosition,
+    contentId: string | undefined,
+    contentType: string,
+    placementKey: string | undefined,
+    adUnitId: string | undefined,
+    margin: number | undefined
+  ): Promise<ResolvedBannerParams | null> {
+    const skipDisplayRulesForBanner =
+      contentType === 'general' || (placementKey != null && /_bottom_banner$/.test(placementKey));
 
-    // Skip display rules check for general banners (Home/Explore/Create/Library/Profile)
-    // to avoid 2+ second delay from country lookup and RPC calls.
-    // Only check rules for content-specific banners (song/video/album).
-    if (contentType !== 'general') {
+    if (!skipDisplayRulesForBanner) {
       const shouldShowAd = await this.checkDisplayRules(contentType);
       if (!shouldShowAd) {
         console.log('AdMob: Banner blocked by display rules');
+        return null;
+      }
+    }
+
+    let adUnitIdToUse: string | undefined = adUnitId;
+    let placementKeyToUse: string | undefined = placementKey;
+
+    if (placementKey) {
+      const placement = await getActivePlacement(placementKey);
+      if (placement && placement.ad_unit && placement.ad_type === 'banner') {
+        adUnitIdToUse = placement.ad_unit.unit_id;
+        placementKeyToUse = placement.placement_key;
+        if (placementKey === MAIN_APP_BOTTOM_BANNER_PLACEMENT && adUnitIdToUse) {
+          this.mainAppBannerAdUnitIdCache = adUnitIdToUse.trim();
+        }
+      } else {
+        console.warn(`Placement '${placementKey}' not found or not a banner ad`);
+        if (isFullScreenPlayerBottomBannerKey(placementKey)) {
+          const pid = this.config?.playerBannerAdId ?? import.meta.env.VITE_ADMOB_PLAYER_BANNER_ID?.trim();
+          if (pid) {
+            adUnitIdToUse = pid;
+          } else if (this.config?.bannerAdId) {
+            adUnitIdToUse = this.config.bannerAdId;
+            console.warn(
+              'AdMob: Player banner has no DB placement; using main banner fallback. Add a banner row for this placement or set VITE_ADMOB_PLAYER_BANNER_ID.'
+            );
+          } else {
+            console.error('No banner ad unit available');
+            return null;
+          }
+        } else {
+          if (!adUnitIdToUse) {
+            if (!this.config?.bannerAdId) {
+              console.error('No banner ad unit available');
+              return null;
+            }
+            adUnitIdToUse = this.config.bannerAdId;
+          }
+        }
+      }
+    } else if (this.config?.bannerAdId) {
+      adUnitIdToUse = this.config.bannerAdId;
+    } else {
+      console.error('No banner ad unit ID available');
+      return null;
+    }
+
+    if (placementKey && isFullScreenPlayerBottomBannerKey(placementKey) && adUnitIdToUse) {
+      const mainUnit =
+        this.mainAppBannerAdUnitIdCache !== undefined
+          ? this.mainAppBannerAdUnitIdCache
+          : await this.ensureMainAppBannerUnitIdCache();
+      const trimmed = adUnitIdToUse.trim();
+      const playerDedicated = (this.config?.playerBannerAdId ?? import.meta.env.VITE_ADMOB_PLAYER_BANNER_ID ?? '').trim();
+      if (mainUnit != null && trimmed === mainUnit) {
+        if (playerDedicated && playerDedicated !== trimmed) {
+          adUnitIdToUse = playerDedicated;
+        } else {
+          console.warn(
+            'AdMob: Full-screen player banner is mapped to the same ad unit as main_app_bottom_banner. Point player placements to a separate banner unit in ad_placements, or set VITE_ADMOB_PLAYER_BANNER_ID.'
+          );
+        }
+      }
+    }
+
+    const validAdId = typeof adUnitIdToUse === 'string' && adUnitIdToUse.trim().length > 0 ? adUnitIdToUse.trim() : null;
+    if (!validAdId) {
+      console.warn('AdMob: Skipping banner — no valid ad unit ID (prevents native NPE)');
+      return null;
+    }
+
+    const resolvedPlacementKey = (placementKeyToUse ?? placementKey ?? '').trim();
+
+    return {
+      position,
+      contentId,
+      contentType,
+      placementKey,
+      adUnitId: adUnitIdToUse,
+      margin,
+      validAdId,
+      resolvedPlacementKey,
+      recordPlacementKey: placementKeyToUse ?? placementKey,
+    };
+  }
+
+  /**
+   * Native show + bookkeeping. `scheduled_refresh` skips the 4s same-unit throttle — the 30–45s timer
+   * enforces policy spacing; the plugin reuses the same AdView and calls loadAd (no extra container teardown).
+   */
+  private async applyResolvedBannerNative(
+    r: ResolvedBannerParams,
+    opts: {
+      requestSource: 'user_initiated' | 'scheduled_refresh' | 'placement_handoff';
+      stashPreviousBannerForOverlayRestore?: {
+        position: BannerAdPosition;
+        contentId?: string;
+        contentType: string;
+        placementKey?: string;
+        adUnitId?: string;
+        margin?: number;
+      };
+    }
+  ): Promise<void> {
+    const { position, contentId, contentType, margin, validAdId, resolvedPlacementKey } = r;
+    const recordPlacementKey = r.recordPlacementKey;
+
+    this.lastRequestedBannerPlacementKey = r.placementKey;
+
+    const isPlacementHandoff =
+      resolvedPlacementKey.length > 0 &&
+      ((this.lastSuccessfulBannerPlacementKey != null &&
+        resolvedPlacementKey !== this.lastSuccessfulBannerPlacementKey) ||
+        (this.lastRequestedBannerPlacementKey != null &&
+          resolvedPlacementKey !== this.lastRequestedBannerPlacementKey));
+
+    const now = Date.now();
+    if (now - this.lastBannerFailureAt < AdMobService.BANNER_FAILURE_COOLDOWN_MS) {
+      if (!isPlacementHandoff) {
+        console.log('AdMob: Banner request skipped (cooldown after failed load — avoids rate limit)');
         return;
       }
     }
 
-    try {
-      let adUnitIdToUse: string | undefined = adUnitId;
-      let placementKeyToUse: string | undefined = placementKey;
-
-      // If placementKey is provided, fetch the placement configuration
-      if (placementKey) {
-        const placement = await getActivePlacement(placementKey);
-        if (placement && placement.ad_unit && placement.ad_type === 'banner') {
-          adUnitIdToUse = placement.ad_unit.unit_id;
-          if (!adUnitId) {
-            adUnitId = placement.ad_unit.id;
-          }
-          placementKeyToUse = placement.placement_key;
-        } else {
-          console.warn(`Placement '${placementKey}' not found or not a banner ad`);
-          // Fallback to config if available
-          if (!this.config?.bannerAdId) {
-            console.error('No banner ad unit available');
-            return;
-          }
-          adUnitIdToUse = this.config.bannerAdId;
+    if (opts.requestSource === 'user_initiated') {
+      if (!isPlacementHandoff) {
+        const lastReq = this.lastBannerRequestAtByAdUnit.get(validAdId) ?? 0;
+        if (now - lastReq < AdMobService.MIN_MS_BETWEEN_BANNER_REQUESTS_SAME_UNIT) {
+          console.log('AdMob: Banner request skipped (min spacing for same ad unit)');
+          return;
         }
-      } else if (this.config?.bannerAdId) {
-        // Fallback to config banner ID
-        adUnitIdToUse = this.config.bannerAdId;
-      } else {
-        console.error('No banner ad unit ID available');
-        return;
       }
+    }
 
-      // Never call native AdMob.showBanner with empty/invalid ID — plugin can NPE (AdView.setAdUnitId on null)
-      const validAdId = typeof adUnitIdToUse === 'string' && adUnitIdToUse.trim().length > 0 ? adUnitIdToUse.trim() : null;
-      if (!validAdId) {
-        console.warn('AdMob: Skipping banner — no valid ad unit ID (prevents native NPE)');
-        return;
-      }
+    this.lastBannerRequestAtByAdUnit.set(validAdId, now);
 
+    try {
       await AdMob.showBanner({
         adId: validAdId,
         adSize: BannerAdSize.ADAPTIVE_BANNER,
@@ -302,15 +610,216 @@ class AdMobService {
         ...(margin !== undefined && margin >= 0 && { margin }),
       });
       this.bannerVisible = true;
+      this.lastBannerFailureAt = 0;
+      this.bannerFailRetryCount = 0;
+      this.clearBannerRetryTimer();
+      this.ensureBannerKeepAlive();
+      if (resolvedPlacementKey.length > 0) {
+        this.lastSuccessfulBannerPlacementKey = resolvedPlacementKey;
+        this.activeBannerOwnerKey = resolvedPlacementKey;
+      }
 
-      // Record impression in background; never let this throw so it cannot contribute to crashes
-      this.recordImpression('banner', contentId, contentType, 0, true, placementKeyToUse, validAdId).catch((err) => {
+      if (
+        opts.stashPreviousBannerForOverlayRestore &&
+        r.placementKey &&
+        isOverlayModalBannerPlacementKey(r.placementKey)
+      ) {
+        this.bannerOverlayRestoreStack.push(opts.stashPreviousBannerForOverlayRestore);
+      }
+
+      this.recordImpression('banner', contentId, contentType, 0, true, recordPlacementKey ?? r.placementKey, validAdId).catch((err) => {
         console.warn('Failed to record banner impression:', err);
       });
     } catch (error) {
       this.bannerVisible = false;
+      this.lastBannerFailureAt = Date.now();
       console.error('Failed to show banner:', error);
     }
+  }
+
+  private async showBannerWithSource(
+    position: BannerAdPosition,
+    contentId: string | undefined,
+    contentType: string,
+    placementKey: string | undefined,
+    adUnitId: string | undefined,
+    margin: number | undefined,
+    requestSource: 'user_initiated' | 'scheduled_refresh' | 'placement_handoff'
+  ): Promise<void> {
+    if (!isNative) return;
+    this.bannerShouldBeVisible = true;
+    if (!this.isInitialized) {
+      // Queue the most recent banner request and retry after initialize() completes.
+      this.pendingBannerRequest = { position, contentId, contentType, placementKey, adUnitId, margin };
+      this.lastBannerForRetry = {
+        position,
+        contentId,
+        contentType: contentType || 'general',
+        placementKey,
+        adUnitId,
+        margin,
+      };
+      console.log('AdMob: Banner queued (not initialized yet)');
+      return;
+    }
+
+    const overlayRestoreSnapshot =
+      placementKey &&
+      isOverlayModalBannerPlacementKey(placementKey) &&
+      this.activeBannerOwnerKey &&
+      this.lastBannerForRetry?.placementKey &&
+      // Don't push a redundant snapshot if the overlay is already the active surface.
+      this.activeBannerOwnerKey !== placementKey &&
+      this.lastBannerForRetry.placementKey !== placementKey
+        ? { ...this.lastBannerForRetry }
+        : undefined;
+
+    this.lastBannerForRetry = {
+      position,
+      contentId,
+      contentType: contentType || 'general',
+      placementKey,
+      adUnitId,
+      margin,
+    };
+    this.preloadedBannerForRefresh = null;
+
+    const resolved = await this.resolveBannerForShow(
+      position,
+      contentId,
+      contentType || 'general',
+      placementKey,
+      adUnitId,
+      margin
+    );
+    if (!resolved) return;
+
+    await this.applyResolvedBannerNative(resolved, {
+      requestSource,
+      ...(overlayRestoreSnapshot
+        ? { stashPreviousBannerForOverlayRestore: overlayRestoreSnapshot }
+        : {}),
+    });
+  }
+
+  /** Show banner. Pass contentId (song id) and contentType 'song' so revenue is attributed to that song. margin in dp: for BOTTOM_CENTER = margin from bottom (e.g. 64 = just above nav+mini). */
+  async showBanner(position: BannerAdPosition = BannerAdPosition.BOTTOM_CENTER, contentId?: string, contentType: string = 'general', placementKey?: string, adUnitId?: string, margin?: number) {
+    await this.showBannerWithSource(
+      position,
+      contentId,
+      contentType,
+      placementKey,
+      adUnitId,
+      margin,
+      'user_initiated'
+    );
+  }
+
+  /**
+   * Transition helper: when exiting full-screen players to tab screens, re-assert the main bottom banner
+   * above nav/mini with throttle-safe retries so player cleanup timing cannot leave the surface blank.
+   */
+  async handoffToMainBottomBanner(margin?: number): Promise<void> {
+    if (!isNative) return;
+    this.clearBannerHandoffTimers();
+
+    const run = () =>
+      this.showBannerWithSource(
+        BannerAdPosition.BOTTOM_CENTER,
+        undefined,
+        'general',
+        MAIN_APP_BOTTOM_BANNER_PLACEMENT,
+        undefined,
+        margin,
+        'placement_handoff'
+      ).catch(() => {});
+
+    run();
+    this.bannerHandoffTimers.push(setTimeout(run, 350));
+    this.bannerHandoffTimers.push(setTimeout(run, 1200));
+  }
+
+  /**
+   * Reposition whichever bottom banner is currently active (player or main) without forcing
+   * a placement switch. Useful during full-player -> Home transitions where we want the same
+   * visible ad surface to continue and only move above nav/mini.
+   */
+  async repositionActiveBottomBanner(margin?: number): Promise<void> {
+    if (!isNative) return;
+    this.clearBannerHandoffTimers();
+
+    const current = this.lastBannerForRetry;
+    if (!current) {
+      await this.handoffToMainBottomBanner(margin);
+      return;
+    }
+
+    const run = () =>
+      this.showBannerWithSource(
+        BannerAdPosition.BOTTOM_CENTER,
+        current.contentId,
+        current.contentType,
+        // Transfer ownership to main app banner on tab surfaces while reusing the currently
+        // active unit/context; this prevents outgoing player cleanup from hiding the banner.
+        MAIN_APP_BOTTOM_BANNER_PLACEMENT,
+        current.adUnitId,
+        margin,
+        'placement_handoff'
+      ).catch(() => {});
+
+    run();
+    this.bannerHandoffTimers.push(setTimeout(run, 350));
+    this.bannerHandoffTimers.push(setTimeout(run, 1200));
+  }
+
+  /**
+   * Preload (5–10s before scheduled refresh, see bannerRefreshConstants): run the same async resolution
+   * as showBanner so the swap only triggers native `AdMob.showBanner` → `loadAd` on the persistent AdView.
+   */
+  async preloadNextBannerRefresh(): Promise<void> {
+    if (!isNative || !this.isInitialized) return;
+    if (!this.bannerShouldBeVisible || !this.lastBannerForRetry) return;
+
+    const b = this.lastBannerForRetry;
+    try {
+      const resolved = await this.resolveBannerForShow(
+        b.position,
+        b.contentId,
+        b.contentType,
+        b.placementKey,
+        b.adUnitId,
+        b.margin
+      );
+      if (resolved) {
+        this.preloadedBannerForRefresh = { ...resolved, preparedAt: Date.now() };
+      }
+    } catch {
+      // Preload must never surface errors; refresh will fall back to full show path.
+    }
+  }
+
+  /**
+   * Policy: refresh only on 30–45s timers from `usePlayerBottomBanner` / main tab effect (no faster rotation).
+   * Prefers preloaded resolution so swap is not blocked on Supabase; native layer keeps one banner container.
+   */
+  async refreshBannerAd(): Promise<void> {
+    if (!isNative || !this.isInitialized) return;
+    if (!this.bannerShouldBeVisible || !this.lastBannerForRetry?.placementKey) return;
+
+    const pre = this.preloadedBannerForRefresh;
+    const preloadedFresh =
+      pre && Date.now() - pre.preparedAt <= BANNER_PRELOAD_PARAMS_MAX_AGE_MS ? pre : null;
+    this.preloadedBannerForRefresh = null;
+
+    if (preloadedFresh) {
+      const { preparedAt: _preparedAt, ...resolved } = preloadedFresh;
+      void _preparedAt;
+      await this.applyResolvedBannerNative(resolved, { requestSource: 'scheduled_refresh' });
+      return;
+    }
+
+    const b = this.lastBannerForRetry;
+    await this.showBanner(b.position, b.contentId, b.contentType, b.placementKey, b.adUnitId, b.margin).catch(() => {});
   }
 
   /**
@@ -371,6 +880,12 @@ class AdMobService {
 
   async hideBanner() {
     if (!isNative || !this.isInitialized) return;
+    this.bannerShouldBeVisible = false;
+    this.clearBannerKeepAliveTimer();
+
+    this.clearBannerRetryTimer();
+    this.bannerFailRetryCount = 0;
+
     if (!this.bannerVisible) return;
 
     try {
@@ -384,16 +899,79 @@ class AdMobService {
     }
   }
 
+  async hideBannerOwnedBy(ownerKey?: string) {
+    if (!isNative || !this.isInitialized) return;
+    // If a specific ownerKey is provided, only hide when it matches the current owner.
+    if (ownerKey && this.activeBannerOwnerKey && ownerKey !== this.activeBannerOwnerKey) return;
+
+    // If no ownerKey is provided (generic hide from app shell / mini player),
+    // never hide full-screen player bottom banners which explicitly own the surface.
+    if (
+      !ownerKey &&
+      this.activeBannerOwnerKey &&
+      isFullScreenPlayerBottomBannerKey(this.activeBannerOwnerKey)
+    ) {
+      return;
+    }
+
+    // Modal took the native banner from a full-screen player: put the player banner back instead of hiding.
+    if (
+      ownerKey &&
+      isOverlayModalBannerPlacementKey(ownerKey) &&
+      this.bannerOverlayRestoreStack.length > 0
+    ) {
+      const prev = this.bannerOverlayRestoreStack.pop()!;
+      await this.showBannerWithSource(
+        prev.position,
+        prev.contentId,
+        prev.contentType,
+        prev.placementKey,
+        prev.adUnitId,
+        prev.margin,
+        'placement_handoff'
+      ).catch(() => {});
+      return;
+    }
+
+    await this.hideBanner();
+  }
+
+  async removeBannerOwnedBy(ownerKey?: string) {
+    if (!isNative || !this.isInitialized) return;
+    // If a specific ownerKey is provided, only remove when it matches the current owner.
+    if (ownerKey && this.activeBannerOwnerKey && ownerKey !== this.activeBannerOwnerKey) return;
+
+    // If no ownerKey is provided (generic remove from app shell / mini player),
+    // never remove full-screen player bottom banners which explicitly own the surface.
+    if (
+      !ownerKey &&
+      this.activeBannerOwnerKey &&
+      isFullScreenPlayerBottomBannerKey(this.activeBannerOwnerKey)
+    ) {
+      return;
+    }
+
+    await this.removeBanner();
+  }
+
   async removeBanner() {
     if (!isNative || !this.isInitialized) return;
+    this.bannerShouldBeVisible = false;
+    this.clearBannerKeepAliveTimer();
+
+    this.clearBannerRetryTimer();
+    this.bannerFailRetryCount = 0;
+
     if (!this.bannerVisible) return;
 
     try {
       await AdMob.removeBanner();
       this.bannerVisible = false;
+      this.activeBannerOwnerKey = null;
     } catch (error) {
       console.error('Failed to remove banner:', error);
       this.bannerVisible = false;
+      this.activeBannerOwnerKey = null;
     }
   }
 
@@ -502,6 +1080,7 @@ class AdMobService {
         restoreUnmute();
         dismissListener.remove();
         resolveDismissed();
+        void this.prepareInterstitial(placementKeyToUse);
       });
 
       await AdMob.showInterstitial();
@@ -568,38 +1147,54 @@ class AdMobService {
       return null;
     }
 
+    let resolvedAdUnitId: string | undefined;
+    let resolvedPlacementKey: string | undefined;
+
     try {
-      let adUnitIdToUse: string | undefined = adUnitId;
-      let placementKeyToUse: string | undefined = placementKey;
-
-      // If placementKey is provided, fetch the placement configuration
-      if (placementKey) {
-        const placement = await getActivePlacement(placementKey);
-        if (placement && placement.ad_unit && placement.ad_type === 'rewarded') {
-          adUnitIdToUse = placement.ad_unit.unit_id;
-          if (!adUnitId) {
-            adUnitId = placement.ad_unit.id;
-          }
-          placementKeyToUse = placement.placement_key;
-        } else {
-          console.warn(`Placement '${placementKey}' not found or not a rewarded ad`);
-          // Fallback to config if available
-          if (!this.config?.rewardedAdId) {
-            console.error('No rewarded ad unit available');
-            return null;
-          }
-          adUnitIdToUse = this.config.rewardedAdId;
-        }
-      } else if (this.config?.rewardedAdId) {
-        // Fallback to config rewarded ID
-        adUnitIdToUse = this.config.rewardedAdId;
+      const directPubId =
+        typeof adUnitId === 'string' && adUnitId.trim().startsWith('ca-app-pub');
+      // Caller passed an explicit AdMob unit id (e.g. `VITE_ADMOB_REWARDED_ID`) — use it for prepare/show, not DB placement unit.
+      if (directPubId) {
+        resolvedAdUnitId = adUnitId.trim();
+        resolvedPlacementKey = placementKey;
+        await AdMob.prepareRewardVideoAd({
+          adId: resolvedAdUnitId,
+        });
       } else {
-        console.error('No rewarded ad unit ID available');
-        return null;
-      }
+        let adUnitIdToUse: string | undefined = adUnitId;
+        let placementKeyToUse: string | undefined = placementKey;
 
-      // Prepare the ad first
-      await this.prepareRewardedAd(placementKeyToUse);
+        // If placementKey is provided, fetch the placement configuration
+        if (placementKey) {
+          const placement = await getActivePlacement(placementKey);
+          if (placement && placement.ad_unit && placement.ad_type === 'rewarded') {
+            adUnitIdToUse = placement.ad_unit.unit_id;
+            if (!adUnitId) {
+              adUnitId = placement.ad_unit.id;
+            }
+            placementKeyToUse = placement.placement_key;
+          } else {
+            console.warn(`Placement '${placementKey}' not found or not a rewarded ad`);
+            // Fallback to config if available
+            if (!this.config?.rewardedAdId) {
+              console.error('No rewarded ad unit available');
+              return null;
+            }
+            adUnitIdToUse = this.config.rewardedAdId;
+          }
+        } else if (this.config?.rewardedAdId) {
+          // Fallback to config rewarded ID
+          adUnitIdToUse = this.config.rewardedAdId;
+        } else {
+          console.error('No rewarded ad unit ID available');
+          return null;
+        }
+
+        resolvedAdUnitId = adUnitIdToUse;
+        resolvedPlacementKey = placementKeyToUse;
+        // Prepare the ad first
+        await this.prepareRewardedAd(placementKeyToUse);
+      }
     } catch (error) {
       console.error('Failed to prepare rewarded ad:', error);
       return null;
@@ -608,8 +1203,8 @@ class AdMobService {
     return new Promise(async (resolve, reject) => {
       let rewardItem: AdMobRewardItem | null = null;
       let adStartTime = Date.now();
-      let finalAdUnitId = adUnitId;
-      let finalPlacementKey = placementKey;
+      let finalAdUnitId = resolvedAdUnitId;
+      let finalPlacementKey = resolvedPlacementKey;
 
       const rewardListener = await AdMob.addListener(
         RewardAdPluginEvents.Rewarded,
@@ -676,14 +1271,170 @@ class AdMobService {
   }
 
   /**
+   * Show a rewarded interstitial ad - a hybrid ad format that combines rewarded and interstitial features.
+   * Uses rewarded ads under the hood (since @capacitor-community/admob v7 doesn't natively support rewarded interstitial).
+   * This is designed for between-song experiences where users can optionally skip after a timer.
+   * 
+   * @returns Promise<AdMobRewardItem | null> - Returns reward item if user watched the ad, null if skipped/dismissed
+   */
+  async showRewardedInterstitial(
+    contentId?: string,
+    contentType: string = 'general',
+    placementKey?: string,
+    adUnitId?: string,
+    options?: { muteAppAudio?: boolean }
+  ): Promise<AdMobRewardItem | null> {
+    if (!isNative || !this.isInitialized) {
+      console.log('AdMob: Rewarded interstitial skipped (not native or not initialized)');
+      return null;
+    }
+
+    // Check display rules before showing ad
+    const shouldShowAd = await this.checkDisplayRules(contentType);
+    if (!shouldShowAd) {
+      console.log('AdMob: Rewarded interstitial blocked by display rules');
+      return null;
+    }
+
+    try {
+      let adUnitIdToUse: string | undefined = adUnitId;
+      let placementKeyToUse: string | undefined = placementKey;
+
+      // Try to get rewarded interstitial placement, fallback to rewarded ad unit
+      if (placementKey) {
+        const placement = await getActivePlacement(placementKey);
+        if (placement && placement.ad_unit && placement.ad_type === 'rewarded_interstitial') {
+          adUnitIdToUse = placement.ad_unit.unit_id;
+          if (!adUnitId) {
+            adUnitId = placement.ad_unit.id;
+          }
+          placementKeyToUse = placement.placement_key;
+        } else {
+          console.warn(`Placement '${placementKey}' not found or not a rewarded interstitial ad`);
+          // Fallback to config rewarded interstitial ID or rewarded ID
+          if (!this.config?.rewardedInterstitialAdId && !this.config?.rewardedAdId) {
+            throw new Error('No rewarded interstitial ad unit available');
+          }
+          adUnitIdToUse = this.config.rewardedInterstitialAdId || this.config.rewardedAdId;
+        }
+      } else if (this.config?.rewardedInterstitialAdId || this.config?.rewardedAdId) {
+        // Fallback to config rewarded interstitial ID or rewarded ID
+        adUnitIdToUse = this.config.rewardedInterstitialAdId || this.config.rewardedAdId;
+      } else {
+        throw new Error('No rewarded interstitial ad unit ID available');
+      }
+
+      // Prepare the ad first
+      await this.prepareRewardedAd(placementKeyToUse);
+
+      const shouldMute = options?.muteAppAudio ?? true;
+
+      // Optionally mute app audio while ad is visible (default: true).
+      const restoreUnmute = () => {
+        if (shouldMute && typeof AdMob.setApplicationMuted === 'function') {
+          AdMob.setApplicationMuted({ muted: false }).catch(() => {});
+        }
+      };
+      if (shouldMute && typeof AdMob.setApplicationMuted === 'function') {
+        await AdMob.setApplicationMuted({ muted: true });
+      }
+
+      return new Promise(async (resolve, reject) => {
+        let rewardItem: AdMobRewardItem | null = null;
+        let adStartTime = Date.now();
+        let finalAdUnitId = adUnitId;
+        let finalPlacementKey = placementKey;
+
+        const rewardListener = await AdMob.addListener(
+          RewardAdPluginEvents.Rewarded,
+          async (reward: AdMobRewardItem) => {
+            rewardItem = reward;
+            const duration = Math.floor((Date.now() - adStartTime) / 1000);
+            
+            // Record completed rewarded interstitial ad impression
+            await this.recordImpression('rewarded_interstitial', contentId, contentType, duration, true, finalPlacementKey, finalAdUnitId);
+            
+            // Log reward completion
+            const { data: { user } } = await supabase.auth.getUser();
+            if (user) {
+              await logAdReward({
+                userId: user.id,
+                adUnitId: finalAdUnitId,
+                placementKey: finalPlacementKey,
+                rewardType: 'treats',
+                rewardAmount: reward.amount,
+                completed: true,
+                completionDuration: duration,
+                metadata: { rewardType: reward.type, adFormat: 'rewarded_interstitial' }
+              });
+            }
+          }
+        );
+
+        const dismissListener = await AdMob.addListener(
+          RewardAdPluginEvents.Dismissed,
+          async () => {
+            restoreUnmute();
+            
+            // If ad was dismissed without reward, still record impression
+            if (!rewardItem) {
+              const duration = Math.floor((Date.now() - adStartTime) / 1000);
+              await this.recordImpression('rewarded_interstitial', contentId, contentType, duration, false, finalPlacementKey, finalAdUnitId);
+              
+              // Log skipped reward
+              const { data: { user } } = await supabase.auth.getUser();
+              if (user) {
+                await logAdReward({
+                  userId: user.id,
+                  adUnitId: finalAdUnitId,
+                  placementKey: finalPlacementKey,
+                  rewardType: 'treats',
+                  skipped: true,
+                  skipReason: 'Ad dismissed without completion',
+                  completionDuration: duration,
+                  metadata: { reason: 'user_dismissed', adFormat: 'rewarded_interstitial' }
+                });
+              }
+            }
+            
+            rewardListener.remove();
+            dismissListener.remove();
+            resolve(rewardItem);
+          }
+        );
+
+        AdMob.showRewardVideoAd().catch((error) => {
+          restoreUnmute();
+          rewardListener.remove();
+          dismissListener.remove();
+          reject(error);
+        });
+      });
+    } catch (error) {
+      console.error('Failed to show rewarded interstitial:', error);
+      const mute = options?.muteAppAudio ?? true;
+      if (mute && typeof AdMob.setApplicationMuted === 'function') {
+        AdMob.setApplicationMuted({ muted: false }).catch(() => {});
+      }
+      throw error;
+    }
+  }
+
+  /**
    * Show either an interstitial or a rewarded ad at random, with a single lock and cooldown
    * so they never run at once and cannot clash or crash the app.
+   */
+  /**
+   * Show either an interstitial, rewarded, or rewarded interstitial ad with smart rotation.
+   * Uses a single lock and cooldown so they never run at once and cannot clash or crash the app.
    */
   async showInterstitialOrRewarded(options: {
     contentId?: string;
     contentType?: string;
     interstitialPlacementKey?: string;
     rewardedPlacementKey?: string;
+    rewardedInterstitialPlacementKey?: string;
+    preferRewardedInterstitial?: boolean;
   } = {}): Promise<void> {
     if (!isNative) return;
     if (!this.isInitialized) {
@@ -692,7 +1443,7 @@ class AdMobService {
     }
 
     const now = Date.now();
-    if (this.fullscreenAdLock || (now - this.lastFullscreenAdTime) < AdMobService.FULLSCREEN_AD_COOLDOWN_MS) {
+    if (this.fullscreenAdLock || (now - this.lastFullscreenAdTime) < getFullscreenAdCooldownMsSync()) {
       return;
     }
 
@@ -700,23 +1451,42 @@ class AdMobService {
     const shouldShow = await this.checkDisplayRules(contentType);
     if (!shouldShow) return;
 
-    const useInterstitial = Math.random() < 0.5;
+    // If preferRewardedInterstitial is true, try it first
+    const preferRewardedInterstitial = options.preferRewardedInterstitial ?? false;
+    const rewardedInterstitialKey = options.rewardedInterstitialPlacementKey ?? 'between_songs_rewarded_interstitial';
     const interstitialKey = options.interstitialPlacementKey ?? 'after_song_play_interstitial';
     const rewardedKey = options.rewardedPlacementKey ?? 'after_video_play_rewarded';
 
     this.fullscreenAdLock = true;
     try {
-      if (useInterstitial) {
+      if (preferRewardedInterstitial) {
+        // Try rewarded interstitial first
         try {
-          await this.showInterstitial(options.contentId, contentType, interstitialKey);
+          await this.showRewardedInterstitial(options.contentId, contentType, rewardedInterstitialKey, undefined, { muteAppAudio: true });
         } catch (e) {
-          await this.showRewardedAd(options.contentId, contentType, rewardedKey).catch(() => {});
+          // Fallback to regular interstitial or rewarded
+          const useInterstitial = Math.random() < 0.5;
+          if (useInterstitial) {
+            await this.showInterstitial(options.contentId, contentType, interstitialKey).catch(() => {});
+          } else {
+            await this.showRewardedAd(options.contentId, contentType, rewardedKey).catch(() => {});
+          }
         }
       } else {
-        try {
-          await this.showRewardedAd(options.contentId, contentType, rewardedKey);
-        } catch (e) {
-          await this.showInterstitial(options.contentId, contentType, interstitialKey).catch(() => {});
+        // Original logic: random between interstitial and rewarded
+        const useInterstitial = Math.random() < 0.5;
+        if (useInterstitial) {
+          try {
+            await this.showInterstitial(options.contentId, contentType, interstitialKey);
+          } catch (e) {
+            await this.showRewardedAd(options.contentId, contentType, rewardedKey).catch(() => {});
+          }
+        } else {
+          try {
+            await this.showRewardedAd(options.contentId, contentType, rewardedKey);
+          } catch (e) {
+            await this.showInterstitial(options.contentId, contentType, interstitialKey).catch(() => {});
+          }
         }
       }
     } catch (e) {
