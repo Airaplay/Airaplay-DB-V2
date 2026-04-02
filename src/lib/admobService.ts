@@ -19,7 +19,6 @@ import {
   isOverlayModalBannerPlacementKey,
 } from './adPlacementConstants';
 import { BANNER_PRELOAD_PARAMS_MAX_AGE_MS } from './bannerRefreshConstants';
-import { getFullscreenAdCooldownMsSync, refreshFullscreenAdCooldownConfig } from './fullscreenAdCooldownConfig';
 
 const isNative = Capacitor.isNativePlatform();
 
@@ -100,7 +99,7 @@ class AdMobService {
   private mainAppBannerAdUnitIdCache: string | null | undefined = undefined;
   private appResumeListenerRegistered = false;
   private bannerHandoffTimers: ReturnType<typeof setTimeout>[] = [];
-  /** When an overlay modal takes over the banner surface, stash previous params so dismiss can restore them. */
+  /** When a modal banner takes over from a full-screen player, stash params so dismiss can re-show the player (modal unmount must not call hideBanner). */
   private bannerOverlayRestoreStack: Array<{
     position: BannerAdPosition;
     contentId?: string;
@@ -115,6 +114,8 @@ class AdMobService {
   /** Only one fullscreen ad (interstitial or rewarded) at a time; cooldown to avoid clash/crash */
   private fullscreenAdLock = false;
   private lastFullscreenAdTime = 0;
+  // Global cooldown so fullscreen ads can never stack on top of each other.
+  private static readonly FULLSCREEN_AD_COOLDOWN_MS = 1 * 60 * 1000; // 1 minute
   private pendingFullscreenAd: { contentId?: string; contentType?: string; interstitialPlacementKey?: string; rewardedPlacementKey?: string } | null = null;
 
   /**
@@ -128,8 +129,6 @@ class AdMobService {
     }
 
     try {
-      await refreshFullscreenAdCooldownConfig();
-
       // Load AdMob configuration from database
       const { data: adNetwork, error } = await supabase
         .from('ad_networks')
@@ -560,7 +559,7 @@ class AdMobService {
     r: ResolvedBannerParams,
     opts: {
       requestSource: 'user_initiated' | 'scheduled_refresh' | 'placement_handoff';
-      stashPreviousBannerForOverlayRestore?: {
+      stashPlayerBannerForOverlayRestore?: {
         position: BannerAdPosition;
         contentId?: string;
         contentType: string;
@@ -619,12 +618,8 @@ class AdMobService {
         this.activeBannerOwnerKey = resolvedPlacementKey;
       }
 
-      if (
-        opts.stashPreviousBannerForOverlayRestore &&
-        r.placementKey &&
-        isOverlayModalBannerPlacementKey(r.placementKey)
-      ) {
-        this.bannerOverlayRestoreStack.push(opts.stashPreviousBannerForOverlayRestore);
+      if (opts.stashPlayerBannerForOverlayRestore && r.placementKey && isOverlayModalBannerPlacementKey(r.placementKey)) {
+        this.bannerOverlayRestoreStack.push(opts.stashPlayerBannerForOverlayRestore);
       }
 
       this.recordImpression('banner', contentId, contentType, 0, true, recordPlacementKey ?? r.placementKey, validAdId).catch((err) => {
@@ -663,14 +658,13 @@ class AdMobService {
       return;
     }
 
-    const overlayRestoreSnapshot =
+    const overlayPlayerRestoreSnapshot =
       placementKey &&
       isOverlayModalBannerPlacementKey(placementKey) &&
       this.activeBannerOwnerKey &&
+      isFullScreenPlayerBottomBannerKey(this.activeBannerOwnerKey) &&
       this.lastBannerForRetry?.placementKey &&
-      // Don't push a redundant snapshot if the overlay is already the active surface.
-      this.activeBannerOwnerKey !== placementKey &&
-      this.lastBannerForRetry.placementKey !== placementKey
+      isFullScreenPlayerBottomBannerKey(this.lastBannerForRetry.placementKey)
         ? { ...this.lastBannerForRetry }
         : undefined;
 
@@ -696,8 +690,8 @@ class AdMobService {
 
     await this.applyResolvedBannerNative(resolved, {
       requestSource,
-      ...(overlayRestoreSnapshot
-        ? { stashPreviousBannerForOverlayRestore: overlayRestoreSnapshot }
+      ...(overlayPlayerRestoreSnapshot
+        ? { stashPlayerBannerForOverlayRestore: overlayPlayerRestoreSnapshot }
         : {}),
     });
   }
@@ -1443,7 +1437,7 @@ class AdMobService {
     }
 
     const now = Date.now();
-    if (this.fullscreenAdLock || (now - this.lastFullscreenAdTime) < getFullscreenAdCooldownMsSync()) {
+    if (this.fullscreenAdLock || (now - this.lastFullscreenAdTime) < AdMobService.FULLSCREEN_AD_COOLDOWN_MS) {
       return;
     }
 
