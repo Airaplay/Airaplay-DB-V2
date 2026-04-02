@@ -1,18 +1,19 @@
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { useLocation, useNavigate } from 'react-router-dom';
 import { Spinner } from '../../components/Spinner';
-import { Heart, Download, SkipBack, SkipForward, Play, Pause, Share2, MessageCircle, UserPlus, UserMinus, Gift, Plus, Check, Flag, X } from 'lucide-react';
+import { Heart, ArrowDownToLine, SkipBack, SkipForward, Play, Pause, Share2, MessageCircle, Gift, Plus, Check, Flag, X } from 'lucide-react';
 import { Avatar, AvatarFallback, AvatarImage } from '../../components/ui/avatar';
-import { recordPlayback } from '../../lib/playbackTracker';
+import { isQualifiedPlaybackDurationSeconds, recordPlayback } from '../../lib/playbackTracker';
 import { supabase, isSongFavorited, toggleSongFavorite, recordShareEvent, isFollowing, followUser, unfollowUser, getRandomSongs, getFollowerCount, getUserPlaylistsForSong, toggleSongInPlaylist, getContentCommentsCount } from '../../lib/supabase';
 import { shareSong } from '../../lib/shareService';
-import { useDownloadManager } from '../../hooks/useDownloadManager';
+import { useOfflineSong } from '../../hooks/useOfflineSong';
+import { deleteOfflineSong, downloadOfflineSong } from '../../lib/offlineAudioService';
+import { ensureOfflineDownloadAllowedWithPaywall } from '../../lib/offlineDownloadEntitlement';
 import { useMusicPlayer } from '../../hooks/useMusicPlayer';
-import { useAdPlacement } from '../../hooks/useAdPlacement';
 import { useAuth } from '../../contexts/AuthContext';
 import { useAlert } from '../../contexts/AlertContext';
 import { artistCache } from '../../lib/artistCache';
-import { CommentsModal } from '../../components/CommentsModal';
+import { CommentsModal, prefetchContentComments } from '../../components/CommentsModal';
 import { TippingModal } from '../../components/TippingModal';
 import { CreatePlaylistModal } from '../../components/CreatePlaylistModal';
 import { ReportModal } from '../../components/ReportModal';
@@ -24,8 +25,14 @@ import { getSmartAutoplayRecommendation } from '../../lib/smartAutoplayService';
 import { getNextSongFromHistory } from '../../lib/recentlyPlayedService';
 import { getTrendingFallbackSong } from '../../lib/trendingFallbackService';
 import { recordContribution } from '../../lib/contributionService';
-import { PlayerStaticAdBanner } from '../../components/PlayerStaticAdBanner';
+import { cn } from '../../lib/utils';
 import { getNativeAdsForPlacement, NativeAdCard } from '../../lib/nativeAdService';
+import { PlayerStaticAdBanner } from '../../components/PlayerStaticAdBanner';
+import { favoritesCache } from '../../lib/favoritesCache';
+import { followsCache } from '../../lib/followsCache';
+import { useAdPlacement } from '../../hooks/useAdPlacement';
+import { usePlayerBottomBanner } from '../../hooks/usePlayerBottomBanner';
+import { useContentEngagementSync } from '../../hooks/useEngagementSync';
 
 interface Song {
   id: string;
@@ -104,8 +111,8 @@ export const MusicPlayerScreen: React.FC<MusicPlayerScreenProps> = ({
 }) => {
   const location = useLocation();
   const navigate = useNavigate();
-  const { user, isAuthenticated, isInitialized } = useAuth();
-  const { showAlert } = useAlert();
+  const { user, session, isAuthenticated, isInitialized } = useAuth();
+  const { showAlert, showConfirm } = useAlert();
   const audioRef = useRef<HTMLAudioElement>(null);
   const videoRef = useRef<HTMLVideoElement>(null);
   const [internalIsPlaying, setInternalIsPlaying] = useState(false);
@@ -131,16 +138,27 @@ export const MusicPlayerScreen: React.FC<MusicPlayerScreenProps> = ({
   const [isLoadingPlaylists, setIsLoadingPlaylists] = useState(false);
   const [commentCount, setCommentCount] = useState(0);
   const [userCountry, setUserCountry] = useState<string | undefined>();
-  const [staticAd, setStaticAd] = useState<NativeAdCard | null>(null);
+  const [inlineAd, setInlineAd] = useState<NativeAdCard | null>(null);
+  const [showInlineAd, setShowInlineAd] = useState(false);
+  const [showSongBonusPrompt, setShowSongBonusPrompt] = useState(false);
+  const [currentPlayCount, setCurrentPlayCount] = useState(song.playCount || 0);
+  const nativeAdTimersRef = useRef<{ show?: number; hide?: number }>({});
 
   const {
     repeatMode: globalRepeatMode,
   } = useMusicPlayer();
 
-  // Ad placement for during song playback
-  const { showBanner, hideBanner, removeBanner } = useAdPlacement('MusicPlayerScreen');
+  const { showBanner, hideBanner, removeBanner, showSongBonusRewarded, showInterstitial } = useAdPlacement('MusicPlayerScreen');
+  const interstitialTimeoutRef = useRef<number | null>(null);
 
-  const { isDownloaded, downloadSong, deleteSong, getDownloadProgress } = useDownloadManager();
+  // Subscribe to real-time play count updates for this song
+  useContentEngagementSync(song.id, useCallback((update) => {
+    if (update.metric === 'play_count' && update.contentType === 'song') {
+      setCurrentPlayCount(update.value);
+    }
+  }, []));
+
+  const { isAvailable: songIsDownloaded } = useOfflineSong(song?.id);
   const [isDownloadInProgress, setIsDownloadInProgress] = useState(false);
   const [showDownloadConfirm, setShowDownloadConfirm] = useState(false);
 
@@ -163,6 +181,104 @@ export const MusicPlayerScreen: React.FC<MusicPlayerScreenProps> = ({
     onCloseRef.current = onClose;
   }, [onClose]);
 
+  // song_bonus prompt (~every 1.5 songs); auto rewarded interstitial is every 3 (separate in context).
+  useEffect(() => {
+    const handler = () => {
+      setShowSongBonusPrompt(true);
+    };
+    window.addEventListener('globalSongBonusAvailable', handler as EventListener);
+    return () => {
+      window.removeEventListener('globalSongBonusAvailable', handler as EventListener);
+    };
+  }, []);
+
+  usePlayerBottomBanner(
+    'music_player_bottom_banner',
+    showBanner,
+    hideBanner,
+    () => ({
+      contentId: song?.id,
+      contentType: 'song',
+    }),
+    [song?.id],
+    true,
+    0,
+    false
+  );
+
+  // Auto interstitial: trigger mid-way through every new song.
+  useEffect(() => {
+    if (interstitialTimeoutRef.current != null) {
+      window.clearTimeout(interstitialTimeoutRef.current);
+      interstitialTimeoutRef.current = null;
+    }
+    if (!song?.id) return;
+
+    // "Middle" of song. Fallback if duration missing.
+    const durationSeconds = typeof song.duration === 'number' && song.duration > 0 ? song.duration : undefined;
+    const midMs = durationSeconds ? Math.max(12_000, Math.floor((durationSeconds * 1000) / 2)) : 30_000;
+
+    interstitialTimeoutRef.current = window.setTimeout(() => {
+      showInterstitial('during_song_playback_interstitial', {
+        contentId: song.id,
+        contentType: 'song',
+      }, { muteAppAudio: true }).catch(() => {});
+    }, midMs);
+
+    return () => {
+      if (interstitialTimeoutRef.current != null) {
+        window.clearTimeout(interstitialTimeoutRef.current);
+        interstitialTimeoutRef.current = null;
+      }
+    };
+  }, [song.id, song.duration, showInterstitial]);
+
+  // Load a single inline native ad for the player (non-blocking, does not affect audio)
+  useEffect(() => {
+    let mounted = true;
+    (async () => {
+      try {
+        const ads = await getNativeAdsForPlacement('music_player', userCountry ?? null, null, 1);
+        if (!mounted) return;
+        setInlineAd(ads[0] ?? null);
+      } catch {
+        if (!mounted) return;
+        setInlineAd(null);
+      }
+    })();
+    return () => {
+      mounted = false;
+    };
+  }, [userCountry, song.id]);
+
+  // Delay-show the native ad (up to ~60s), then auto-hide after 30s.
+  useEffect(() => {
+    // Reset visibility on song change
+    setShowInlineAd(false);
+    if (nativeAdTimersRef.current.show) window.clearTimeout(nativeAdTimersRef.current.show);
+    if (nativeAdTimersRef.current.hide) window.clearTimeout(nativeAdTimersRef.current.hide);
+    nativeAdTimersRef.current = {};
+
+    if (!inlineAd) return;
+
+    const minDelayMs = 5_000;   // "after few seconds"
+    const maxDelayMs = 60_000;  // "up to a minute"
+    const delayMs = Math.floor(minDelayMs + Math.random() * (maxDelayMs - minDelayMs));
+
+    nativeAdTimersRef.current.show = window.setTimeout(() => {
+      setShowInlineAd(true);
+      nativeAdTimersRef.current.hide = window.setTimeout(() => {
+        setShowInlineAd(false);
+      }, 30_000);
+    }, delayMs);
+
+    return () => {
+      if (nativeAdTimersRef.current.show) window.clearTimeout(nativeAdTimersRef.current.show);
+      if (nativeAdTimersRef.current.hide) window.clearTimeout(nativeAdTimersRef.current.hide);
+      nativeAdTimersRef.current = {};
+    };
+  }, [inlineAd, song.id]);
+
   // Close player when navigating to different routes
   useEffect(() => {
     const mainRoutes = ['/', '/explore', '/library', '/create', '/profile'];
@@ -174,6 +290,7 @@ export const MusicPlayerScreen: React.FC<MusicPlayerScreenProps> = ({
 
   useEffect(() => {
     currentSongIdRef.current = song.id;
+    setCurrentPlayCount(song.playCount || 0);
 
     setOriginalPlaylist(playlist);
     setShuffledPlaylist(playlist);
@@ -205,34 +322,12 @@ export const MusicPlayerScreen: React.FC<MusicPlayerScreenProps> = ({
         videoRef.current.pause();
         videoRef.current.src = '';
       }
-      removeBanner();
+      // Banner is removed on unmount only (see dedicated effect) to avoid flicker on song change
     };
-  }, [song.id, usingExternalAudio, playlist, removeBanner, isInitialized, isAuthenticated, user]);
+  }, [song.id, usingExternalAudio, playlist, isInitialized, isAuthenticated, user]);
 
   // Load static ad for player screen
-  useEffect(() => {
-    const loadStaticAd = async () => {
-      try {
-        const ads = await getNativeAdsForPlacement(
-          'music_player',
-          userCountry,
-          null, // genre targeting not needed for player ads
-          1 // Only need one ad
-        );
-
-        if (ads && ads.length > 0) {
-          setStaticAd(ads[0]);
-        } else {
-          setStaticAd(null);
-        }
-      } catch (error) {
-        console.error('Failed to load static ad:', error);
-        setStaticAd(null);
-      }
-    };
-
-    loadStaticAd();
-  }, [userCountry]);
+  // Static inline banner ads removed from full-screen player to avoid floating banners over scrolling content
 
   useEffect(() => {
     console.log('[MusicPlayerScreen] Song changed:', {
@@ -293,40 +388,22 @@ export const MusicPlayerScreen: React.FC<MusicPlayerScreenProps> = ({
     loadCommentCount();
   }, [song.id, song.artistId]);
 
-  // Check follow and favorite status when authentication state changes
+  // Check follow and favorite status when authentication state changes or song changes.
+  // Use favoritesCache/followsCache first so heart and follow stay correct when leaving and returning (cache updated on toggle).
   useEffect(() => {
     if (isAuthenticated) {
-      checkFavoriteStatus();
+      setIsFavorited(favoritesCache.isSongFavorited(song.id));
       if (artistUserId) {
+        setIsFollowingArtist(followsCache.isFollowing(artistUserId));
         checkFollowStatus();
       }
+      checkFavoriteStatus();
     } else {
       // Reset statuses when user logs out
       setIsFollowingArtist(false);
       setIsFavorited(false);
     }
-  }, [isAuthenticated, artistUserId]);
-
-  // Show banner ad during song playback
-  useEffect(() => {
-    if (isPlaying && !isLoading) {
-      // Show banner ad with placement key for during song playback
-      showBanner('during_song_playback_banner', undefined, {
-        contentId: song.id,
-        contentType: 'song'
-      }).catch(err => {
-        console.error('Failed to show ad during playback:', err);
-      });
-    } else {
-      // Hide banner when not playing
-      hideBanner();
-    }
-
-    return () => {
-      // Cleanup: remove banner when playback stops or component unmounts
-      removeBanner();
-    };
-  }, [isPlaying, isLoading, song.id, showBanner, hideBanner, removeBanner]);
+  }, [isAuthenticated, artistUserId, song.id]);
 
   useEffect(() => {
     const handleClickOutside = (event: MouseEvent) => {
@@ -343,6 +420,11 @@ export const MusicPlayerScreen: React.FC<MusicPlayerScreenProps> = ({
       document.removeEventListener('mousedown', handleClickOutside);
     };
   }, [showPlaylistsDropdown]);
+
+  useEffect(() => {
+    if (!isPlaying || !song?.id) return;
+    prefetchContentComments(song.id, 'song').catch(() => {});
+  }, [isPlaying, song?.id]);
 
   const loadArtistData = async () => {
     const artistId = song.artistId;
@@ -520,8 +602,8 @@ export const MusicPlayerScreen: React.FC<MusicPlayerScreenProps> = ({
       mediaElement.addEventListener('ended', handleEnded);
       mediaElement.addEventListener('error', handleError);
 
-      // Set preload to 'none' to prevent downloading before user plays
-      mediaElement.preload = 'none';
+      // Use metadata preload so playback can start sooner when user taps play/next
+      mediaElement.preload = 'metadata';
       mediaElement.src = mediaUrl;
       mediaElement.load();
 
@@ -744,7 +826,18 @@ export const MusicPlayerScreen: React.FC<MusicPlayerScreenProps> = ({
   const recordPlaybackIfNeeded = () => {
     if (playbackStartTimeRef.current && !hasRecordedPlaybackRef.current) {
       const durationListened = Math.floor((Date.now() - playbackStartTimeRef.current) / 1000);
-      recordPlayback(song.id, durationListened, !!song.videoUrl);
+      recordPlayback(song.id, durationListened, !!song.videoUrl, false, session ?? undefined);
+      if (!song.videoUrl && isQualifiedPlaybackDurationSeconds(durationListened, { isVideo: false, isClip: false })) {
+        try {
+          window.dispatchEvent(
+            new CustomEvent('qualifiedSongListen', {
+              detail: { songId: song.id, durationListenedSeconds: durationListened },
+            })
+          );
+        } catch {
+          // Never block playback.
+        }
+      }
       hasRecordedPlaybackRef.current = true;
       playbackStartTimeRef.current = null;
     }
@@ -818,6 +911,10 @@ export const MusicPlayerScreen: React.FC<MusicPlayerScreenProps> = ({
   };
 
   const handleToggleDownload = async () => {
+    if (!isAuthenticated) {
+      onShowAuthModal?.();
+      return;
+    }
     if (!song.audioUrl) {
       showAlert({
         title: 'Cannot Download',
@@ -826,37 +923,36 @@ export const MusicPlayerScreen: React.FC<MusicPlayerScreenProps> = ({
       });
       return;
     }
-
-    const songIsDownloaded = isDownloaded(song.id);
-
     if (songIsDownloaded) {
-      const downloadedSongs = JSON.parse(localStorage.getItem('downloaded_songs') || '[]');
-      const downloadedSong = downloadedSongs.find((ds: any) => ds.songId === song.id);
-      if (downloadedSong) {
-        deleteSong(downloadedSong.id);
-        showAlert({
-          title: 'Download Removed',
-          message: 'Song removed from offline downloads',
-          type: 'success'
-        });
-      }
-    } else {
-      setShowDownloadConfirm(true);
+      await deleteOfflineSong(song.id);
+      showAlert({
+        title: 'Download Removed',
+        message: 'Song removed from offline downloads',
+        type: 'success'
+      });
+      return;
     }
+
+    setShowDownloadConfirm(true);
   };
 
   const handleConfirmDownload = async () => {
     setShowDownloadConfirm(false);
     setIsDownloadInProgress(true);
     try {
-      await downloadSong({
-        id: song.id,
-        title: song.title,
-        artist: song.artist,
-        duration: formatTime(song.duration || 0),
-        audioUrl: song.audioUrl,
-        coverImageUrl: song.coverImageUrl || undefined,
-      });
+      const allowed = await ensureOfflineDownloadAllowedWithPaywall(showConfirm, showAlert);
+      if (!allowed) return;
+
+      await downloadOfflineSong(
+        {
+          songId: song.id,
+          title: song.title,
+          artist: song.artist,
+          coverImageUrl: song.coverImageUrl || null,
+          durationSeconds: typeof song.duration === 'number' ? song.duration : null,
+        },
+        song.audioUrl
+      );
       showAlert({
         title: 'Download Complete',
         message: 'Song downloaded for offline listening!',
@@ -866,7 +962,7 @@ export const MusicPlayerScreen: React.FC<MusicPlayerScreenProps> = ({
       console.error('Error downloading song:', error);
       showAlert({
         title: 'Download Failed',
-        message: 'Failed to download song. Please try again.',
+        message: error instanceof Error ? error.message : 'Failed to download song. Please try again.',
         type: 'error'
       });
     } finally {
@@ -920,20 +1016,15 @@ export const MusicPlayerScreen: React.FC<MusicPlayerScreenProps> = ({
     }
   };
 
-  const handleShare = async () => {
-    try {
-      await recordShareEvent(song.id, 'song');
-      // Track share for contribution rewards
-      recordContribution('content_share', song.id, 'song').catch(console.error);
-    } catch (error) {
-      console.error('Error recording share event:', error);
-    }
-
-    try {
-      await shareSong(song.id, song.title, song.artist);
-    } catch (error) {
+  const handleShare = () => {
+    // Open share sheet immediately; log analytics in background
+    shareSong(song.id, song.title, song.artist).catch((error) => {
       console.error('Error sharing song:', error);
-    }
+    });
+    recordShareEvent(song.id, 'song').catch((error) => {
+      console.error('Error recording share event:', error);
+    });
+    recordContribution('content_share', song.id, 'song').catch(console.error);
   };
 
   const handleAdClick = () => {
@@ -1001,29 +1092,32 @@ export const MusicPlayerScreen: React.FC<MusicPlayerScreenProps> = ({
   };
 
   const handleClose = () => {
-    // Remove ad banner when closing player
-    removeBanner();
+    // Just close the player; rely on the global playback ad logic and cooldown
+    // so we never stack fullscreen ads when leaving this screen.
     onClose();
   };
 
-  const songIsDownloaded = isDownloaded(song.id);
-  const downloadProgress = getDownloadProgress(song.id);
+  const downloadProgress = null;
 
   return (
-    <div className="fixed inset-0 z-50 flex flex-col bg-gradient-to-b from-[#1a1a1a] via-[#0d0d0d] to-[#000000] animate-in fade-in duration-300 touch-manipulation overflow-y-auto pb-[140px]">
-      {/* Header */}
-      <header className="sticky top-0 z-20 bg-gradient-to-b from-black/80 via-black/50 to-transparent backdrop-blur-md">
-        <div className="flex items-center justify-between px-5 py-4">
-          <button
-            onClick={handleClose}
-            className="p-2 hover:bg-white/10 rounded-full transition-all active:scale-95"
-            aria-label="Close player"
-          >
-            <X className="w-6 h-6 text-white" />
-          </button>
+    <div className="music-player-root fixed inset-0 z-50 flex flex-col bg-[#0a0a0a] animate-in fade-in duration-300 touch-manipulation overflow-hidden pb-[env(safe-area-inset-bottom,0px)]">
+      {/* Header — properly grouped and centered with equal-width side columns */}
+      <header className="flex-shrink-0 z-20 bg-[#0a0a0a]" style={{ paddingTop: 'calc(1.25rem + env(safe-area-inset-top, 0px) * 0.25)', paddingBottom: '1.25rem' }}>
+        <div className="flex flex-row items-center px-3 py-1 min-h-[40px]">
+          {/* Left — fixed width for balance */}
+          <div className="w-[72px] flex items-center justify-start">
+            <button
+              onClick={handleClose}
+              className="p-2 rounded-full text-white/80 hover:text-white hover:bg-white/10 transition-all active:scale-95"
+              aria-label="Close player"
+            >
+              <X className="w-5 h-5" />
+            </button>
+          </div>
 
+          {/* Center — artist info, truly centered */}
           <div
-            className="flex items-center gap-3 flex-1 min-w-0 mx-4 cursor-pointer active:scale-95 transition-transform"
+            className="flex-1 flex items-center justify-center gap-2 min-w-0 cursor-pointer active:scale-95 transition-transform"
             onClick={() => {
               if (artistUserId) {
                 handleClose();
@@ -1031,324 +1125,305 @@ export const MusicPlayerScreen: React.FC<MusicPlayerScreenProps> = ({
               }
             }}
           >
-            <Avatar className="w-10 h-10 border-2 border-white/20 ring-2 ring-white/10">
+            <Avatar className="w-8 h-8 flex-shrink-0">
               <AvatarImage src={artistProfile?.avatar_url || artistProfile?.profile_photo_url || undefined} />
-              <AvatarFallback className="bg-gradient-to-br from-[#309605] to-[#3ba208] text-white font-semibold">
+              <AvatarFallback className="bg-[#00ad74] text-white font-semibold text-xs">
                 {(song.artist || 'A').charAt(0).toUpperCase()}
               </AvatarFallback>
             </Avatar>
-            <div className="flex-1 min-w-0">
-              <h3 className="font-bold text-white text-sm truncate">
+            <div className="min-w-0 text-left">
+              <h3 className="font-bold text-white text-sm truncate leading-tight">
                 {song.artist || 'Unknown Artist'}
               </h3>
-              <p className="text-white/60 text-xs">
+              <p className="text-white/60 text-[11px] truncate">
                 {formatNumber(artistFollowerCount)} followers
               </p>
             </div>
           </div>
 
-          {artistUserId && currentUserId !== artistUserId && (
-            <button
-              onClick={handleToggleFollow}
-              disabled={isLoadingFollow}
-              aria-label={isAuthenticated && isFollowingArtist ? "Unfollow artist" : "Follow artist"}
-              className={`inline-flex items-center px-4 py-2 rounded-full font-medium text-xs transition-all active:scale-95 focus-visible:ring-2 focus-visible:ring-[#309605] focus-visible:ring-offset-2 focus-visible:ring-offset-black ${
-                isAuthenticated && isFollowingArtist
-                  ? 'bg-white/100 text-grey border border-white/30 hover:bg-white/30'
-                  : 'bg-white text-black hover:bg-white/90'
-              } disabled:opacity-50 disabled:cursor-not-allowed`}
-            >
-              {isLoadingFollow ? (
-                <Spinner size={14} className="text-white" />
-              ) : isAuthenticated && isFollowingArtist ? (
-                <>
-                  <UserMinus className="w-3.5 h-3.5 mr-1" />
-                  Following
-                </>
-              ) : (
-                <>
-                  <UserPlus className="w-3.5 h-3.5 mr-1" />
-                  Follow
-                </>
-              )}
-            </button>
-          )}
+          {/* Right — fixed width for balance */}
+          <div className="w-[72px] flex items-center justify-end">
+            {artistUserId && currentUserId !== artistUserId ? (
+              <button
+                onClick={handleToggleFollow}
+                disabled={isLoadingFollow}
+                aria-label={isAuthenticated && isFollowingArtist ? "Unfollow artist" : "Follow artist"}
+                className="inline-flex items-center justify-center px-3 py-1.5 rounded-full font-semibold text-[11px] bg-white text-[#0a0a0a] hover:opacity-90 active:scale-95 transition-all disabled:opacity-50 disabled:cursor-not-allowed"
+              >
+                {isLoadingFollow ? (
+                  <Spinner size={12} className="text-[#0a0a0a]" />
+                ) : (
+                  isAuthenticated && isFollowingArtist ? 'Following' : 'Follow'
+                )}
+              </button>
+            ) : null}
+          </div>
         </div>
       </header>
 
-      {/* Main Content */}
-      <div className="flex-1 flex flex-col px-5 py-6">
-        {/* Album Artwork */}
-        <div className="w-full max-w-[280px] mx-auto mb-6">
-          <div className="relative aspect-square rounded-3xl overflow-hidden shadow-2xl">
-            {song.coverImageUrl ? (
-              <img
-                src={song.coverImageUrl}
-                alt={song.title}
-                className="w-full h-full object-cover"
-              />
-            ) : (
-              <div className="w-full h-full bg-gradient-to-br from-[#309605] to-[#3ba208] flex items-center justify-center">
-                <span className="text-white text-6xl font-bold">♪</span>
-              </div>
-            )}
-            <div className="absolute inset-0 bg-gradient-to-t from-black/20 to-transparent"></div>
-          </div>
-        </div>
-
-        {/* Static Ad Banner */}
-        {staticAd && (
-          <div className="w-full max-w-sm mx-auto mb-4">
-            <PlayerStaticAdBanner ad={staticAd} />
-          </div>
-        )}
-
-        {/* Song Information */}
-        <div className="text-center mb-3 w-full max-w-sm mx-auto">
-          <h1 className="font-bold text-white text-2xl mb-1 truncate px-2">
-            {song.title}
-          </h1>
-          {song.featuredArtists && song.featuredArtists.length > 0 && (
-            <p className="text-white/60 text-sm px-2">
-              Ft {song.featuredArtists.join(', ')}
-            </p>
-          )}
-                 </div>
-
-        {/* Progress Section */}
-        <div className="w-full max-w-sm mx-auto mb-3">
-          <div className="relative mb-2">
-            <input
-              type="range"
-              min="0"
-              max={duration || 0}
-              value={currentTime}
-              onChange={handleSeek}
-              aria-label="Seek track position"
-              aria-valuemin={0}
-              aria-valuemax={duration || 0}
-              aria-valuenow={currentTime}
-              className="w-full h-1 bg-white/20 rounded-full appearance-none cursor-pointer slider focus-visible:ring-2 focus-visible:ring-[#309605] focus-visible:ring-offset-2 focus-visible:ring-offset-black"
-            />
-          </div>
-          <div className="flex justify-between text-white/70 text-xs px-1">
-            <span>{formatTime(currentTime)}</span>
-            <span>{formatTime(duration)}</span>
-          </div>
-        </div>
-
-        {/* Playback Controls */}
-        <div className="flex items-center justify-center gap-4 w-full max-w-sm mx-auto mb-8">
-          <button
-            onClick={handleToggleFavorite}
-            className="p-3 rounded-full transition-all active:scale-95 focus-visible:ring-2 focus-visible:ring-[#309605] focus-visible:ring-offset-2 focus-visible:ring-offset-black"
-            aria-label={isFavorited ? "Unlike song" : "Like song"}
-          >
-            <Heart className={`w-6 h-6 transition-all ${isFavorited ? 'text-red-500 fill-red-500' : 'text-white/70 hover:text-white'}`} />
-          </button>
-
-          <button
-            onClick={handlePreviousSong}
-            className="p-3 text-white/70 hover:text-white hover:bg-white/10 rounded-full transition-all active:scale-95 focus-visible:ring-2 focus-visible:ring-[#309605] focus-visible:ring-offset-2 focus-visible:ring-offset-black"
-            aria-label="Previous track"
-          >
-            <SkipBack className="w-6 h-6" fill="currentColor" />
-          </button>
-
-          <button
-            onClick={togglePlayPause}
-            disabled={isLoading || !!error}
-            className="w-16 h-16 bg-white rounded-full flex items-center justify-center active:scale-95 transition-all duration-200 shadow-2xl hover:shadow-3xl disabled:opacity-50 disabled:cursor-not-allowed focus-visible:ring-2 focus-visible:ring-[#309605] focus-visible:ring-offset-2 focus-visible:ring-offset-white"
-            aria-label={isPlaying ? "Pause" : "Play"}
-          >
-            {isLoading ? (
-              <Spinner size={20} />
-            ) : isPlaying ? (
-              <Pause className="w-7 h-7 text-black" fill="black" />
-            ) : (
-              <Play className="w-7 h-7 ml-1 text-black" fill="black" />
-            )}
-          </button>
-
-          <button
-            onClick={handleNextSong}
-            className="p-3 text-white/70 hover:text-white hover:bg-white/10 rounded-full transition-all active:scale-95 focus-visible:ring-2 focus-visible:ring-[#309605] focus-visible:ring-offset-2 focus-visible:ring-offset-black"
-            aria-label="Next track"
-          >
-            <SkipForward className="w-6 h-6" fill="currentColor" />
-          </button>
-
-          <button
-            onClick={handleShare}
-            className="p-3 text-white/70 hover:text-white hover:bg-white/10 rounded-full transition-all active:scale-95 focus-visible:ring-2 focus-visible:ring-[#309605] focus-visible:ring-offset-2 focus-visible:ring-offset-black"
-            aria-label="Share song"
-          >
-            <Share2 className="w-6 h-6" />
-          </button>
-        </div>
-
-        {/* Social Actions Grid */}
-        <div className="w-full max-w-sm mx-auto mb-6 space-y-4">
-          {/* Action Buttons Grid */}
-          <div className="grid grid-cols-4 gap-3">
-            <div className="relative" ref={playlistDropdownRef}>
-              <button
-                onClick={handleAddToPlaylist}
-                disabled={isLoadingPlaylists}
-                className="w-full flex flex-col items-center justify-center gap-2 p-3 rounded-2xl bg-white/5 hover:bg-white/10 active:scale-95 transition-all disabled:opacity-50 disabled:cursor-not-allowed"
-              >
-                <div className="w-11 h-11 rounded-full bg-white/10 flex items-center justify-center">
-                  {isLoadingPlaylists ? (
-                    <Spinner size={20} className="text-white" />
+      {/* Main Content — scrollable, seamless with header */}
+      <div
+        className="flex-1 flex flex-col min-h-0 overflow-y-auto overflow-x-hidden scrollbar-hide"
+        style={{ paddingBottom: 'calc(5rem + env(safe-area-inset-bottom, 0px))' }}
+      >
+        <div className="flex-1 flex flex-col px-4 pt-0 pb-4">
+          {/* Player block — seamless, no card background */}
+          <div className="min-h-0 flex flex-col overflow-hidden">
+            {/* Artwork / Inline Native Ad Slot */}
+            <div className="px-5 py-4 flex-1 min-h-0">
+              {inlineAd && showInlineAd ? (
+                <PlayerStaticAdBanner
+                  ad={inlineAd}
+                  className="max-w-[280px] mx-auto rounded-2xl shadow-lg"
+                />
+              ) : (
+                <div className="relative rounded-2xl overflow-hidden bg-white/5 w-full aspect-square max-w-[280px] mx-auto shadow-lg">
+                  {song.coverImageUrl ? (
+                    <img src={song.coverImageUrl} alt={song.title} className="w-full h-full object-cover" draggable={false} />
                   ) : (
-                    <Plus className="w-5 h-5 text-white" />
-                  )}
-                </div>
-                <span className="text-white/70 text-[10px] font-medium">Playlist</span>
-              </button>
-
-              {showPlaylistsDropdown && (
-                <div className="absolute bottom-full mb-2 left-1/2 -translate-x-1/2 w-56 bg-[#1a1a1a] border border-white/10 rounded-2xl shadow-2xl z-30 overflow-hidden">
-                  {isLoadingPlaylists ? (
-                    <div className="px-4 py-3 flex items-center justify-center">
-                      <Spinner size={24} className="text-white" />
+                    <div className="w-full h-full flex items-center justify-center bg-white/5">
+                      <span className="text-4xl font-bold text-white/30">♪</span>
                     </div>
-                  ) : userPlaylists.length === 0 ? (
-                    <div className="px-4 py-3 text-white/50 text-sm text-center">
-                      No playlists yet
-                    </div>
-                  ) : (
-                    <>
-                      <div className="px-4 py-2 text-white text-xs font-semibold border-b border-white/10">
-                        Add to Playlist
-                      </div>
-                      <div className="max-h-48 overflow-y-auto">
-                        {userPlaylists.map(playlist => (
-                          <button
-                            key={playlist.id}
-                            onClick={() => handleToggleSongInPlaylist(playlist.id)}
-                            className="w-full px-4 py-2.5 text-left text-white/80 text-sm hover:bg-white/5 flex items-center justify-between transition-colors"
-                          >
-                            <span className="truncate">{playlist.title}</span>
-                            {playlist.hasSong && <Check className="w-4 h-4 text-[#309605] flex-shrink-0 ml-2" />}
-                          </button>
-                        ))}
-                      </div>
-                    </>
                   )}
-                  <div className="border-t border-white/10">
-                    <button
-                      onClick={() => {
-                        setShowPlaylistsDropdown(false);
-                        setShowCreatePlaylistModal(true);
-                      }}
-                      className="w-full px-4 py-2.5 text-left text-[#309605] text-sm hover:bg-white/5 flex items-center transition-colors"
-                    >
-                      <Plus className="w-4 h-4 mr-2" />
-                      Create New
-                    </button>
-                  </div>
                 </div>
               )}
             </div>
 
-            <button
-              onClick={() => {
-                if (!isAuthenticated) {
-                  onShowAuthModal?.();
-                } else {
-                  setShowTippingModal(true);
-                }
-              }}
-              className="flex flex-col items-center justify-center gap-2 p-3 rounded-2xl bg-white/5 hover:bg-white/10 active:scale-95 transition-all"
-            >
-              <div className="w-11 h-11 rounded-full bg-white/10 flex items-center justify-center">
-                <Gift className="w-5 h-5 text-white" />
+            {/* Track info */}
+            <div className="px-5 flex items-start justify-between gap-3">
+              <div className="min-w-0 flex-1">
+                <h2 className="text-lg font-bold text-white truncate leading-tight">
+                  {song.title}
+                </h2>
+                <p className="text-sm text-white/70 mt-0.5 truncate">
+                  {song.artist}
+                  {song.featuredArtists && song.featuredArtists.length > 0 && ` · Ft ${song.featuredArtists.join(', ')}`}
+                </p>
               </div>
-              <span className="text-white/70 text-[10px] font-medium">Treat</span>
-            </button>
+              <button
+                onClick={() => {
+                  if (!isAuthenticated) onShowAuthModal?.();
+                  else setShowTippingModal(true);
+                }}
+                className="flex-shrink-0 p-1.5 mt-0.5 text-white/70 hover:text-white transition-colors"
+              >
+                <Gift className="w-5 h-5" />
+              </button>
+            </div>
 
-            <button
-              onClick={() => setShowCommentsModal(true)}
-              className="flex flex-col items-center justify-center gap-2 p-3 rounded-2xl bg-white/5 hover:bg-white/10 active:scale-95 transition-all"
-            >
-              <div className="w-11 h-11 rounded-full bg-white/10 flex items-center justify-center relative">
-                <MessageCircle className="w-5 h-5 text-white" />
-                {commentCount > 0 && (
-                  <span className="absolute -top-1 -right-1 bg-[#309605] text-white text-[9px] font-bold rounded-full min-w-[18px] h-[18px] flex items-center justify-center px-1">
-                    {commentCount > 99 ? '99+' : commentCount}
-                  </span>
-                )}
-              </div>
-              <span className="text-white/70 text-[10px] font-medium">Comment</span>
-            </button>
-
-            <button
-              onClick={handleToggleDownload}
-              disabled={isDownloadInProgress || !song.audioUrl}
-              className="flex flex-col items-center justify-center gap-2 p-3 rounded-2xl bg-white/5 hover:bg-white/10 active:scale-95 transition-all disabled:opacity-50"
-            >
-              <div className={`w-11 h-11 rounded-full flex items-center justify-center ${
-                songIsDownloaded ? 'bg-[#309605]/20' : 'bg-white/10'
-              }`}>
-                {isDownloadInProgress || downloadProgress ? (
-                  <Spinner size={20} className="text-white" />
-                ) : (
-                  <Download className={`w-5 h-5 ${songIsDownloaded ? 'text-[#309605]' : 'text-white'}`} />
-                )}
-              </div>
-              <span className="text-white/70 text-[10px] font-medium">
-                {songIsDownloaded ? 'Saved' : 'Download'}
-              </span>
-            </button>
-          </div>
-
-          {/* Stats & Report Bar */}
-          <div className="flex items-center justify-between px-4 py-3 rounded-2xl bg-white/5">
-            <button
-              onClick={() => setShowReportModal(true)}
-              className="flex items-center gap-2 px-4 py-2.5 rounded-full bg-white/5 border border-white/10 text-white/70 hover:bg-white/10 hover:text-white transition-all active:scale-95"
-            >
-              <Flag className="w-4 h-4" />
-              <span className="text-xs font-medium">Report</span>
-            </button>
-
-            {song.playCount && song.playCount > 0 && (
-              <div className="flex items-center gap-2 px-4 py-2.5">
-                <Play className="w-3.5 h-3.5 text-white/50" fill="currentColor" />
-                <span className="text-white text-sm font-semibold">
-                  {formatNumber(song.playCount)}
-                </span>
-                <span className="text-white/50 text-xs">plays</span>
+            {/* song_bonus ~every 1.5 songs; rewarded interstitial every 3 — separate counters. Claim → VITE_ADMOB_REWARDED_ID */}
+            {showSongBonusPrompt && (
+              <div className="mx-5 mt-3 mb-1 flex items-center justify-between gap-3 rounded-2xl bg-white/10 border border-white/15 px-3 py-2 shadow-lg">
+                <div className="flex flex-col">
+                  <span className="text-xs font-semibold text-white">Get bonus score</span>
+                  <span className="text-[11px] text-white/70">Watch a short ad to earn extra treats.</span>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setShowSongBonusPrompt(false);
+                    if (!song?.id) return;
+                    showSongBonusRewarded({ contentId: song.id }).catch(() => {});
+                  }}
+                  className="px-3 py-1.5 rounded-full bg-white text-xs font-semibold text-black active:scale-95 hover:opacity-90 transition-all"
+                >
+                  Claim
+                </button>
               </div>
             )}
-          </div>
-        </div>
 
-        {/* Artist Top Tracks Section */}
-        {song.artistId && (
-          <ArtistTopTracksSection
-            artistId={song.artistId}
-            artistName={song.artist}
-            currentSongId={song.id}
-            onSongSelect={(selectedSong) => {
-              onSongChange?.(selectedSong);
-            }}
-          />
+            {/* Progress */}
+            <div className="px-5 mt-4">
+              <div className="relative mb-2">
+                <input
+                  type="range"
+                  min={0}
+                  max={duration || 0}
+                  value={currentTime}
+                  onChange={handleSeek}
+                  aria-label="Seek track position"
+                  className="w-full h-1.5 bg-white/20 rounded-full appearance-none cursor-pointer slider focus:outline-none focus-visible:ring-2 focus-visible:ring-white/50 focus-visible:ring-offset-2 focus-visible:ring-offset-[#0a0a0a]"
+                />
+              </div>
+              <div className="flex justify-between mt-1 text-[11px] text-white/60 tabular-nums select-none">
+                <span>{formatTime(currentTime)}</span>
+                <span>{formatTime(duration)}</span>
+              </div>
+            </div>
+
+            {/* Playback controls */}
+            <div className="flex items-center justify-center gap-6 px-5 pt-4 pb-2">
+              <button
+                onClick={handleToggleFavorite}
+                className={cn(
+                  'hover:scale-110 p-1 transition-all',
+                  isFavorited ? 'text-red-500' : 'text-white/80 hover:text-white'
+                )}
+                aria-label={isFavorited ? 'Unlike song' : 'Like song'}
+              >
+                <Heart className={cn('w-5 h-5', isFavorited && 'fill-red-500')} />
+              </button>
+              <button onClick={handlePreviousSong} className="text-white hover:scale-110 active:scale-95 transition-transform p-1" aria-label="Previous track">
+                <SkipBack className="w-6 h-6 fill-current" />
+              </button>
+              <button
+                onClick={togglePlayPause}
+                disabled={isLoading || !!error}
+                className="w-14 h-14 rounded-full flex items-center justify-center bg-white text-[#0a0a0a] hover:scale-[1.06] active:scale-95 transition-all duration-200 shadow-lg disabled:opacity-50 disabled:cursor-not-allowed"
+                aria-label={isPlaying ? 'Pause' : 'Play'}
+              >
+                {isLoading ? (
+                  <Spinner size={20} className="text-[#0a0a0a]" />
+                ) : isPlaying ? (
+                  <Pause className="w-6 h-6" />
+                ) : (
+                  <Play className="w-6 h-6 ml-0.5" />
+                )}
+              </button>
+              <button onClick={handleNextSong} className="text-white hover:scale-110 active:scale-95 transition-transform p-1" aria-label="Next track">
+                <SkipForward className="w-6 h-6 fill-current" />
+              </button>
+              <button
+                onClick={() => setShowCommentsModal(true)}
+                className="text-white/80 hover:text-white hover:scale-110 p-1 transition-all relative"
+                aria-label="Comments"
+              >
+                <MessageCircle className="w-5 h-5" />
+                {commentCount > 0 && (
+                  <span className="absolute -top-1 -right-1.5 text-[10px] font-bold text-white/80 tabular-nums">
+                    {commentCount >= 1_000_000 ? `${(commentCount / 1_000_000).toFixed(1).replace(/\.0$/, '')}M` : commentCount >= 1_000 ? `${(commentCount / 1_000).toFixed(1).replace(/\.0$/, '')}K` : commentCount}
+                  </span>
+                )}
+              </button>
+            </div>
+
+            {/* Actions row — white icons; report red */}
+            <div className="flex items-center justify-between px-5 pb-5">
+              <div className="flex items-center gap-1">
+                <div className="relative" ref={playlistDropdownRef}>
+                  <button
+                    onClick={handleAddToPlaylist}
+                    disabled={isLoadingPlaylists}
+                    className="p-2 rounded-full text-white/80 hover:text-white hover:bg-white/10 transition-all disabled:opacity-50"
+                    title="Add to playlist"
+                  >
+                    {isLoadingPlaylists ? <Spinner size={18} className="text-white" /> : <Plus className="w-[18px] h-[18px]" />}
+                  </button>
+                  {showPlaylistsDropdown && (
+                    <>
+                      <div className="fixed inset-0 z-40" onClick={() => setShowPlaylistsDropdown(false)} aria-hidden />
+                      <div className="absolute bottom-full left-0 mb-2 z-50 w-64 rounded-2xl bg-[#141414] shadow-2xl overflow-hidden">
+                        <div className="px-4 py-3">
+                          <p className="text-[11px] font-semibold text-white/50 uppercase tracking-wider">Add to playlist</p>
+                        </div>
+                        {userPlaylists.length === 0 && !isLoadingPlaylists ? (
+                          <div className="px-4 py-6 text-white/50 text-sm text-center">No playlists yet. Create one below.</div>
+                        ) : (
+                          <div className="max-h-52 overflow-y-auto py-1">
+                            {userPlaylists.map(pl => (
+                              <button
+                                key={pl.id}
+                                onClick={() => handleToggleSongInPlaylist(pl.id)}
+                                className="w-full flex items-center justify-between gap-3 px-4 py-3 text-sm text-white hover:bg-white/10 active:bg-white/15 transition-colors text-left rounded-xl mx-2"
+                              >
+                                <span className="truncate font-medium">{pl.title}</span>
+                                {pl.hasSong && <Check className="w-5 h-5 text-[#00ad74] flex-shrink-0" />}
+                              </button>
+                            ))}
+                          </div>
+                        )}
+                        <div className="p-2">
+                          <button
+                            onClick={() => { setShowPlaylistsDropdown(false); setShowCreatePlaylistModal(true); }}
+                            className="w-full flex items-center justify-center gap-2 px-4 py-3.5 rounded-xl bg-[#00ad74] hover:bg-[#009c68] text-white font-semibold text-sm transition-colors"
+                          >
+                            <Plus className="w-5 h-5" />
+                            Create new playlist
+                          </button>
+                        </div>
+                      </div>
+                    </>
+                  )}
+                </div>
+                <button
+                  type="button"
+                  onClick={handleToggleDownload}
+                  disabled={isDownloadInProgress || !song.audioUrl}
+                  className={cn(
+                    'p-2 rounded-full transition-all',
+                    songIsDownloaded ? 'text-[#00ad74]' : 'text-white/80 hover:text-white hover:bg-white/10',
+                    (isDownloadInProgress || !song.audioUrl) && 'opacity-50 cursor-not-allowed'
+                  )}
+                  title={songIsDownloaded ? 'Remove offline download' : 'Download for offline'}
+                  aria-label={songIsDownloaded ? 'Remove offline download' : 'Download for offline'}
+                >
+                  {isDownloadInProgress ? (
+                    <Spinner size={18} className="text-white/80" />
+                  ) : (
+                    <ArrowDownToLine className="w-[18px] h-[18px]" strokeWidth={2.25} />
+                  )}
+                </button>
+                <button
+                  onClick={handleShare}
+                  className="p-2 rounded-full text-white/80 hover:text-white hover:bg-white/10 transition-all"
+                  title="Share"
+                >
+                  <Share2 className="w-[18px] h-[18px]" />
+                </button>
+                <button
+                  onClick={() => setShowReportModal(true)}
+                  className="p-2 rounded-full text-red-500 hover:text-red-400 hover:bg-red-500/10 transition-all"
+                  title="Report"
+                >
+                  <Flag className="w-[18px] h-[18px]" />
+                </button>
+              </div>
+              {currentPlayCount != null && currentPlayCount > 0 && (
+                <div className="flex items-center gap-1.5 text-white/60 text-xs">
+                  <Play className="w-3.5 h-3.5" fill="currentColor" />
+                  <span className="font-semibold text-white">{formatNumber(currentPlayCount)}</span>
+                  <span>plays</span>
+                </div>
+              )}
+            </div>
+          </div>
+
+          {/* More from — no border */}
+          {song.artistId && (
+            <div className="rounded-2xl bg-white/[0.04] overflow-hidden mb-5">
+              <div className="px-5 py-4">
+                <ArtistTopTracksSection
+                artistId={song.artistId}
+                artistName={song.artist}
+                currentSongId={song.id}
+                onSongSelect={(selectedSong) => {
+                  onSongChange?.(selectedSong);
+                }}
+                onAlbumSelect={(albumId) => {
+                  handleClose();
+                  navigate(`/album/${albumId}`);
+                }}
+              />
+            </div>
+          </div>
         )}
 
-        {/* Similar Songs Section */}
-        <SimilarSongsSection
-          currentSong={song}
-          onSongSelect={(selectedSong) => {
-            onSongChange?.(selectedSong);
-          }}
-        />
+        {/* Similar to this song — no border */}
+        <div className="rounded-2xl bg-white/[0.04] overflow-hidden mb-5">
+          <div className="px-5 py-4">
+            <SimilarSongsSection
+              currentSong={song}
+              onSongSelect={(selectedSong) => {
+                onSongChange?.(selectedSong);
+              }}
+            />
+          </div>
+        </div>
 
         {/* Ad Space */}
         {adContent && (
           <div
-            className="w-full max-w-sm mx-auto h-20 rounded-2xl overflow-hidden cursor-pointer border border-white/10 shadow-lg"
+            className="w-full max-w-sm mx-auto h-20 rounded-2xl overflow-hidden cursor-pointer shadow-lg"
             onClick={handleAdClick}
           >
             {adContent.type === 'image' && (
@@ -1377,12 +1452,13 @@ export const MusicPlayerScreen: React.FC<MusicPlayerScreenProps> = ({
 
         {/* Error Message */}
         {(playerError || error) && (
-          <div className="w-full max-w-sm mx-auto mt-4 p-4 bg-red-500/10 border border-red-500/30 rounded-2xl backdrop-blur-sm">
+          <div className="w-full max-w-sm mx-auto mt-4 p-4 bg-red-500/10 rounded-2xl backdrop-blur-sm">
             <p className="text-red-400 text-sm text-center font-medium">
               {playerError || error}
             </p>
           </div>
         )}
+        </div>
       </div>
 
       {/* Video element for video content only */}
@@ -1475,11 +1551,11 @@ export const MusicPlayerScreen: React.FC<MusicPlayerScreenProps> = ({
         }
 
         .slider::-webkit-slider-track {
-          background: linear-gradient(to right, #ffffff 0%, #ffffff ${(currentTime / duration) * 100}%, rgba(255, 255, 255, 0.3) ${(currentTime / duration) * 100}%, rgba(255, 255, 255, 0.3) 100%);
+          background: linear-gradient(to right, #ffffff 0%, #ffffff ${duration ? (currentTime / duration) * 100 : 0}%, rgba(255, 255, 255, 0.3) ${duration ? (currentTime / duration) * 100 : 0}%, rgba(255, 255, 255, 0.3) 100%);
           border-radius: 10px;
         }
 
-        * {
+        .music-player-root, .music-player-root * {
           -webkit-tap-highlight-color: transparent;
           -webkit-touch-callout: none;
           -webkit-user-select: none;
@@ -1489,7 +1565,7 @@ export const MusicPlayerScreen: React.FC<MusicPlayerScreenProps> = ({
           user-select: none;
         }
 
-        .touch-manipulation {
+        .music-player-root .touch-manipulation {
           touch-action: manipulation;
         }
       `}</style>

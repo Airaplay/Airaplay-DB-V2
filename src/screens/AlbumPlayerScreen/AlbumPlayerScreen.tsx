@@ -1,8 +1,8 @@
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { Spinner } from '../../components/Spinner';
 import {
   Heart,
-  Download,
+  ArrowDownToLine,
   Play,
   Pause,
   Share2,
@@ -10,15 +10,13 @@ import {
   X,
   SkipForward,
   SkipBack,
-  UserPlus,
-  UserMinus,
   Gift,
   Plus,
   Check,
   Flag,
-  Shuffle,
-  Repeat
+  Shuffle
 } from 'lucide-react';
+import { cn } from '../../lib/utils';
 import { Avatar, AvatarFallback, AvatarImage } from '../../components/ui/avatar';
 import {
   supabase,
@@ -38,21 +36,27 @@ import {
 import { shareSong, shareAlbum } from '../../lib/shareService';
 import { useAuth } from '../../contexts/AuthContext';
 import { useAlert } from '../../contexts/AlertContext';
-import { useDownloadManager } from '../../hooks/useDownloadManager';
-import { useAdPlacement } from '../../hooks/useAdPlacement';
-import { CommentsModal } from '../../components/CommentsModal';
+import { useOfflineSong } from '../../hooks/useOfflineSong';
+import { deleteOfflineSong, downloadOfflineSong } from '../../lib/offlineAudioService';
+import { ensureOfflineDownloadAllowedWithPaywall } from '../../lib/offlineDownloadEntitlement';
+import { CommentsModal, prefetchContentComments } from '../../components/CommentsModal';
 import { TippingModal } from '../../components/TippingModal';
 import { CreatePlaylistModal } from '../../components/CreatePlaylistModal';
 import { ReportModal } from '../../components/ReportModal';
 import { AuthModal } from '../../components/AuthModal';
 import { useParams, useNavigate, useLocation } from 'react-router-dom';
 import { useMusicPlayer } from '../../contexts/MusicPlayerContext';
+import { useEngagementSync } from '../../hooks/useEngagementSync';
+import { useAdPlacement } from '../../hooks/useAdPlacement';
+import { usePlayerBottomBanner } from '../../hooks/usePlayerBottomBanner';
 import { albumCache } from '../../lib/albumCache';
 import { artistCache } from '../../lib/artistCache';
+import { favoritesCache } from '../../lib/favoritesCache';
+import { followsCache } from '../../lib/followsCache';
 import { recordContribution } from '../../lib/contributionService';
-import { PlayerStaticAdBanner } from '../../components/PlayerStaticAdBanner';
+import { isReleased, formatReleaseDateDisplay } from '../../lib/releaseDateUtils';
 import { getNativeAdsForPlacement, NativeAdCard } from '../../lib/nativeAdService';
-import { LoadingScreen } from '../../components/LoadingLogo';
+import { PlayerStaticAdBanner } from '../../components/PlayerStaticAdBanner';
 
 interface AlbumTrack {
   id: string;
@@ -102,7 +106,7 @@ const AlbumPlayer: React.FC<AlbumPlayerScreenProps & {
   const navigate = useNavigate();
   const location = useLocation();
   const { user, isAuthenticated, isInitialized } = useAuth();
-  const { showAlert } = useAlert();
+  const { showAlert, showConfirm } = useAlert();
   const playlistDropdownRef = useRef<HTMLDivElement>(null);
   const [currentTrackIndex, setCurrentTrackIndex] = useState(startTrackIndex);
   const [isFollowingArtist, setIsFollowingArtist] = useState(false);
@@ -125,19 +129,24 @@ const AlbumPlayer: React.FC<AlbumPlayerScreenProps & {
   const [shuffledPlaylist, setShuffledPlaylist] = useState<AlbumTrack[]>([]);
   const [originalPlaylist, setOriginalPlaylist] = useState<AlbumTrack[]>([]);
   const [tracks, setTracks] = useState<AlbumTrack[]>(albumData.tracks);
-  const [userCountry, setUserCountry] = useState<string | undefined>();
-  const [staticAd, setStaticAd] = useState<NativeAdCard | null>(null);
+  const [inlineAd, setInlineAd] = useState<NativeAdCard | null>(null);
+  const [showInlineAd, setShowInlineAd] = useState(false);
+  const nativeAdTimersRef = useRef<{ show?: number; hide?: number }>({});
 
-  const { isDownloaded, downloadSong, deleteSong, getDownloadProgress } = useDownloadManager();
+  const currentTrackId = tracks?.[currentTrackIndex]?.id ?? null;
+  const { isAvailable: isTrackDownloaded } = useOfflineSong(currentTrackId);
   const [isDownloadInProgress, setIsDownloadInProgress] = useState(false);
 
-  // Ad placement for during song playback
-  const { showBanner, hideBanner, removeBanner } = useAdPlacement('AlbumPlayerScreen');
+  const { showRewarded, showSongBonusRewarded, showBanner, hideBanner, removeBanner, showInterstitial } = useAdPlacement('AlbumPlayerScreen');
+  const [showSongBonusPrompt, setShowSongBonusPrompt] = useState(false);
+  const songsPlayedSinceInterstitialRef = useRef(0);
+  const interstitialTimeoutRef = useRef<number | null>(null);
 
   const {
     currentSong,
     isPlaying,
     audioElement,
+    playlistContext,
     playSong,
     togglePlayPause,
     hideFullPlayer,
@@ -147,8 +156,9 @@ const AlbumPlayer: React.FC<AlbumPlayerScreenProps & {
     isShuffleEnabled,
     repeatMode,
     toggleShuffle,
-    toggleRepeat,
   } = useMusicPlayer();
+  const thisAlbumContext = `album-${albumData.id}`;
+  const isThisAlbumActive = playlistContext === thisAlbumContext;
 
   const currentTrack = tracks?.[currentTrackIndex] || null;
   const initialPathnameRef = useRef(location.pathname);
@@ -163,15 +173,70 @@ const AlbumPlayer: React.FC<AlbumPlayerScreenProps & {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [location.pathname]);
 
+  // Listen for global bonus events and surface a small user-initiated prompt.
+  useEffect(() => {
+    const handler = () => {
+      setShowSongBonusPrompt(true);
+    };
+    window.addEventListener('globalSongBonusAvailable', handler as EventListener);
+    return () => {
+      window.removeEventListener('globalSongBonusAvailable', handler as EventListener);
+    };
+  }, []);
+
+  usePlayerBottomBanner(
+    'album_player_bottom_banner',
+    showBanner,
+    hideBanner,
+    () => ({
+      contentId: albumData?.id,
+      contentType: 'album',
+    }),
+    [albumData?.id],
+    true,
+    0,
+    false
+  );
+
+  // Auto interstitial: every 2 songs played in this album (trigger mid-way through the 2nd song).
+  useEffect(() => {
+    const currentTrack = tracks?.[currentTrackIndex] || null;
+    if (!currentTrack?.id) return;
+
+    songsPlayedSinceInterstitialRef.current += 1;
+    const shouldTrigger = songsPlayedSinceInterstitialRef.current >= 2;
+    if (!shouldTrigger) return;
+    songsPlayedSinceInterstitialRef.current = 0;
+
+    if (interstitialTimeoutRef.current != null) {
+      window.clearTimeout(interstitialTimeoutRef.current);
+      interstitialTimeoutRef.current = null;
+    }
+
+    const durationSeconds = typeof currentTrack.duration === 'number' && currentTrack.duration > 0 ? currentTrack.duration : undefined;
+    const midMs = durationSeconds ? Math.max(12_000, Math.floor((durationSeconds * 1000) / 2)) : 30_000;
+
+    interstitialTimeoutRef.current = window.setTimeout(() => {
+      showInterstitial('album_midplay_interstitial', {
+        contentId: currentTrack.id,
+        contentType: 'song',
+      }, { muteAppAudio: true }).catch(() => {});
+    }, midMs);
+
+    return () => {
+      if (interstitialTimeoutRef.current != null) {
+        window.clearTimeout(interstitialTimeoutRef.current);
+        interstitialTimeoutRef.current = null;
+      }
+    };
+  }, [currentTrackIndex, tracks, showInterstitial]);
+
   useEffect(() => {
     if (!isInitialized) return;
 
-    const initializePlayer = async () => {
-      await loadTrackFavoriteStatus();
-      await loadAlbumFavoriteStatus();
-    };
-
-    initializePlayer();
+    // Load favorite status in background — don't block display (cache already set initial state)
+    loadTrackFavoriteStatus().catch(() => {});
+    loadAlbumFavoriteStatus().catch(() => {});
 
     // Initialize playlists
     if (albumData?.tracks) {
@@ -199,17 +264,29 @@ const AlbumPlayer: React.FC<AlbumPlayerScreenProps & {
         }));
 
       if (albumPlaylist.length > 0) {
-        const targetSong = albumPlaylist[currentTrackIndex];
-        const isSameSongPlaying = currentSong?.id === targetSong.id;
-        const isPlayingFromThisAlbum = currentSong?.id && albumPlaylist.some(song => song.id === currentSong.id);
+        const startPlayback = async () => {
+          const targetSong = albumPlaylist[currentTrackIndex];
+          if (!targetSong || isThisAlbumActive) {
+            return;
+          }
 
-        if (!isSameSongPlaying && !isPlayingFromThisAlbum) {
-          playSong(albumPlaylist[currentTrackIndex], false, albumPlaylist, currentTrackIndex, `album-${albumData.id}`, albumData.id);
-        }
+          try {
+            await showRewarded('album_open_rewarded', {
+              contentId: albumData.id,
+              contentType: 'album',
+            });
+          } catch {
+            // If ad fails or is skipped due to cooldown, still start playback
+          }
 
-        setTimeout(() => {
-          hideFullPlayer();
-        }, 100);
+          playSong(albumPlaylist[currentTrackIndex], false, albumPlaylist, currentTrackIndex, thisAlbumContext, albumData.id);
+        };
+
+        startPlayback().finally(() => {
+          setTimeout(() => {
+            hideFullPlayer();
+          }, 100);
+        });
       }
     }
 
@@ -220,6 +297,13 @@ const AlbumPlayer: React.FC<AlbumPlayerScreenProps & {
       }));
     };
   }, [onPlayerVisibilityChange, autoPlay, albumData]);
+
+  // Sync tracks from parent when albumData updates (e.g. after engagement sync updates play counts)
+  useEffect(() => {
+    if (albumData?.tracks?.length) {
+      setTracks(albumData.tracks);
+    }
+  }, [albumData?.tracks]);
 
   // Update local shuffled playlist when global shuffle state changes
   useEffect(() => {
@@ -297,16 +381,17 @@ const AlbumPlayer: React.FC<AlbumPlayerScreenProps & {
   }, [currentTrackIndex]);
 
   useEffect(() => {
+    if (!isThisAlbumActive) return;
     if (currentSong && tracks) {
       const trackIndex = tracks.findIndex(track => track.id === currentSong.id);
       if (trackIndex >= 0 && trackIndex !== currentTrackIndex) {
         setCurrentTrackIndex(trackIndex);
       }
     }
-  }, [currentSong, albumData?.tracks, currentTrackIndex]);
+  }, [isThisAlbumActive, currentSong, albumData?.tracks, currentTrackIndex]);
 
   useEffect(() => {
-    if (currentSong?.id === currentTrack?.id && !isPlaying && audioElement) {
+    if (isThisAlbumActive && currentSong?.id === currentTrack?.id && !isPlaying && audioElement) {
       if (audioElement.readyState < 3) {
         setIsBuffering(true);
       } else {
@@ -316,6 +401,11 @@ const AlbumPlayer: React.FC<AlbumPlayerScreenProps & {
       setIsBuffering(false);
     }
   }, [isPlaying, currentSong, currentTrack, audioElement]);
+
+  useEffect(() => {
+    if (!isThisAlbumActive || !isPlaying || !albumData?.id) return;
+    prefetchContentComments(albumData.id, 'album').catch(() => {});
+  }, [isThisAlbumActive, isPlaying, albumData?.id]);
 
   useEffect(() => {
     const handleClickOutside = (event: MouseEvent) => {
@@ -333,74 +423,55 @@ const AlbumPlayer: React.FC<AlbumPlayerScreenProps & {
     };
   }, [showPlaylistsDropdown]);
 
-  // Show banner ad during song playback
+  // Global interstitials + bonus rewarded are handled in MusicPlayerContext; no album-specific song counter needed here.
+
+  // Load a single inline native ad for album player (non-blocking)
   useEffect(() => {
-    if (isPlaying && currentTrack) {
-      // Show banner ad with placement key for during song playback
-      showBanner('during_song_playback_banner', undefined, {
-        contentId: currentTrack.id,
-        contentType: 'song'
-      }).catch(err => {
-        console.error('Failed to show ad during playback:', err);
-      });
-    } else {
-      // Hide banner when not playing
-      hideBanner();
-    }
+    let mounted = true;
+    (async () => {
+      try {
+        const ads = await getNativeAdsForPlacement('album_player', null, null, 1);
+        if (!mounted) return;
+        setInlineAd(ads[0] ?? null);
+      } catch {
+        if (!mounted) return;
+        setInlineAd(null);
+      }
+    })();
+    return () => {
+      mounted = false;
+    };
+  }, [albumData.id]);
+
+  // Delay-show the native ad (up to ~60s), then auto-hide after 30s.
+  useEffect(() => {
+    setShowInlineAd(false);
+    if (nativeAdTimersRef.current.show) window.clearTimeout(nativeAdTimersRef.current.show);
+    if (nativeAdTimersRef.current.hide) window.clearTimeout(nativeAdTimersRef.current.hide);
+    nativeAdTimersRef.current = {};
+
+    if (!inlineAd) return;
+
+    const minDelayMs = 5_000;
+    const maxDelayMs = 60_000;
+    const delayMs = Math.floor(minDelayMs + Math.random() * (maxDelayMs - minDelayMs));
+
+    nativeAdTimersRef.current.show = window.setTimeout(() => {
+      setShowInlineAd(true);
+      nativeAdTimersRef.current.hide = window.setTimeout(() => {
+        setShowInlineAd(false);
+      }, 30_000);
+    }, delayMs);
 
     return () => {
-      // Cleanup: remove banner when playback stops or component unmounts
-      removeBanner();
+      if (nativeAdTimersRef.current.show) window.clearTimeout(nativeAdTimersRef.current.show);
+      if (nativeAdTimersRef.current.hide) window.clearTimeout(nativeAdTimersRef.current.hide);
+      nativeAdTimersRef.current = {};
     };
-  }, [isPlaying, currentTrack, showBanner, hideBanner, removeBanner]);
+  }, [inlineAd, albumData.id]);
 
   // Load user country and static ad
-  useEffect(() => {
-    const loadUserData = async () => {
-      if (isAuthenticated && user) {
-        try {
-          const { data, error } = await supabase
-            .from('users')
-            .select('country')
-            .eq('id', user.id)
-            .maybeSingle();
-
-          if (!error && data) {
-            setUserCountry(data.country);
-          }
-        } catch (error) {
-          console.error('Error loading user country:', error);
-        }
-      }
-    };
-
-    loadUserData();
-  }, [isAuthenticated, user]);
-
-  // Load static ad for album player screen
-  useEffect(() => {
-    const loadStaticAd = async () => {
-      try {
-        const ads = await getNativeAdsForPlacement(
-          'album_player',
-          userCountry,
-          null, // genre targeting not needed for player ads
-          1 // Only need one ad
-        );
-
-        if (ads && ads.length > 0) {
-          setStaticAd(ads[0]);
-        } else {
-          setStaticAd(null);
-        }
-      } catch (error) {
-        console.error('Failed to load static ad:', error);
-        setStaticAd(null);
-      }
-    };
-
-    loadStaticAd();
-  }, [userCountry]);
+  // Static inline banner ads removed from full-screen album player to avoid floating banners over scrolling content
 
   const checkFollowingStatus = async () => {
     if (!artistUserId || !isAuthenticated) return;
@@ -489,6 +560,23 @@ const AlbumPlayer: React.FC<AlbumPlayerScreenProps & {
     }
   };
 
+  // Re-check album favorite status when album or auth changes (e.g. when returning to screen).
+  // Use favoritesCache first so the heart stays correct when leaving and returning (cache is updated on toggle).
+  useEffect(() => {
+    if (!albumData?.id) return;
+    setIsAlbumFavorited(favoritesCache.isAlbumFavorited(albumData.id));
+    loadAlbumFavoriteStatus();
+  }, [albumData?.id, isAuthenticated]);
+
+  // Restore follow state from followsCache when artist userId is available (persists when leaving/returning)
+  useEffect(() => {
+    if (artistUserId && isAuthenticated) {
+      setIsFollowingArtist(followsCache.isFollowing(artistUserId));
+    } else if (!isAuthenticated) {
+      setIsFollowingArtist(false);
+    }
+  }, [artistUserId, isAuthenticated]);
+
   const loadCommentCount = async () => {
     if (!albumData?.id) return;
     try {
@@ -506,7 +594,7 @@ const AlbumPlayer: React.FC<AlbumPlayerScreenProps & {
       return;
     }
 
-    if (currentSong?.id === track.id) {
+    if (isThisAlbumActive && currentSong?.id === track.id) {
       togglePlayPause();
       setCurrentTrackIndex(trackIndex);
       return;
@@ -531,7 +619,7 @@ const AlbumPlayer: React.FC<AlbumPlayerScreenProps & {
     const playlistIndex = albumPlaylist.findIndex(song => song.id === track.id);
 
     if (playlistIndex >= 0) {
-      playSong(albumPlaylist[playlistIndex], false, albumPlaylist, playlistIndex, `album-${albumData.id}`, albumData.id);
+      playSong(albumPlaylist[playlistIndex], false, albumPlaylist, playlistIndex, thisAlbumContext, albumData.id);
 
       setTimeout(() => {
         hideFullPlayer();
@@ -599,10 +687,6 @@ const AlbumPlayer: React.FC<AlbumPlayerScreenProps & {
 
   const handleToggleShuffle = () => {
     toggleShuffle();
-  };
-
-  const handleToggleRepeat = () => {
-    toggleRepeat();
   };
 
   const handleToggleFollow = async () => {
@@ -733,31 +817,31 @@ const AlbumPlayer: React.FC<AlbumPlayerScreenProps & {
       return;
     }
 
-    const trackIsDownloaded = isDownloaded(currentTrack.id);
+    const trackIsDownloaded = isTrackDownloaded;
 
     if (trackIsDownloaded) {
-      const downloadedSongs = JSON.parse(localStorage.getItem('downloaded_songs') || '[]');
-      const downloadedSong = downloadedSongs.find((ds: any) => ds.songId === currentTrack.id);
-      if (downloadedSong) {
-        deleteSong(downloadedSong.id);
-        showAlert({
-          title: 'Download Removed',
-          message: 'Track removed from offline downloads',
-          type: 'success'
-        });
-      }
+      await deleteOfflineSong(currentTrack.id);
+      showAlert({
+        title: 'Download Removed',
+        message: 'Track removed from offline downloads',
+        type: 'success'
+      });
     } else {
       setIsDownloadInProgress(true);
       try {
-        await downloadSong({
-          id: currentTrack.id,
-          title: currentTrack.title,
-          artist: currentTrack.artist,
-          album: albumData.title,
-          duration: formatTime(currentTrack.duration),
-          audioUrl: currentTrack.audioUrl,
-          coverImageUrl: currentTrack.coverImageUrl || albumData.coverImageUrl || undefined,
-        });
+        const allowed = await ensureOfflineDownloadAllowedWithPaywall(showConfirm, showAlert);
+        if (!allowed) return;
+
+        await downloadOfflineSong(
+          {
+            songId: currentTrack.id,
+            title: currentTrack.title,
+            artist: currentTrack.artist,
+            coverImageUrl: currentTrack.coverImageUrl || albumData.coverImageUrl || null,
+            durationSeconds: typeof currentTrack.duration === 'number' ? currentTrack.duration : null,
+          },
+          currentTrack.audioUrl
+        );
         showAlert({
           title: 'Download Complete',
           message: 'Track downloaded for offline listening!',
@@ -767,7 +851,7 @@ const AlbumPlayer: React.FC<AlbumPlayerScreenProps & {
         console.error('Error downloading track:', error);
         showAlert({
           title: 'Download Failed',
-          message: 'Failed to download track. Please try again.',
+          message: error instanceof Error ? error.message : 'Failed to download track. Please try again.',
           type: 'error'
         });
       } finally {
@@ -776,48 +860,36 @@ const AlbumPlayer: React.FC<AlbumPlayerScreenProps & {
     }
   };
 
-  const handleShareAlbum = async () => {
-    try {
-      await recordShareEvent(albumData.id, 'album');
-    } catch (error) {
-      console.error('Error recording share event:', error);
-    }
-
-    try {
-      await shareAlbum(albumData.id, albumData.title, albumData.artist);
-    } catch (error) {
+  const handleShareAlbum = () => {
+    shareAlbum(albumData.id, albumData.title, albumData.artist).catch((error) => {
       console.error('Error sharing album:', error);
-      // Error is already handled in shareService, but we can add additional handling here if needed
-    }
+    });
+    recordShareEvent(albumData.id, 'album').catch((error) => {
+      console.error('Error recording share event:', error);
+    });
   };
 
-  const handleShareTrack = async (track: AlbumTrack, e: React.MouseEvent) => {
+  const handleShareTrack = (track: AlbumTrack, e: React.MouseEvent) => {
     e.stopPropagation(); // Prevent triggering track play
-
-    try {
-      await recordShareEvent(track.id, 'song');
-    } catch (error) {
-      console.error('Error recording share event:', error);
-    }
-
-    try {
-      await shareSong(track.id, track.title, track.artist);
-    } catch (error) {
+    shareSong(track.id, track.title, track.artist).catch((error) => {
       console.error('Error sharing track:', error);
-    }
+    });
+    recordShareEvent(track.id, 'song').catch((error) => {
+      console.error('Error recording share event:', error);
+    });
   };
 
   const handleClose = () => {
-    // Remove ad banner when closing player
-    removeBanner();
     hideFullPlayer();
-
     onPlayerVisibilityChange?.(false);
     window.dispatchEvent(new CustomEvent('albumPlayerVisibilityChange', {
       detail: { isVisible: false }
     }));
-
-    navigate(-1);
+    if (window.history.length > 1) {
+      navigate(-1);
+    } else {
+      navigate('/');
+    }
   };
 
   const handleAddToPlaylist = async () => {
@@ -891,26 +963,30 @@ const AlbumPlayer: React.FC<AlbumPlayerScreenProps & {
     return num.toString();
   };
 
-  const downloadProgress = currentTrack ? getDownloadProgress(currentTrack.id) : null;
-  const trackIsDownloaded = currentTrack ? isDownloaded(currentTrack.id) : false;
+  const downloadProgress = null;
+  const trackIsDownloaded = isTrackDownloaded;
 
   // Removed redundant loading state - handled by parent component
 
   return (
-    <div className="fixed inset-0 z-50 flex flex-col bg-gradient-to-b from-[#1a1a1a] via-[#0d0d0d] to-[#000000] animate-in fade-in duration-300 touch-manipulation overflow-y-auto pb-[140px]">
-      {/* Header */}
-      <header className="sticky top-0 z-20 bg-gradient-to-b from-black/80 via-black/50 to-transparent backdrop-blur-md">
-        <div className="flex items-center justify-between px-5 py-4">
-          <button
-            onClick={handleClose}
-            className="p-2 hover:bg-white/10 rounded-full transition-all active:scale-95"
-            aria-label="Close player"
-          >
-            <X className="w-6 h-6 text-white" />
-          </button>
+    <div className="fixed inset-0 z-50 flex flex-col bg-[#0a0a0a] animate-in fade-in duration-300 touch-manipulation overflow-hidden pb-[env(safe-area-inset-bottom,0px)]">
+      {/* Header — properly grouped and centered with equal-width side columns */}
+      <header className="flex-shrink-0 z-20 bg-[#0a0a0a]" style={{ paddingTop: 'calc(1.25rem + env(safe-area-inset-top, 0px) * 0.25)', paddingBottom: '1.25rem' }}>
+        <div className="flex flex-row items-center px-3 py-1 min-h-[40px]">
+          {/* Left — fixed width for balance */}
+          <div className="w-[72px] flex items-center justify-start">
+            <button
+              onClick={handleClose}
+              className="p-2 rounded-full text-white/80 hover:text-white hover:bg-white/10 transition-all active:scale-95"
+              aria-label="Close player"
+            >
+              <X className="w-5 h-5" />
+            </button>
+          </div>
 
+          {/* Center — artist info, truly centered */}
           <div
-            className="flex items-center gap-3 flex-1 min-w-0 mx-4 cursor-pointer active:scale-95 transition-transform"
+            className="flex-1 flex items-center justify-center gap-2 min-w-0 cursor-pointer active:scale-95 transition-transform"
             onClick={() => {
               if (artistUserId) {
                 handleClose();
@@ -918,389 +994,351 @@ const AlbumPlayer: React.FC<AlbumPlayerScreenProps & {
               }
             }}
           >
-            <Avatar className="w-10 h-10 border-2 border-white/20 ring-2 ring-white/10">
+            <Avatar className="w-8 h-8 flex-shrink-0">
               <AvatarImage src={artistProfile?.avatar_url || artistProfile?.profile_photo_url || undefined} />
-              <AvatarFallback className="bg-gradient-to-br from-[#309605] to-[#3ba208] text-white font-semibold">
+              <AvatarFallback className="bg-[#00ad74] text-white font-semibold text-xs">
                 {(albumData.artist || 'A').charAt(0).toUpperCase()}
               </AvatarFallback>
             </Avatar>
-            <div className="flex-1 min-w-0">
-              <h3 className="font-bold text-white text-sm truncate">
+            <div className="min-w-0 text-left">
+              <h3 className="font-bold text-white text-sm truncate leading-tight">
                 {albumData.artist || 'Unknown Artist'}
               </h3>
-              <p className="text-white/70 text-xs">
+              <p className="text-white/60 text-[11px] truncate">
                 {formatNumber(artistFollowerCount)} followers
               </p>
             </div>
           </div>
 
-          {albumData.artistId && user?.id !== artistUserId && (
-            <button
-              onClick={handleToggleFollow}
-              disabled={isLoadingFollow}
-              className={`inline-flex items-center px-4 py-2 rounded-full font-medium text-xs transition-all active:scale-95 ${
-                isAuthenticated && isFollowingArtist
-                  ? 'bg-white/100 text-grey border border-white/30 hover:bg-white/30'
-                  : 'bg-white text-black hover:bg-white/90'
-              } disabled:opacity-50 disabled:cursor-not-allowed`}
-            >
-              {isLoadingFollow ? (
-                <Spinner size={14} className="text-white" />
-              ) : isAuthenticated && isFollowingArtist ? (
-                <>
-                  <UserMinus className="w-3.5 h-3.5 mr-1" />
-                  Following
-                </>
-              ) : (
-                <>
-                  <UserPlus className="w-3.5 h-3.5 mr-1" />
-                  Follow
-                </>
-              )}
-            </button>
-          )}
+          {/* Right — fixed width for balance */}
+          <div className="w-[72px] flex items-center justify-end">
+            {albumData.artistId && user?.id !== artistUserId ? (
+              <button
+                onClick={handleToggleFollow}
+                disabled={isLoadingFollow}
+                aria-label={isAuthenticated && isFollowingArtist ? "Unfollow artist" : "Follow artist"}
+                className="inline-flex items-center justify-center px-3 py-1.5 rounded-full font-semibold text-[11px] bg-white text-[#0a0a0a] hover:opacity-90 active:scale-95 transition-all disabled:opacity-50 disabled:cursor-not-allowed"
+              >
+                {isLoadingFollow ? (
+                  <Spinner size={12} className="text-[#0a0a0a]" />
+                ) : (
+                  isAuthenticated && isFollowingArtist ? 'Following' : 'Follow'
+                )}
+              </button>
+            ) : null}
+          </div>
         </div>
       </header>
 
-      {/* Main Content */}
-      <div className="flex-1 flex flex-col px-5 py-6">
-        {/* Album Artwork */}
-        <div className="w-full max-w-[280px] mx-auto mb-4">
-          <div className="relative aspect-square rounded-3xl overflow-hidden shadow-2xl">
-            {albumData.coverImageUrl ? (
-              <img
-                src={albumData.coverImageUrl}
-                alt={albumData.title}
-                className="w-full h-full object-cover"
+      {/* Main Content — scrollable, seamless with header */}
+      <div
+        className="flex-1 flex flex-col min-h-0 overflow-y-auto overflow-x-hidden scrollbar-hide"
+        style={{ paddingBottom: 'calc(5rem + env(safe-area-inset-bottom, 0px))' }}
+      >
+        <div className="flex-1 flex flex-col px-4 pt-0 pb-4">
+          {/* Album Artwork / Inline Native Ad Slot */}
+          <div className="px-5 py-4 flex-1 min-h-0">
+            {inlineAd && showInlineAd ? (
+              <PlayerStaticAdBanner
+                ad={inlineAd}
+                className="max-w-[280px] mx-auto rounded-2xl shadow-lg"
               />
             ) : (
-              <div className="w-full h-full bg-gradient-to-br from-[#309605] to-[#3ba208] flex items-center justify-center">
-                <span className="text-white text-6xl font-bold">♪</span>
+              <div className="relative rounded-2xl overflow-hidden bg-white/5 w-full aspect-square max-w-[280px] mx-auto shadow-lg">
+                {albumData.coverImageUrl ? (
+                  <img
+                    src={albumData.coverImageUrl}
+                    alt={albumData.title}
+                    className="w-full h-full object-cover"
+                    draggable={false}
+                  />
+                ) : (
+                  <div className="w-full h-full flex items-center justify-center bg-white/5">
+                    <span className="text-4xl font-bold text-white/30">♪</span>
+                  </div>
+                )}
               </div>
             )}
-            <div className="absolute inset-0 bg-gradient-to-t from-black/20 to-transparent"></div>
           </div>
-        </div>
 
-        {/* Static Ad Banner */}
-        {staticAd && (
-          <div className="w-full max-w-sm mx-auto mb-4">
-            <PlayerStaticAdBanner ad={staticAd} />
+          {/* Album Information */}
+          <div className="px-5 flex items-start justify-between gap-3">
+            <div className="min-w-0 flex-1">
+              <h2 className="text-lg font-bold text-white truncate leading-tight">
+                {albumData.title}
+              </h2>
+              <p className="text-sm text-white/70 mt-0.5 truncate">
+                {tracks?.length} tracks • {formatDuration(albumData.totalDuration)}
+              </p>
+            </div>
+            <button
+              onClick={() => {
+                if (!isAuthenticated) setShowAuthModal(true);
+                else setShowTippingModal(true);
+              }}
+              className="flex-shrink-0 p-1.5 mt-0.5 text-white/70 hover:text-white transition-colors"
+            >
+              <Gift className="w-5 h-5" />
+            </button>
           </div>
-        )}
 
-        {/* Album Information */}
-        <div className="text-center mb-6 w-full max-w-sm mx-auto">
-          <h1 className="font-bold text-white text-2xl mb-1 truncate px-2">
-            {albumData.title}
-          </h1>
-          <p className="text-white/40 text-sm">
-            {tracks?.length} tracks • {formatDuration(albumData.totalDuration)}
-          </p>
-        </div>
-
-        {/* Playback Controls */}
-        <div className="flex items-center justify-center gap-4 w-full max-w-sm mx-auto mb-8">
-          <button
-            onClick={handleToggleShuffle}
-            className={`p-2.5 rounded-full transition-all active:scale-95 ${
-              isShuffleEnabled
-                ? 'text-white bg-white/20'
-                : 'text-white/50 hover:text-white/70 hover:bg-white/10'
-            }`}
-            aria-label="Shuffle"
-          >
-            <Shuffle className="w-5 h-5" />
-          </button>
-
-          <button
-            onClick={playPreviousTrack}
-            className="p-3 text-white/70 hover:text-white hover:bg-white/10 rounded-full transition-all active:scale-95"
-            aria-label="Previous"
-          >
-            <SkipBack className="w-6 h-6" fill="currentColor" />
-          </button>
-
-          <button
-            onClick={() => playTrack(currentTrackIndex)}
-            className="w-16 h-16 bg-white rounded-full flex items-center justify-center active:scale-95 transition-all duration-200 shadow-2xl hover:shadow-3xl"
-            aria-label={isPlaying && currentSong?.id === currentTrack?.id ? "Pause" : "Play"}
-          >
-            {isPlaying && currentSong?.id === currentTrack?.id ? (
-              <Pause className="w-7 h-7 text-black" fill="black" />
-            ) : (
-              <Play className="w-7 h-7 ml-1 text-black" fill="black" />
-            )}
-          </button>
-
-          <button
-            onClick={playNextTrack}
-            className="p-3 text-white/70 hover:text-white hover:bg-white/10 rounded-full transition-all active:scale-95"
-            aria-label="Next"
-          >
-            <SkipForward className="w-6 h-6" fill="currentColor" />
-          </button>
-
-          <button
-            onClick={handleToggleRepeat}
-            className={`p-2.5 rounded-full transition-all active:scale-95 relative ${
-              repeatMode !== 'off'
-                ? 'text-white bg-white/20'
-                : 'text-white/50 hover:text-white/70 hover:bg-white/10'
-            }`}
-            aria-label={`Repeat ${repeatMode}`}
-          >
-            <Repeat className="w-5 h-5" />
-            {repeatMode === 'one' && (
-              <span className="absolute -top-0.5 -right-0.5 w-3.5 h-3.5 bg-white rounded-full flex items-center justify-center">
-                <span className="text-black text-[9px] font-bold">1</span>
-              </span>
-            )}
-          </button>
-        </div>
-
-        {/* Social Actions Grid */}
-        <div className="w-full max-w-sm mx-auto mb-6">
-          <div className="grid grid-cols-4 gap-3">
+          {/* Playback Controls */}
+          <div className="flex items-center justify-center gap-6 px-5 pt-4 pb-2">
             <button
               onClick={handleToggleAlbumFavorite}
-              disabled={!isAuthenticated}
-              className="flex flex-col items-center justify-center gap-2 p-3 rounded-2xl bg-white/5 hover:bg-white/10 active:scale-95 transition-all disabled:opacity-50 disabled:cursor-not-allowed"
-            >
-              <div className={`w-11 h-11 rounded-full flex items-center justify-center transition-all duration-[50ms] ${
-                isAlbumFavorited ? 'bg-red-500/20' : 'bg-white/10'
-              }`}>
-                <Heart className={`w-5 h-5 transition-all duration-[50ms] ${isAlbumFavorited ? 'text-red-500 fill-red-500' : 'text-white'}`} />
-              </div>
-              <span className="text-white/70 text-[10px] font-medium">Like</span>
-            </button>
-
-            <div className="relative" ref={playlistDropdownRef}>
-              <button
-                onClick={handleAddToPlaylist}
-                disabled={isLoadingPlaylists}
-                className="w-full flex flex-col items-center justify-center gap-2 p-3 rounded-2xl bg-white/5 hover:bg-white/10 active:scale-95 transition-all disabled:opacity-50 disabled:cursor-not-allowed"
-              >
-                <div className="w-11 h-11 rounded-full bg-white/10 flex items-center justify-center">
-                  {isLoadingPlaylists ? (
-                    <Spinner size={20} className="text-white" />
-                  ) : (
-                    <Plus className="w-5 h-5 text-white" />
-                  )}
-                </div>
-                <span className="text-white/70 text-[10px] font-medium">Playlist</span>
-              </button>
-
-              {showPlaylistsDropdown && (
-                <div className="absolute bottom-full mb-2 left-1/2 -translate-x-1/2 w-56 bg-[#1a1a1a] border border-white/10 rounded-2xl shadow-2xl z-30 overflow-hidden">
-                  {isLoadingPlaylists ? (
-                    <div className="px-4 py-3 flex items-center justify-center">
-                      <Spinner size={24} className="text-white" />
-                    </div>
-                  ) : userPlaylists.length === 0 ? (
-                    <div className="px-4 py-3 text-white/50 text-sm text-center">
-                      No playlists yet
-                    </div>
-                  ) : (
-                    <>
-                      <div className="px-4 py-2 text-white text-xs font-semibold border-b border-white/10">
-                        Add to Playlist
-                      </div>
-                      <div className="max-h-48 overflow-y-auto">
-                        {userPlaylists.map(playlist => (
-                          <button
-                            key={playlist.id}
-                            onClick={() => handleToggleSongInPlaylist(playlist.id)}
-                            className="w-full px-4 py-2.5 text-left text-white/80 text-sm hover:bg-white/5 flex items-center justify-between transition-colors"
-                          >
-                            <span className="truncate">{playlist.title}</span>
-                            {playlist.hasSong && <Check className="w-4 h-4 text-[#309605] flex-shrink-0 ml-2" />}
-                          </button>
-                        ))}
-                      </div>
-                    </>
-                  )}
-                  <div className="border-t border-white/10">
-                    <button
-                      onClick={() => {
-                        setShowPlaylistsDropdown(false);
-                        setShowCreatePlaylistModal(true);
-                      }}
-                      className="w-full px-4 py-2.5 text-left text-[#309605] text-sm hover:bg-white/5 flex items-center transition-colors"
-                    >
-                      <Plus className="w-4 h-4 mr-2" />
-                      Create New
-                    </button>
-                  </div>
-                </div>
+              className={cn(
+                'hover:scale-110 p-1 transition-all',
+                isAlbumFavorited ? 'text-red-500' : 'text-white/80 hover:text-white'
               )}
-            </div>
-
-            <button
-             onClick={() => {
-                if (!isAuthenticated) {
-                  setShowAuthModal(true);
-                } else {
-                  setShowTippingModal(true);
-                }
-              }}
-              className="flex flex-col items-center justify-center gap-2 p-3 rounded-2xl bg-white/5 hover:bg-white/10 active:scale-95 transition-all"
+              aria-label={isAlbumFavorited ? 'Unlike album' : 'Like album'}
             >
-              <div className="w-11 h-11 rounded-full bg-white/10 flex items-center justify-center">
-                <Gift className="w-5 h-5 text-white" />
-              </div>
-              <span className="text-white/70 text-[10px] font-medium">Treat</span>
+              <Heart className={cn('w-5 h-5', isAlbumFavorited && 'fill-red-500')} />
             </button>
-
+            <button onClick={playPreviousTrack} className="text-white hover:scale-110 active:scale-95 transition-transform p-1" aria-label="Previous track">
+              <SkipBack className="w-6 h-6 fill-current" />
+            </button>
+            <button
+              onClick={() => playTrack(currentTrackIndex)}
+              className="w-14 h-14 rounded-full flex items-center justify-center bg-white text-[#0a0a0a] hover:scale-[1.06] active:scale-95 transition-all duration-200 shadow-lg"
+              aria-label={isThisAlbumActive && isPlaying && currentSong?.id === currentTrack?.id ? 'Pause' : 'Play'}
+            >
+              {isBuffering ? (
+                <Spinner size={20} className="text-[#0a0a0a]" />
+              ) : isThisAlbumActive && isPlaying && currentSong?.id === currentTrack?.id ? (
+                <Pause className="w-6 h-6" />
+              ) : (
+                <Play className="w-6 h-6 ml-0.5" />
+              )}
+            </button>
+            <button onClick={playNextTrack} className="text-white hover:scale-110 active:scale-95 transition-transform p-1" aria-label="Next track">
+              <SkipForward className="w-6 h-6 fill-current" />
+            </button>
             <button
               onClick={() => setShowCommentsModal(true)}
-              className="flex flex-col items-center justify-center gap-2 p-3 rounded-2xl bg-white/5 hover:bg-white/10 active:scale-95 transition-all"
+              className="text-white/80 hover:text-white hover:scale-110 p-1 transition-all relative"
+              aria-label="Comments"
             >
-              <div className="w-11 h-11 rounded-full bg-white/10 flex items-center justify-center relative">
-                <MessageCircle className="w-5 h-5 text-white" />
-                {commentCount > 0 && (
-                  <span className="absolute -top-1 -right-1 bg-[#309605] text-white text-[9px] font-bold rounded-full min-w-[18px] h-[18px] flex items-center justify-center px-1">
-                    {commentCount > 99 ? '99+' : commentCount}
-                  </span>
-                )}
-              </div>
-              <span className="text-white/70 text-[10px] font-medium">Comment</span>
-            </button>
-
-            <button
-              onClick={handleDownloadAlbum}
-              disabled={isDownloadInProgress || !currentTrack?.audioUrl}
-              className="flex flex-col items-center justify-center gap-2 p-3 rounded-2xl bg-white/5 hover:bg-white/10 active:scale-95 transition-all disabled:opacity-50"
-            >
-              <div className={`w-11 h-11 rounded-full flex items-center justify-center ${
-                trackIsDownloaded ? 'bg-[#309605]/20' : 'bg-white/10'
-              }`}>
-                {isDownloadInProgress || downloadProgress ? (
-                  <Spinner size={20} className="text-white" />
-                ) : (
-                  <Download className={`w-5 h-5 ${trackIsDownloaded ? 'text-[#309605]' : 'text-white'}`} />
-                )}
-              </div>
-              <span className="text-white/70 text-[10px] font-medium">
-                {trackIsDownloaded ? 'Saved' : 'Download'}
-              </span>
-            </button>
-
-            <button
-              onClick={handleShareAlbum}
-              className="flex flex-col items-center justify-center gap-2 p-3 rounded-2xl bg-white/5 hover:bg-white/10 active:scale-95 transition-all"
-            >
-              <div className="w-11 h-11 rounded-full bg-white/10 flex items-center justify-center">
-                <Share2 className="w-5 h-5 text-white" />
-              </div>
-              <span className="text-white/70 text-[10px] font-medium">Share</span>
-            </button>
-
-            <button
-              onClick={() => setShowReportModal(true)}
-              className="flex flex-col items-center justify-center gap-2 p-3 rounded-2xl bg-white/5 hover:bg-white/10 active:scale-95 transition-all"
-            >
-              <div className="w-11 h-11 rounded-full bg-white/10 flex items-center justify-center">
-                <Flag className="w-5 h-5 text-white" />
-              </div>
-              <span className="text-white/70 text-[10px] font-medium">Report</span>
-            </button>
-
-            {albumData.playCount > 0 && (
-              <div className="flex flex-col items-center justify-center gap-2 p-3 rounded-2xl bg-white/5">
-                <div className="w-11 h-11 rounded-full bg-white/10 flex items-center justify-center">
-                  <Play className="w-4 h-4 text-white" />
-                </div>
-                <span className="text-white/70 text-[10px] font-medium">
-                  {formatNumber(albumData.playCount)}
+              <MessageCircle className="w-5 h-5" />
+              {commentCount > 0 && (
+                <span className="absolute -top-1 -right-1.5 text-[10px] font-bold text-white/80 tabular-nums">
+                  {commentCount >= 1_000_000 ? `${(commentCount / 1_000_000).toFixed(1).replace(/\.0$/, '')}M` : commentCount >= 1_000 ? `${(commentCount / 1_000).toFixed(1).replace(/\.0$/, '')}K` : commentCount}
                 </span>
+              )}
+            </button>
+          </div>
+
+          {/* Actions row — white icons; report red */}
+          <div className="flex items-center justify-between px-5 pb-5">
+            <div className="flex items-center gap-1">
+              <div className="relative" ref={playlistDropdownRef}>
+                <button
+                  onClick={handleAddToPlaylist}
+                  disabled={isLoadingPlaylists}
+                  className="p-2 rounded-full text-white/80 hover:text-white hover:bg-white/10 transition-all disabled:opacity-50"
+                  title="Add to playlist"
+                >
+                  {isLoadingPlaylists ? <Spinner size={18} className="text-white" /> : <Plus className="w-[18px] h-[18px]" />}
+                </button>
+                {showPlaylistsDropdown && (
+                  <>
+                    <div className="fixed inset-0 z-40" onClick={() => setShowPlaylistsDropdown(false)} aria-hidden />
+                    <div className="absolute bottom-full left-0 mb-2 z-50 w-64 rounded-2xl bg-[#141414] shadow-2xl overflow-hidden">
+                      <div className="px-4 py-3">
+                        <p className="text-[11px] font-semibold text-white/50 uppercase tracking-wider">Add to playlist</p>
+                      </div>
+                      {userPlaylists.length === 0 && !isLoadingPlaylists ? (
+                        <div className="px-4 py-6 text-white/50 text-sm text-center">No playlists yet. Create one below.</div>
+                      ) : (
+                        <div className="max-h-52 overflow-y-auto py-1">
+                          {userPlaylists.map(playlist => (
+                            <button
+                              key={playlist.id}
+                              onClick={() => handleToggleSongInPlaylist(playlist.id)}
+                              className="w-full flex items-center justify-between gap-3 px-4 py-3 text-sm text-white hover:bg-white/10 active:bg-white/15 transition-colors text-left rounded-xl mx-2"
+                            >
+                              <span className="truncate font-medium">{playlist.title}</span>
+                              {playlist.hasSong && <Check className="w-5 h-5 text-[#00ad74] flex-shrink-0" />}
+                            </button>
+                          ))}
+                        </div>
+                      )}
+                      <div className="p-2">
+                        <button
+                          onClick={() => { setShowPlaylistsDropdown(false); setShowCreatePlaylistModal(true); }}
+                          className="w-full flex items-center justify-center gap-2 px-4 py-3.5 rounded-xl bg-[#00ad74] hover:bg-[#009c68] text-white font-semibold text-sm transition-colors"
+                        >
+                          <Plus className="w-5 h-5" />
+                          Create new playlist
+                        </button>
+                      </div>
+                    </div>
+                  </>
+                )}
+              </div>
+              <button
+                type="button"
+                onClick={handleDownloadAlbum}
+                disabled={isDownloadInProgress || !currentTrack?.audioUrl}
+                className={cn(
+                  'p-2 rounded-full transition-all',
+                  trackIsDownloaded ? 'text-[#00ad74]' : 'text-white/80 hover:text-white hover:bg-white/10',
+                  (isDownloadInProgress || !currentTrack?.audioUrl) && 'opacity-50 cursor-not-allowed'
+                )}
+                title={trackIsDownloaded ? 'Remove offline download' : 'Download for offline'}
+                aria-label={trackIsDownloaded ? 'Remove offline download' : 'Download for offline'}
+              >
+                {isDownloadInProgress ? (
+                  <Spinner size={18} className="text-white/80" />
+                ) : (
+                  <ArrowDownToLine className="w-[18px] h-[18px]" strokeWidth={2.25} />
+                )}
+              </button>
+              <button
+                onClick={handleShareAlbum}
+                className="p-2 rounded-full text-white/80 hover:text-white hover:bg-white/10 transition-all"
+                title="Share"
+              >
+                <Share2 className="w-[18px] h-[18px]" />
+              </button>
+              <button
+                onClick={handleToggleShuffle}
+                className={cn(
+                  'p-2 rounded-full transition-all active:scale-95',
+                  isShuffleEnabled
+                    ? 'text-[#00ad74] bg-[#00ad74]/20'
+                    : 'text-white/80 hover:text-white hover:bg-white/10'
+                )}
+                aria-label="Shuffle"
+                title="Shuffle"
+              >
+                <Shuffle className="w-[18px] h-[18px]" />
+              </button>
+              <button
+                onClick={() => setShowReportModal(true)}
+                className="p-2 rounded-full text-red-500 hover:text-red-400 hover:bg-red-500/10 transition-all"
+                title="Report"
+              >
+                <Flag className="w-[18px] h-[18px]" />
+              </button>
+            </div>
+            {albumData.playCount != null && albumData.playCount > 0 && (
+              <div className="flex items-center gap-1.5 text-white/60 text-xs">
+                <Play className="w-3.5 h-3.5" fill="currentColor" />
+                <span className="font-semibold text-white">{formatNumber(albumData.playCount)}</span>
+                <span>plays</span>
               </div>
             )}
           </div>
-        </div>
 
-        {/* Track List */}
-        <div className="w-full max-w-sm mx-auto">
-          <div className="flex items-center justify-between mb-4 px-2">
-            <h2 className="font-bold text-white text-lg">Tracks</h2>
-            <button
-              onClick={() => setShowTrackList(!showTrackList)}
-              className="text-white/60 hover:text-white text-sm transition-colors"
-            >
-              {showTrackList ? 'Hide' : 'Show'}
-            </button>
-          </div>
+          {/* song_bonus ~every 1.5 songs; rewarded interstitial every 3. Claim → VITE_ADMOB_REWARDED_ID */}
+          {showSongBonusPrompt && (
+            <div className="mt-3 mb-2 flex items-center justify-between gap-3 rounded-2xl bg-white/10 border border-white/15 px-3 py-2 shadow-lg">
+              <div className="flex flex-col">
+                <span className="text-xs font-semibold text-white">Get bonus score</span>
+                <span className="text-[11px] text-white/70">Watch a short ad to earn extra treats.</span>
+              </div>
+              <button
+                type="button"
+                onClick={() => {
+                  setShowSongBonusPrompt(false);
+                  if (!currentTrack?.id) return;
+                  showSongBonusRewarded({ contentId: currentTrack.id }).catch(() => {});
+                }}
+                className="px-3 py-1.5 rounded-full bg-white text-xs font-semibold text-black active:scale-95 hover:opacity-90 transition-all"
+              >
+                Claim
+              </button>
+            </div>
+          )}
 
-          {showTrackList && (
-            <div className="space-y-2">
-              {tracks && tracks.length > 0 ? tracks.map((track, index) => (
-                <div
-                  key={track.id}
-                  className={`flex items-center gap-3 p-3 rounded-2xl transition-all cursor-pointer group ${
-                    currentSong?.id === track.id
-                      ? 'bg-white/10'
-                      : 'bg-white/5 hover:bg-white/10'
-                  }`}
-                  onClick={() => playTrack(index)}
+          {/* Track List */}
+          <div className="rounded-2xl bg-white/[0.04] overflow-hidden">
+            <div className="px-5 py-4">
+              <div className="flex items-center justify-between mb-4">
+                <h2 className="font-sans font-bold text-white text-lg">Tracks</h2>
+                <button
+                  onClick={() => setShowTrackList(!showTrackList)}
+                  className="text-white/60 hover:text-white text-sm transition-colors"
                 >
-                  <div className={`w-8 h-8 rounded-full flex items-center justify-center flex-shrink-0 text-sm font-bold ${
-                    currentSong?.id === track.id ? 'bg-[#309605] text-white' : 'bg-white/10 text-white/60'
-                  }`}>
-                    {currentSong?.id === track.id && isPlaying ? (
-                      <Pause className="w-4 h-4" fill="currentColor" />
-                    ) : (
-                      <span>{track.trackNumber || (index + 1)}</span>
-                    )}
-                  </div>
+                  {showTrackList ? 'Hide' : 'Show'}
+                </button>
+              </div>
 
-                  <div className="flex-1 min-w-0">
-                    <p className={`font-medium text-sm truncate ${
-                      currentSong?.id === track.id ? 'text-white' : 'text-white/90'
-                    }`}>
-                      {track.title || 'Untitled Track'}
-                    </p>
-                    <p className="text-white/50 text-xs truncate">
-                      {track.featuredArtists && track.featuredArtists.length > 0
-                        ? `${track.artist} ft. ${track.featuredArtists.join(', ')}`
-                        : track.artist
-                      }
-                    </p>
-                  </div>
-
-                  <div className="flex items-center gap-2">
-                    {isAuthenticated && (
-                      <button
-                        onClick={(e) => handleToggleTrackFavorite(track.id, e)}
-                        className="p-1.5 rounded-full transition-all hover:bg-white/10"
-                        aria-label={track.isFavorited ? 'Remove from favorites' : 'Add to favorites'}
-                      >
-                        <Heart className={`w-4 h-4 transition-all duration-[50ms] ${track.isFavorited ? 'text-red-500 fill-red-500' : 'text-white'}`} />
-                      </button>
-                    )}
-
-                    <button
-                      onClick={(e) => handleShareTrack(track, e)}
-                      className="p-1.5 rounded-full transition-all hover:bg-white/10 active:scale-95"
-                      aria-label="Share song"
+              {showTrackList && (
+                <div className="space-y-1">
+                  {tracks && tracks.length > 0 ? tracks.map((track, index) => (
+                    <div
+                      key={track.id}
+                      className={cn(
+                        'flex items-center gap-3 p-3 rounded-xl transition-all cursor-pointer group',
+                        isThisAlbumActive && currentSong?.id === track.id
+                          ? 'bg-white/10'
+                          : 'hover:bg-white/5'
+                      )}
+                      onClick={() => playTrack(index)}
                     >
-                      <Share2 className="w-4 h-4 text-white/70 hover:text-white" />
-                    </button>
+                      <div className={cn(
+                        'w-8 h-8 rounded-full flex items-center justify-center flex-shrink-0 text-sm font-bold',
+                        isThisAlbumActive && currentSong?.id === track.id ? 'bg-[#00ad74] text-white' : 'bg-white/10 text-white/60'
+                      )}>
+                        {isThisAlbumActive && currentSong?.id === track.id && isPlaying ? (
+                          <Pause className="w-4 h-4" fill="currentColor" />
+                        ) : (
+                          <span>{track.trackNumber || (index + 1)}</span>
+                        )}
+                      </div>
 
-                    <span className="text-white/50 text-xs w-12 text-right">
-                      {formatTime(track.duration)}
-                    </span>
-                  </div>
-                </div>
-              )) : (
-                <div className="text-center py-12">
-                  <div className="w-16 h-16 bg-white/5 rounded-full flex items-center justify-center mx-auto mb-4">
-                    <Play className="w-8 h-8 text-white/30" />
-                  </div>
-                  <p className="text-white/50">No tracks available</p>
+                      <div className="flex-1 min-w-0">
+                        <p className={cn(
+                          'font-medium text-sm truncate',
+                          isThisAlbumActive && currentSong?.id === track.id ? 'text-white' : 'text-white/90'
+                        )}>
+                          {track.title || 'Untitled Track'}
+                        </p>
+                        <p className="text-white/50 text-xs truncate">
+                          {track.featuredArtists && track.featuredArtists.length > 0
+                            ? `${track.artist} ft. ${track.featuredArtists.join(', ')}`
+                            : track.artist
+                          }
+                        </p>
+                      </div>
+
+                      <div className="flex items-center gap-1.5">
+                        {isAuthenticated && (
+                          <button
+                            onClick={(e) => handleToggleTrackFavorite(track.id, e)}
+                            className="p-1.5 rounded-full transition-all hover:bg-white/10"
+                            aria-label={track.isFavorited ? 'Remove from favorites' : 'Add to favorites'}
+                          >
+                            <Heart className={cn('w-4 h-4 transition-all duration-[50ms]', track.isFavorited ? 'text-red-500 fill-red-500' : 'text-white/70')} />
+                          </button>
+                        )}
+
+                        <button
+                          onClick={(e) => handleShareTrack(track, e)}
+                          className="p-1.5 rounded-full transition-all hover:bg-white/10 active:scale-95"
+                          aria-label="Share song"
+                        >
+                          <Share2 className="w-4 h-4 text-white/70" />
+                        </button>
+
+                        <span className="text-white/50 text-xs w-10 text-right tabular-nums">
+                          {formatTime(track.duration)}
+                        </span>
+                      </div>
+                    </div>
+                  )) : (
+                    <div className="text-center py-12">
+                      <div className="w-16 h-16 bg-white/5 rounded-full flex items-center justify-center mx-auto mb-4">
+                        <Play className="w-8 h-8 text-white/30" />
+                      </div>
+                      <p className="text-white/50">No tracks available</p>
+                    </div>
+                  )}
                 </div>
               )}
             </div>
-          )}
+          </div>
         </div>
       </div>
 
@@ -1384,6 +1422,17 @@ export const AlbumPlayerScreen: React.FC<AlbumPlayerScreenProps> = ({ onPlayerVi
   const navigate = useNavigate();
   const [albumData, setAlbumData] = useState<AlbumData | null>(null);
   const [error, setError] = useState<string | null>(null);
+
+  useEngagementSync(useCallback((update) => {
+    if (update.metric === 'play_count' && update.contentType === 'song') {
+      setAlbumData(prev => {
+        if (!prev) return prev;
+        const newTracks = prev.tracks.map(t => t.id === update.contentId ? { ...t, playCount: update.value } : t);
+        const newPlayCount = newTracks.reduce((sum, t) => sum + (t.playCount ?? 0), 0);
+        return { ...prev, tracks: newTracks, playCount: newPlayCount };
+      });
+    }
+  }, []));
 
   useEffect(() => {
     if (!albumId) {
@@ -1551,6 +1600,23 @@ export const AlbumPlayerScreen: React.FC<AlbumPlayerScreenProps> = ({ onPlayerVi
 
       const totalDuration = tracks.reduce((sum, track) => sum + track.duration, 0);
 
+      if (albumInfo.release_date && !isReleased(albumInfo.release_date)) {
+        const { data: { user: currentUser } } = await supabase.auth.getUser();
+        let isOwner = false;
+        if (currentUser) {
+          const { data: profile } = await supabase
+            .from('artist_profiles')
+            .select('artist_id')
+            .eq('user_id', currentUser.id)
+            .maybeSingle();
+          isOwner = profile?.artist_id === albumInfo.artist_id;
+        }
+        if (!isOwner) {
+          setError(`This album isn't released yet. It drops on ${formatReleaseDateDisplay(albumInfo.release_date)}.`);
+          return;
+        }
+      }
+
       const album: AlbumData = {
         id: albumInfo.id,
         title: albumInfo.title,
@@ -1581,15 +1647,21 @@ export const AlbumPlayerScreen: React.FC<AlbumPlayerScreenProps> = ({ onPlayerVi
   // Only show error state - no loading skeleton for instant feel
   if (error) {
     return (
-      <div className="fixed inset-0 bg-gradient-to-b from-[#1a1a1a] via-[#0d0d0d] to-[#000000] z-50 flex items-center justify-center p-4">
-        <div className="bg-white/10 backdrop-blur-sm border border-white/20 rounded-3xl p-8 text-center max-w-md">
+      <div className="fixed inset-0 bg-[#0a0a0a] z-50 flex items-center justify-center p-4">
+        <div className="text-center max-w-md">
           <div className="w-16 h-16 bg-red-500/20 rounded-full flex items-center justify-center mx-auto mb-6">
             <Flag className="w-8 h-8 text-red-400" />
           </div>
           <h3 className="font-bold text-white text-xl mb-4">Album Not Found</h3>
-          <p className="text-white/70 text-sm mb-6">
+          <p className="text-white/60 text-sm mb-6">
             {error || 'The album you\'re looking for doesn\'t exist or has been removed.'}
           </p>
+          <button
+            onClick={() => (window.history.length > 1 ? navigate(-1) : navigate('/'))}
+            className="px-6 py-2.5 rounded-full bg-white text-[#0a0a0a] font-semibold text-sm hover:opacity-90 active:scale-95 transition-all"
+          >
+            Go Back
+          </button>
         </div>
       </div>
     );
@@ -1599,9 +1671,27 @@ export const AlbumPlayerScreen: React.FC<AlbumPlayerScreenProps> = ({ onPlayerVi
     window.dispatchEvent(new CustomEvent('openAuthModal'));
   };
 
-  // Show loading screen while fetching album data
+  // No second loading screen: while fetching album data, show same loader as route (Suspense) for one continuous load
   if (!albumData) {
-    return <LoadingScreen variant="premium" />;
+    return (
+      <div className="fixed inset-0 z-50 bg-gradient-to-b from-[#0a0a0a] via-[#0d0d0d] to-[#111111] flex items-center justify-center">
+        <div className="relative">
+          <img
+            src="/official_airaplay_logo.png"
+            alt="Loading"
+            className="w-32 h-32 object-contain drop-shadow-2xl"
+            style={{ animation: 'breathe 3s ease-in-out infinite' }}
+          />
+          <div className="absolute inset-0 -z-10 blur-3xl opacity-30 bg-white scale-75 animate-pulse" />
+        </div>
+        <style>{`
+          @keyframes breathe {
+            0%, 100% { transform: scale(1); opacity: 1; }
+            50% { transform: scale(1.05); opacity: 0.9; }
+          }
+        `}</style>
+      </div>
+    );
   }
 
   return (

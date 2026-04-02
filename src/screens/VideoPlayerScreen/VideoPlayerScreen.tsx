@@ -5,23 +5,16 @@ import { fetchOptimizedVideo } from '../../lib/optimizedDataFetcher';
 import { backgroundPrefetcher } from '../../lib/backgroundPrefetch';
 import { videoCache } from '../../lib/videoCache';
 import {
-  X, Play, Pause, Maximize, Share2, UserPlus, UserMinus,
-  MessageCircle, Eye, Calendar, ChevronDown, ChevronUp, Heart, Gift, Settings, Flag, Send,
+  X, Play, Pause, Maximize, Share2,
+  MessageCircle, Eye, Calendar, ChevronDown, ChevronUp, Heart, ThumbsUp, Gift, Settings, Flag, Send,
   Edit2, Trash2, Check, X as XIcon
 } from 'lucide-react';
 import { Avatar, AvatarFallback, AvatarImage } from '../../components/ui/avatar';
 import { Card, CardContent } from '../../components/ui/card';
-import { ScrollArea } from '../../components/ui/scroll-area';
 import { Skeleton } from '../../components/ui/skeleton';
 import { useAuth } from '../../contexts/AuthContext';
 import { useConfirm } from '../../contexts/ConfirmContext';
 import { shareVideo } from '../../lib/shareService';
-
-// Lazy load modals for faster initial render
-const CommentsModal = lazy(() => import('../../components/CommentsModal').then(m => ({ default: m.CommentsModal })));
-const TippingModal = lazy(() => import('../../components/TippingModal').then(m => ({ default: m.TippingModal })));
-const ReportModal = lazy(() => import('../../components/ReportModal').then(m => ({ default: m.ReportModal })));
-const AuthModal = lazy(() => import('../../components/AuthModal').then(m => ({ default: m.AuthModal })));
 import {
   supabase,
   getVideoDetails,
@@ -38,10 +31,25 @@ import {
   recordShareEvent
 } from '../../lib/supabase';
 import { videoRecommendationService } from '../../lib/videoRecommendationService';
+import { logger } from '../../lib/logger';
 import { formatDistanceToNowStrict } from 'date-fns';
 import { recordPlayback } from '../../lib/playbackTracker';
+import { engagementSync } from '../../lib/engagementSyncService';
 import { useHLSPlayer } from '../../hooks/useHLSPlayer';
+import { useAdPlacement } from '../../hooks/useAdPlacement';
+import { useContentEngagementSync } from '../../hooks/useEngagementSync';
 import { recordContribution } from '../../lib/contributionService';
+import { favoritesCache } from '../../lib/favoritesCache';
+import { followsCache } from '../../lib/followsCache';
+import { getOptimizedImageUrl } from '../../lib/imageOptimization';
+
+// Lazy load modals for faster initial render (after all imports to avoid "before initialization" in bundle)
+const CommentsModal = lazy(() => import('../../components/CommentsModal').then(m => ({ default: m.CommentsModal })));
+const TippingModal = lazy(() => import('../../components/TippingModal').then(m => ({ default: m.TippingModal })));
+const ReportModal = lazy(() => import('../../components/ReportModal').then(m => ({ default: m.ReportModal })));
+const AuthModal = lazy(() => import('../../components/AuthModal').then(m => ({ default: m.AuthModal })));
+const prefetchContentComments = (contentId: string, contentType: string) =>
+  import('../../components/CommentsModal').then((m) => m.prefetchContentComments(contentId, contentType));
 
 interface VideoData {
   id: string;
@@ -76,8 +84,8 @@ interface Comment {
   created_at: string;
   parent_comment_id: string | null;
   users: {
-    display_name: string;
-    avatar_url: string | null;
+  display_name: string;
+  avatar_url: string | null;
   };
   likes_count?: number;
   is_liked?: boolean;
@@ -91,7 +99,7 @@ interface VideoPlayerScreenProps {
 export const VideoPlayerScreen: React.FC<VideoPlayerScreenProps> = ({ onPlayerVisibilityChange }) => {
   const { videoId } = useParams<{ videoId: string }>();
   const navigate = useNavigate();
-  const { user, isAuthenticated, isInitialized } = useAuth();
+  const { user, session, isAuthenticated, isInitialized } = useAuth();
   const { confirm } = useConfirm();
   const videoRef = useRef<HTMLVideoElement>(null);
   const progressRef = useRef<HTMLDivElement>(null);
@@ -109,9 +117,11 @@ export const VideoPlayerScreen: React.FC<VideoPlayerScreenProps> = ({ onPlayerVi
   const [isPlaying, setIsPlaying] = useState(false);
   const [currentTime, setCurrentTime] = useState(0);
   const [duration, setDuration] = useState(0);
+  const [isPortraitVideo, setIsPortraitVideo] = useState(false);
+  const [isPortraitHint, setIsPortraitHint] = useState(false);
   const [showControls, setShowControls] = useState(true);
   const [showQualityMenu, setShowQualityMenu] = useState(false);
-  const [selectedQuality, setSelectedQuality] = useState<'360p' | '480p' | '720p' | '1080p' | 'auto'>('auto');
+  const [selectedQuality, setSelectedQuality] = useState<'360p' | '480p' | '720p' | '1080p' | 'auto'>('480p');
   const availableQualities = ['360p', '480p', '720p', '1080p', 'auto'];
 
   // Interaction state
@@ -138,53 +148,156 @@ export const VideoPlayerScreen: React.FC<VideoPlayerScreenProps> = ({ onPlayerVi
   const [touchStartY, setTouchStartY] = useState<number | null>(null);
   const [playbackStartTime, setPlaybackStartTime] = useState<number | null>(null);
   const hasRecordedPlaybackRef = useRef(false);
+  /** Which video the current watch session is for (stable when videoId changes before videoData catches up). */
+  const playbackVideoIdRef = useRef<string | null>(null);
 
-  // Initialize HLS player with mobile-friendly autoplay
+  // Ad state — sticky bottom banner is now managed globally by the app shell.
+  // This screen only requests fullscreen formats (interstitial/rewarded).
+  const { showInterstitial, showRewarded } = useAdPlacement('VideoPlayerScreen');
+  const completedVideosSinceBonusRef = useRef(0);
+  const hasRequestedPrerollRef = useRef(false);
+  const hasAttemptedInitialAutoplayRef = useRef(false);
+  const [showBonusPrompt, setShowBonusPrompt] = useState(false);
+
+  // Before first play (user tap or autoplay): start playback directly (no video-specific fullscreen ad)
+  const tryPlayAfterAd = useCallback(() => {
+    const video = videoRef.current;
+    if (!video) return;
+    const doPlay = () => {
+      video.muted = false;
+      const playPromise = video.play();
+      if (playPromise !== undefined) {
+        playPromise
+          .then(() => {
+            setIsPlaying(true);
+            setPlaybackStartTime((t) => t ?? Date.now());
+          })
+          .catch(() => {
+            if (videoRef.current) {
+              videoRef.current.muted = true;
+              videoRef.current.play().then(() => {
+                setPlaybackStartTime((t) => t ?? Date.now());
+              }).catch((e) => logger.error('Muted autoplay failed', e));
+            }
+          });
+      }
+    };
+    doPlay();
+  }, [videoId]);
+
+  // Optional interstitial before the first play of each video; uses the same global fullscreen cooldown as the rest of the app.
+  const maybeShowPrerollInterstitial = useCallback(async () => {
+    if (!videoId) return;
+    if (hasRequestedPrerollRef.current) return;
+    hasRequestedPrerollRef.current = true;
+
+    // Light randomization so not every video gets an interstitial even when cooldown allows.
+    if (Math.random() > 0.4) {
+      return;
+    }
+
+    try {
+      await showInterstitial('video_preroll_interstitial', {
+        contentId: videoId,
+        contentType: 'video',
+      });
+    } catch {
+      // Interstitial failures should never block playback.
+    }
+  }, [showInterstitial, videoId]);
+
+  // Autoplay should happen only once per loaded video, never after a manual pause.
+  const startInitialAutoplay = useCallback(async () => {
+    if (hasAttemptedInitialAutoplayRef.current) return;
+    hasAttemptedInitialAutoplayRef.current = true;
+    try {
+      await maybeShowPrerollInterstitial();
+    } finally {
+      tryPlayAfterAd();
+    }
+  }, [maybeShowPrerollInterstitial, tryPlayAfterAd]);
+
+  // Update displayed view count when playback is recorded (play_count from RPC → engagementSync)
+  useContentEngagementSync(
+    videoId || '',
+    useCallback((update) => {
+      if (
+        update.metric === 'play_count' &&
+        update.contentType === 'video' &&
+        update.contentId === videoId
+      ) {
+        setVideoData((prev) => (prev ? { ...prev, playCount: update.value } : null));
+      }
+    }, [videoId])
+  );
+
+  // If another part of the app already emitted a newer play_count, merge it in when this video loads
+  useEffect(() => {
+    if (!videoId || !videoData?.id) return;
+    setVideoData((prev) => {
+      if (!prev || prev.id !== videoId) return prev;
+      const cached = engagementSync.getCachedValue(videoId, 'play_count');
+      if (cached != null && cached > prev.playCount) {
+        return { ...prev, playCount: cached };
+      }
+      return prev;
+    });
+  }, [videoId, videoData?.id]);
+
+  useEffect(() => {
+    if (!isPlaying || !videoId) return;
+    prefetchContentComments(videoId, 'video').catch(() => {});
+  }, [isPlaying, videoId]);
+
+  useEffect(() => {
+    if (videoId && videoData?.id === videoId) {
+      playbackVideoIdRef.current = videoId;
+    }
+  }, [videoId, videoData?.id]);
+
+  // Initialize HLS player; first play can optionally show an interstitial, then autoplay
   const { setQuality, getCurrentQuality, getAvailableQualities } = useHLSPlayer(videoRef.current, videoData?.videoUrl || null, {
     autoplay: false,
+    defaultStartHeight: 480,
     onError: (error) => {
-      console.error('HLS playback error:', error);
-      console.error('Video URL was:', videoData?.videoUrl);
+      logger.error('HLS playback error', error);
       setError('Failed to load video. Please try again or check your connection.');
     },
     onLoadedMetadata: () => {
-      console.log('HLS video metadata loaded');
-      console.log('Video URL:', videoData?.videoUrl);
-
-      // Auto-start playback with sound on mobile after metadata loads
-      if (videoRef.current) {
-        videoRef.current.muted = false;
-        const playPromise = videoRef.current.play();
-        if (playPromise !== undefined) {
-          playPromise
-            .then(() => {
-              console.log('[VideoPlayerScreen] Video autoplay with sound started');
-              setIsPlaying(true);
-            })
-            .catch((err) => {
-              console.log('[VideoPlayerScreen] Autoplay with sound blocked, starting muted:', err.message);
-              // Fallback: try muted autoplay
-              if (videoRef.current) {
-                videoRef.current.muted = true;
-                videoRef.current.play().catch(e => console.error('Muted autoplay failed:', e));
-              }
-            });
-        }
-      }
+      void startInitialAutoplay();
     },
   });
 
-  // Log when videoData changes
+  // Fallback: if for any reason HLS onLoadedMetadata doesn't fire autoplay,
+  // ensure the first video auto-plays once the URL is ready.
   useEffect(() => {
-    if (videoData) {
-      console.log('[VideoPlayerScreen] Video data loaded:', {
-        id: videoData.id,
-        title: videoData.title,
-        videoUrl: videoData.videoUrl,
-        hasVideoUrl: !!videoData.videoUrl
-      });
-    }
-  }, [videoData]);
+    if (!videoData?.videoUrl) return;
+    void startInitialAutoplay();
+  }, [videoData?.videoUrl, startInitialAutoplay]);
+
+  // Infer orientation from thumbnail before metadata arrives for smoother first paint.
+  useEffect(() => {
+    const thumbnailUrl = videoData?.thumbnailUrl;
+    if (!thumbnailUrl) return;
+
+    let isCancelled = false;
+    const img = new Image();
+    img.onload = () => {
+      if (!isCancelled) {
+        setIsPortraitHint(img.naturalHeight > img.naturalWidth);
+      }
+    };
+    img.onerror = () => {
+      if (!isCancelled) {
+        setIsPortraitHint(false);
+      }
+    };
+    img.src = thumbnailUrl;
+
+    return () => {
+      isCancelled = true;
+    };
+  }, [videoData?.thumbnailUrl]);
 
   useEffect(() => {
     if (!videoId) {
@@ -193,7 +306,12 @@ export const VideoPlayerScreen: React.FC<VideoPlayerScreenProps> = ({ onPlayerVi
       return;
     }
 
-    console.log('VideoPlayerScreen mounted with videoId:', videoId);
+    // Reset per-video ad tracking
+    hasRequestedPrerollRef.current = false;
+    hasAttemptedInitialAutoplayRef.current = false;
+    setShowBonusPrompt(false);
+    setIsPortraitVideo(false);
+    setIsPortraitHint(false);
 
     // Notify parent that video player is active
     onPlayerVisibilityChange?.(true);
@@ -219,7 +337,7 @@ export const VideoPlayerScreen: React.FC<VideoPlayerScreenProps> = ({ onPlayerVi
     }
 
     return () => {
-      recordPlaybackOnUnmount();
+      void recordPlaybackOnUnmount();
       // Notify parent that video player is no longer active
       onPlayerVisibilityChange?.(false);
       if (container) {
@@ -228,34 +346,50 @@ export const VideoPlayerScreen: React.FC<VideoPlayerScreenProps> = ({ onPlayerVi
       }
     };
   }, [videoId]);
+  
+  // Restore like state from favoritesCache when videoId is available (persists when leaving/returning)
+  useEffect(() => {
+    if (videoId && isAuthenticated) {
+      setIsLiked(favoritesCache.isVideoFavorited(videoId));
+    } else if (!isAuthenticated) {
+      setIsLiked(false);
+    }
+  }, [videoId, isAuthenticated]);
+
+  // Restore follow state from followsCache when creator id is available (persists when leaving/returning)
+  useEffect(() => {
+    if (videoData?.creator?.id && isAuthenticated) {
+      setIsFollowingCreator(followsCache.isFollowing(videoData.creator.id));
+    } else if (!isAuthenticated) {
+      setIsFollowingCreator(false);
+    }
+  }, [videoData?.creator?.id, isAuthenticated]);
 
   useEffect(() => {
     if (videoData && isAuthenticated) {
       checkFollowingStatus();
       checkLikeStatus();
-    } else if (!isAuthenticated) {
-      setIsLiked(false);
     }
   }, [videoData, isAuthenticated]);
 
   useEffect(() => {
-    if (!videoData?.creator.id) return;
+    const creatorId = videoData?.creator?.id;
+    if (!creatorId) return;
 
     const channel = supabase
-      .channel(`user_follows:${videoData.creator.id}`)
+      .channel(`user_follows:${creatorId}`)
       .on(
         'postgres_changes',
         {
           event: '*',
           schema: 'public',
           table: 'user_follows',
-          filter: `following_id=eq.${videoData.creator.id}`
+          filter: `following_id=eq.${creatorId}`
         },
         async () => {
-          console.log('[VideoPlayerScreen] Follow status changed, refreshing follower count');
-          try {
-            const { getFollowerCount } = await import('../../lib/supabase');
-            const newCount = await getFollowerCount(videoData.creator.id);
+      try {
+        const { getFollowerCount } = await import('../../lib/supabase');
+            const newCount = await getFollowerCount(creatorId);
             setVideoData(prev => prev ? {
               ...prev,
               creator: {
@@ -264,7 +398,7 @@ export const VideoPlayerScreen: React.FC<VideoPlayerScreenProps> = ({ onPlayerVi
               }
             } : null);
           } catch (error) {
-            console.error('[VideoPlayerScreen] Error refreshing follower count:', error);
+            logger.error('VideoPlayerScreen: Error refreshing follower count', error);
           }
         }
       )
@@ -273,7 +407,7 @@ export const VideoPlayerScreen: React.FC<VideoPlayerScreenProps> = ({ onPlayerVi
     return () => {
       supabase.removeChannel(channel);
     };
-  }, [videoData?.creator.id]);
+  }, [videoData?.creator?.id]);
 
   useEffect(() => {
     // Auto-hide controls after 3 seconds of inactivity
@@ -308,16 +442,17 @@ export const VideoPlayerScreen: React.FC<VideoPlayerScreenProps> = ({ onPlayerVi
           relatedVideos: cachedData.relatedVideos || [],
         });
 
-        // Load cached like state immediately (no await)
+        // Load cached like state immediately (no await). Fall back to favoritesCache when leaving/returning.
         const cachedLikeState = videoCache.getLikeState(videoId!);
         if (cachedLikeState) {
           setLikesCount(cachedLikeState.likesCount);
           setIsLiked(cachedLikeState.isLiked);
+        } else {
+          setIsLiked(favoritesCache.isVideoFavorited(videoId!));
         }
 
-        // Defer all secondary data loading - don't block video display
-        setTimeout(() => {
-          // Load interactions in background
+        // Defer secondary data to next tick so video displays immediately
+        Promise.resolve().then(() => {
           if (user) {
             Promise.all([
               getClipLikesCount(videoId!),
@@ -328,15 +463,11 @@ export const VideoPlayerScreen: React.FC<VideoPlayerScreenProps> = ({ onPlayerVi
               videoCache.setLikeState(videoId!, liked, likesCount);
             }).catch(err => console.error('Error loading interactions:', err));
           }
-          
-          // Load comments without individual likes (faster)
           loadCommentsLite();
-          
-          // Load related videos if not cached
           if (!cachedData.relatedVideos?.length) {
             loadRelatedVideosInBackground(cachedData.video.creator.id);
           }
-        }, 100);
+        });
 
         backgroundPrefetcher.prefetchVideoData(videoId!);
         return;
@@ -346,35 +477,29 @@ export const VideoPlayerScreen: React.FC<VideoPlayerScreenProps> = ({ onPlayerVi
       let video: any;
       try {
         video = await getVideoDetails(videoId!);
-        setVideoData(video);
+      setVideoData(video);
         setIsLoading(false); // Show video immediately
-        console.log('Video data loaded successfully:', video);
       } catch (videoError) {
-        console.error('Failed to load video:', videoError);
+        logger.error('Failed to load video', videoError);
         setError(videoError instanceof Error ? videoError.message : 'Video not found');
-        setIsLoading(false);
+      setIsLoading(false);
         return;
       }
-
-      // Defer non-critical data loading
-      setTimeout(() => {
-        // Load related videos in background
+      
+      // Defer non-critical data to next tick so video displays immediately
+      Promise.resolve().then(() => {
         loadRelatedVideosInBackground(video.creator.id);
-        
-        // Load interactions
-        loadVideoInteractions().catch(err => 
-          console.warn('Failed to load video interactions:', err)
+        loadVideoInteractions().catch(err =>
+          logger.warn('Failed to load video interactions', err)
         );
-        
-        // Load comments (lite version without individual likes)
         loadCommentsLite();
-      }, 100);
+      });
 
       // Cache the loaded data
       videoCache.set(videoId!, { ...video, relatedVideos: [] });
 
     } catch (err) {
-      console.error('Error loading video data:', err);
+      logger.error('Error loading video data', err);
       setError(err instanceof Error ? err.message : 'Failed to load video');
       setIsLoading(false);
     }
@@ -391,15 +516,14 @@ export const VideoPlayerScreen: React.FC<VideoPlayerScreenProps> = ({ onPlayerVi
         6
       );
       setRelatedVideos(videos);
-      console.log('Smart recommendations loaded:', videos.length);
     } catch (error) {
-      console.warn('Failed to load recommendations:', error);
+      logger.warn('Failed to load recommendations', error);
       setRelatedVideos([]);
     } finally {
       setIsLoadingRelated(false);
     }
   };
-
+  
   // Lite version of loadComments - skip individual like queries for speed
   const loadCommentsLite = async () => {
     if (!videoId) return;
@@ -410,7 +534,7 @@ export const VideoPlayerScreen: React.FC<VideoPlayerScreenProps> = ({ onPlayerVi
       // Likes will be loaded on-demand when user expands comments
       setComments(fetchedComments.map((c: Comment) => ({ ...c, likes_count: 0, is_liked: false })));
     } catch (error) {
-      console.error('Error loading comments:', error);
+      logger.error('Error loading comments', error);
     }
   };
 
@@ -487,12 +611,17 @@ export const VideoPlayerScreen: React.FC<VideoPlayerScreenProps> = ({ onPlayerVi
     }
   };
 
-  const recordPlaybackOnUnmount = () => {
-    if (videoRef.current && playbackStartTime && !hasRecordedPlaybackRef.current) {
-      const durationListened = Math.floor((Date.now() - playbackStartTime) / 1000);
-      recordPlayback(videoId!, durationListened, true, false);
-      hasRecordedPlaybackRef.current = true;
+  const recordPlaybackOnUnmount = async () => {
+    const id = playbackVideoIdRef.current;
+    if (!videoRef.current || !playbackStartTime || hasRecordedPlaybackRef.current || !id) {
+      return;
     }
+    // Use ceil to avoid under-counting by ~1s due to event timing.
+    const durationListened = Math.max(0, Math.ceil((Date.now() - playbackStartTime) / 1000));
+    await recordPlayback(id, durationListened, true, false, session ?? undefined);
+    hasRecordedPlaybackRef.current = true;
+    // Reset timing so a later resume starts a fresh measurement window.
+    setPlaybackStartTime(null);
   };
 
   const handleContainerTouchStart = (e: TouchEvent) => {
@@ -515,10 +644,14 @@ export const VideoPlayerScreen: React.FC<VideoPlayerScreenProps> = ({ onPlayerVi
   };
 
   const handleClose = () => {
-    recordPlaybackOnUnmount();
+    void recordPlaybackOnUnmount();
     // Notify parent that video player is closing
     onPlayerVisibilityChange?.(false);
-    navigate(-1);
+    if (window.history.length > 1) {
+      navigate(-1);
+    } else {
+      navigate('/');
+    }
   };
 
   const handleVideoClick = () => {
@@ -527,41 +660,26 @@ export const VideoPlayerScreen: React.FC<VideoPlayerScreenProps> = ({ onPlayerVi
   };
 
   const togglePlayPause = () => {
-    if (!videoRef.current) return;
+    const video = videoRef.current;
+    if (!video) return;
 
-    if (isPlaying) {
-      videoRef.current.pause();
+    // Use media element truth as source-of-truth to avoid UI/state desync.
+    if (!video.paused && !video.ended) {
+      video.pause();
     } else {
-      const video = videoRef.current;
-
-      console.log('[togglePlayPause] Attempting to play. Video state:', {
-        readyState: video.readyState,
-        networkState: video.networkState,
-        paused: video.paused,
-        currentTime: video.currentTime,
-        duration: video.duration
-      });
-
       const attemptPlay = () => {
         const playPromise = video.play();
         if (playPromise !== undefined) {
           playPromise
-            .then(() => {
-              console.log('[togglePlayPause] Video playback started successfully');
-            })
+            .then(() => {})
             .catch(err => {
-              console.error('[togglePlayPause] Error playing video:', err);
-              console.error('[togglePlayPause] Error details:', {
-                name: err.name,
-                message: err.message
-              });
+              logger.error('Error playing video', err);
               setError('Failed to play video. Please try again.');
             });
         }
       };
 
       if (video.readyState === 0) {
-        console.log('[togglePlayPause] Loading video before playing');
         video.load();
         video.addEventListener('canplay', attemptPlay, { once: true });
       } else {
@@ -583,6 +701,8 @@ export const VideoPlayerScreen: React.FC<VideoPlayerScreenProps> = ({ onPlayerVi
   const handleLoadedMetadata = () => {
     if (videoRef.current) {
       setDuration(videoRef.current.duration);
+      const { videoWidth, videoHeight } = videoRef.current;
+      setIsPortraitVideo(videoHeight > videoWidth);
     }
   };
 
@@ -596,15 +716,22 @@ export const VideoPlayerScreen: React.FC<VideoPlayerScreenProps> = ({ onPlayerVi
 
   const handlePause = () => {
     setIsPlaying(false);
-    recordPlaybackOnUnmount();
+    void recordPlaybackOnUnmount();
   };
 
-  const handleEnded = () => {
+  const handleEnded = async () => {
     setIsPlaying(false);
-    recordPlaybackOnUnmount();
+    await recordPlaybackOnUnmount();
     setPlaybackStartTime(null);
 
-    // Auto-play next video in Watch Next list
+    // Track completed videos; after 2 completions, prompt user for an optional bonus rewarded ad.
+    completedVideosSinceBonusRef.current += 1;
+    if (completedVideosSinceBonusRef.current >= 2) {
+      completedVideosSinceBonusRef.current = 0;
+      setShowBonusPrompt(true);
+    }
+
+    // Auto-play next video in Watch Next list (if any)
     if (relatedVideos.length > 0) {
       const nextVideo = relatedVideos[0];
       handleVideoChange(nextVideo.id);
@@ -635,6 +762,22 @@ export const VideoPlayerScreen: React.FC<VideoPlayerScreenProps> = ({ onPlayerVi
     setCurrentTime(newTime);
   };
 
+  const handleBonusClick = async () => {
+    if (!videoId) {
+      setShowBonusPrompt(false);
+      return;
+    }
+    setShowBonusPrompt(false);
+    try {
+      await showRewarded('after_video_play_rewarded', {
+        contentId: videoId,
+        contentType: 'video',
+      });
+    } catch {
+      // Ignore failures; playback and navigation must remain smooth.
+    }
+  };
+  
   const handleMouseDown = (e: React.MouseEvent) => {
     e.preventDefault();
 
@@ -666,7 +809,7 @@ export const VideoPlayerScreen: React.FC<VideoPlayerScreenProps> = ({ onPlayerVi
     videoRef.current.currentTime = newTime;
     setCurrentTime(newTime);
   };
-
+  
   const handleTouchStart = (e: React.TouchEvent) => {
     e.preventDefault();
     e.stopPropagation();
@@ -698,15 +841,12 @@ export const VideoPlayerScreen: React.FC<VideoPlayerScreenProps> = ({ onPlayerVi
   };
 
   const handleQualityChange = (quality: '360p' | '480p' | '720p' | '1080p' | 'auto') => {
-    console.log(`Quality changed to: ${quality}`);
     setSelectedQuality(quality);
     setShowQualityMenu(false);
 
-    // Actually change the video quality using HLS.js
     if (quality === 'auto') {
-      setQuality(-1); // -1 = auto quality selection
+      setQuality(-1);
     } else {
-      // Map quality strings to HLS level indices
       const qualityMap: Record<string, number> = {
         '360p': 0,
         '480p': 1,
@@ -715,7 +855,6 @@ export const VideoPlayerScreen: React.FC<VideoPlayerScreenProps> = ({ onPlayerVi
       };
       const level = qualityMap[quality] ?? -1;
       setQuality(level);
-      console.log(`[VideoPlayer] Set HLS quality level to ${level} (${quality})`);
     }
   };
 
@@ -816,7 +955,7 @@ export const VideoPlayerScreen: React.FC<VideoPlayerScreenProps> = ({ onPlayerVi
       setIsSubmittingComment(false);
     }
   };
-
+  
   const handleReplyToComment = async (parentCommentId: string) => {
     if (!replyText.trim()) return;
 
@@ -948,34 +1087,25 @@ export const VideoPlayerScreen: React.FC<VideoPlayerScreenProps> = ({ onPlayerVi
     }
   };
 
-  const handleShare = async () => {
+  const handleShare = () => {
     if (!videoData) return;
-
-    // Record share event in database
-    try {
-      await recordShareEvent(videoId!, 'video');
-      // Track share for contribution rewards
-      recordContribution('content_share', videoId!, 'video').catch(console.error);
-    } catch (error) {
-      console.error('Error recording share event:', error);
-      // Don't block sharing if analytics fails
-    }
-
-    try {
-      await shareVideo(videoId!, videoData.title);
-    } catch (error) {
+    shareVideo(videoId!, videoData.title).catch((error) => {
       console.error('Error sharing video:', error);
-    }
+    });
+    recordShareEvent(videoId!, 'video').catch((error) => {
+      console.error('Error recording share event:', error);
+    });
+    recordContribution('content_share', videoId!, 'video').catch(console.error);
   };
 
   const handleVideoChange = async (newVideoId: string) => {
     // Record playback for current video
-    recordPlaybackOnUnmount();
+    await recordPlaybackOnUnmount();
     
     // Navigate to new video
     navigate(`/video/${newVideoId}`, { replace: true });
   };
-
+  
   const autoResizeTextarea = (textarea: HTMLTextAreaElement | null) => {
     if (!textarea) return;
     textarea.style.height = 'auto';
@@ -1005,23 +1135,24 @@ export const VideoPlayerScreen: React.FC<VideoPlayerScreenProps> = ({ onPlayerVi
     return showAllComments ? comments : comments.slice(0, 1);
   }, [showAllComments, comments]);
 
-  // Only show error state if loading is complete and there's an error or no data
   if (!isLoading && (error || !videoData)) {
     return (
-      <div className="fixed inset-0 bg-black z-50 flex items-center justify-center p-4">
-        <Card className="bg-white/10 backdrop-blur-sm border border-white/20">
+      <div
+        className="fixed inset-0 z-50 flex flex-col items-center justify-center p-6 bg-[#0a0a0a]"
+        style={{ paddingTop: 'calc(1.25rem + env(safe-area-inset-top, 0px) * 0.25)', paddingBottom: 'max(1.5rem, env(safe-area-inset-bottom))' }}
+      >
+        <Card className="w-full max-w-sm bg-white/10 backdrop-blur-md border border-white/20 rounded-2xl overflow-hidden">
           <CardContent className="p-8 text-center">
-            <h3 className="font-['Inter',sans-serif] font-bold text-white text-xl mb-4">
-              Video Not Found
-            </h3>
-            <p className="font-['Inter',sans-serif] text-white/70 text-sm mb-6">
-              {error || 'The video you\'re looking for doesn\'t exist or has been removed.'}
+            <h2 className="text-white font-bold text-xl mb-3">Video not found</h2>
+            <p className="text-white/70 text-sm mb-6 leading-relaxed">
+              {error || 'This video may have been removed or is no longer available.'}
             </p>
             <button
               onClick={handleClose}
-              className="px-6 py-3 bg-gradient-to-r from-[#309605] to-[#3ba208] hover:from-[#3ba208] hover:to-[#309605] rounded-xl font-['Inter',sans-serif] font-medium text-white transition-all duration-200 shadow-lg shadow-[#309605]/25"
+              className="min-h-[48px] px-8 py-3 bg-gradient-to-r from-[#309605] to-[#3ba208] rounded-xl font-semibold text-white transition-all active:scale-[0.98] focus-visible:ring-2 focus-visible:ring-[#309605] focus-visible:ring-offset-2 focus-visible:ring-offset-black"
+              aria-label="Go back"
             >
-              Go Back
+              Go back
             </button>
           </CardContent>
         </Card>
@@ -1029,100 +1160,130 @@ export const VideoPlayerScreen: React.FC<VideoPlayerScreenProps> = ({ onPlayerVi
     );
   }
 
-  // Show loading screen while fetching video data
+  // No second loading screen: while fetching video data, show same loader as route (Suspense) for one continuous load
   if (!videoData) {
-    return <LoadingScreen variant="premium" />;
+  return (
+      <div className="fixed inset-0 z-50 bg-gradient-to-b from-[#0a0a0a] via-[#0d0d0d] to-[#111111] flex items-center justify-center">
+        <div className="relative">
+          <img
+            src="/official_airaplay_logo.png"
+            alt="Loading"
+            className="w-32 h-32 object-contain drop-shadow-2xl"
+            style={{ animation: 'breathe 3s ease-in-out infinite' }}
+          />
+          <div className="absolute inset-0 -z-10 blur-3xl opacity-30 bg-white scale-75 animate-pulse" />
+            </div>
+        <style>{`
+          @keyframes breathe {
+            0%, 100% { transform: scale(1); opacity: 1; }
+            50% { transform: scale(1.05); opacity: 0.9; }
+          }
+          
+          @keyframes shimmer {
+            0% { transform: translateX(-100%); }
+            100% { transform: translateX(100%); }
+          }
+          
+          .animate-shimmer {
+            animation: shimmer 2s infinite;
+          }
+        `}</style>
+          </div>
+    );
   }
+
+  const shouldUsePortraitLayout = isPortraitVideo || isPortraitHint;
 
   return (
     <div
       ref={containerRef}
-      className="fixed inset-0 bg-gradient-to-b from-[#1a1a1a] via-[#0d0d0d] to-[#000000] z-50 flex flex-col"
+      className="fixed inset-0 z-50 flex flex-col bg-[#0a0a0a] animate-in fade-in duration-300 touch-manipulation overflow-hidden pb-[env(safe-area-inset-bottom,0px)]"
       onMouseMove={() => setShowControls(true)}
     >
-      {/* Header - Matches Music Player Design */}
-      <header className="sticky top-0 z-20 bg-gradient-to-b from-black/80 via-black/50 to-transparent backdrop-blur-md">
-        <div className="flex items-center justify-between px-5 py-4">
-          <button
-            onClick={handleClose}
-            className="p-2 hover:bg-white/10 rounded-full transition-all active:scale-95"
-            aria-label="Close player"
-          >
-            <X className="w-6 h-6 text-white" />
-          </button>
+      {/* Header — matches MusicPlayerScreen: solid bg, equal-width columns, same typography */}
+      <header className="flex-shrink-0 z-20 bg-[#0a0a0a]" style={{ paddingTop: 'calc(1.25rem + env(safe-area-inset-top, 0px) * 0.25)', paddingBottom: '1.25rem' }}>
+        <div className="flex flex-row items-center px-3 py-1 min-h-[40px]">
+          <div className="w-[72px] flex items-center justify-start">
+            <button
+              onClick={handleClose}
+              className="p-2 rounded-full text-white/80 hover:text-white hover:bg-white/10 transition-all active:scale-95"
+              aria-label="Close player"
+            >
+              <X className="w-5 h-5" />
+            </button>
+          </div>
 
           <div
-            className="flex items-center gap-3 flex-1 min-w-0 mx-4 cursor-pointer active:scale-95 transition-transform"
+            className="flex-1 flex items-center justify-center gap-2 min-w-0 cursor-pointer active:scale-95 transition-transform"
             onClick={() => {
-              if (videoData.creator.id) {
+              if (videoData.creator?.id) {
                 handleClose();
                 navigate(`/user/${videoData.creator.id}`);
               }
             }}
           >
-            <Avatar className="w-10 h-10 border-2 border-white/20 ring-2 ring-white/10">
-              <AvatarImage src={videoData.creator.avatar || undefined} />
-              <AvatarFallback className="bg-gradient-to-br from-[#309605] to-[#3ba208] text-white font-semibold">
-                {videoData.creator.name.charAt(0).toUpperCase()}
+            <Avatar className="w-8 h-8 flex-shrink-0">
+              <AvatarImage src={videoData.creator?.avatar || undefined} />
+              <AvatarFallback className="bg-[#00ad74] text-white font-semibold text-xs">
+                {(videoData.creator?.name ?? 'C').charAt(0).toUpperCase()}
               </AvatarFallback>
             </Avatar>
-            <div className="flex-1 min-w-0">
-              <h3 className="font-bold text-white text-sm truncate">
-                {videoData.creator.name}
+            <div className="min-w-0 text-left">
+              <h3 className="font-bold text-white text-sm truncate leading-tight">
+                {videoData.creator?.name ?? 'Creator'}
               </h3>
-              <p className="text-white/70 text-xs">
-                {formatNumber(videoData.creator.followerCount)} followers
+              <p className="text-white/60 text-[11px] truncate">
+                {formatNumber(videoData.creator?.followerCount ?? 0)} followers
               </p>
             </div>
           </div>
 
-          {user?.id !== videoData.creator.id && (
-            <button
-              onClick={handleFollowToggle}
-              disabled={isLoadingFollow}
-              aria-label={isAuthenticated && isFollowingCreator ? "Unfollow creator" : "Follow creator"}
-              className={`inline-flex items-center px-4 py-2 rounded-full font-medium text-xs transition-all active:scale-95 focus-visible:ring-2 focus-visible:ring-[#309605] focus-visible:ring-offset-2 focus-visible:ring-offset-black ${
-                isAuthenticated && isFollowingCreator
-                  ? 'bg-white/100 text-grey border border-white/30 hover:bg-white/30'
-                  : 'bg-white text-black hover:bg-white/90'
-              } disabled:opacity-50 disabled:cursor-not-allowed`}
-            >
-              {isLoadingFollow ? (
-                <Spinner size={14} className="text-white" />
-              ) : isAuthenticated && isFollowingCreator ? (
-                <>
-                  <UserMinus className="w-3.5 h-3.5 mr-1" />
-                  Following
-                </>
-              ) : (
-                <>
-                  <UserPlus className="w-3.5 h-3.5 mr-1" />
-                  Follow
-                </>
-              )}
-            </button>
-          )}
+          <div className="w-[72px] flex items-center justify-end">
+            {videoData.creator?.id && user?.id !== videoData.creator.id ? (
+              <button
+                onClick={handleFollowToggle}
+                disabled={isLoadingFollow}
+                aria-label={isAuthenticated && isFollowingCreator ? "Unfollow creator" : "Follow creator"}
+                className="inline-flex items-center justify-center px-3 py-1.5 rounded-full font-semibold text-[11px] bg-white text-[#0a0a0a] hover:opacity-90 active:scale-95 transition-all disabled:opacity-50 disabled:cursor-not-allowed"
+              >
+                {isLoadingFollow ? (
+                  <Spinner size={12} className="text-[#0a0a0a]" />
+                ) : (
+                  isAuthenticated && isFollowingCreator ? 'Following' : 'Follow'
+                )}
+              </button>
+            ) : null}
+          </div>
         </div>
       </header>
 
-      {/* Video Player - Mobile Optimized */}
+      {/* Main Content — scrollable; bottom padding clears app nav/mini player (native AdMob banner is overlaid, not in layout — do not double-reserve) */}
       <div
-        className="relative w-full h-[45vh] bg-black flex items-center justify-center"
-        onClick={handleVideoClick}
+        className="flex-1 flex flex-col min-h-0 overflow-y-auto overflow-x-hidden scrollbar-hide"
+        style={{ paddingBottom: 'calc(5rem + env(safe-area-inset-bottom, 0px))' }}
       >
+        {/* Video — responsive height */}
+        <div
+          className={`relative w-full bg-black flex items-center justify-center shrink-0 ${
+            shouldUsePortraitLayout
+              ? 'mx-auto aspect-[9/16] h-auto max-w-[420px] min-h-[320px] max-h-[60dvh]'
+              : 'min-h-[200px] h-[40dvh] max-h-[52dvh] sm:h-[45dvh] sm:max-h-[56dvh]'
+          }`}
+          onClick={handleVideoClick}
+        >
         {videoData.videoUrl ? (
-          <video
-            ref={videoRef}
-            className="w-full h-full object-contain"
-            playsInline
-            poster={videoData.thumbnailUrl || undefined}
+        <video
+          ref={videoRef}
+          className="w-full h-full object-contain"
+          playsInline
+            poster={videoData.thumbnailUrl ? getOptimizedImageUrl(videoData.thumbnailUrl, shouldUsePortraitLayout ? { width: 360, height: 640, quality: 75, format: 'webp' } : { width: 640, height: 360, quality: 75, format: 'webp' }) : undefined}
             crossOrigin="anonymous"
             preload="metadata"
-            onTimeUpdate={handleTimeUpdate}
-            onLoadedMetadata={handleLoadedMetadata}
-            onPlay={handlePlay}
-            onPause={handlePause}
-            onEnded={handleEnded}
+          onTimeUpdate={handleTimeUpdate}
+          onLoadedMetadata={handleLoadedMetadata}
+          onPlay={handlePlay}
+          onPause={handlePause}
+          onEnded={handleEnded}
             onError={(e) => {
               console.error('Video playback error:', e);
               console.error('Video element state:', {
@@ -1132,263 +1293,355 @@ export const VideoPlayerScreen: React.FC<VideoPlayerScreenProps> = ({ onPlayerVi
               });
               setError('Failed to load video. Please check your connection and try again.');
             }}
-            onClick={handleVideoClick}
           />
         ) : (
           <div className="w-full h-full flex items-center justify-center bg-gray-900">
             <div className="text-center">
               <div className="w-16 h-16 bg-white/20 rounded-full flex items-center justify-center mx-auto mb-4">
                 <Play className="w-8 h-8 text-white/60" />
-              </div>
+          </div>
               <p className="text-white/60 text-sm">Video not available</p>
             </div>
           </div>
         )}
 
-        {/* Play Button Overlay - Shows when video is not playing */}
+        {/* Premium Play overlay with glassmorphism */}
         {videoData.videoUrl && !isPlaying && (
-          <div className="absolute inset-0 flex items-center justify-center bg-black/20 pointer-events-none">
-            <div className="w-20 h-20 bg-white/90 rounded-full flex items-center justify-center shadow-2xl">
-              <Play className="w-10 h-10 text-black ml-1" />
+          <div className="absolute inset-0 flex items-center justify-center bg-gradient-to-b from-black/40 via-black/20 to-black/40 pointer-events-none backdrop-blur-sm" aria-hidden>
+            <div className="relative group">
+              {/* Animated glow ring */}
+              <div className="absolute inset-0 rounded-full bg-gradient-to-r from-[#309605] via-[#3ba208] to-[#309605] opacity-40 blur-2xl animate-pulse scale-110"></div>
+              
+              {/* Main play button with glassmorphism */}
+              <div className="relative w-20 h-20 sm:w-24 sm:h-24 rounded-full bg-white/10 backdrop-blur-xl border-2 border-white/30 flex items-center justify-center shadow-2xl">
+                {/* Inner gradient circle */}
+                <div className="absolute inset-2 rounded-full bg-gradient-to-br from-white via-white/95 to-white/90"></div>
+                
+                {/* Play icon */}
+                <Play className="relative w-9 h-9 sm:w-11 sm:h-11 text-[#0a0a0a] ml-1 drop-shadow-lg" strokeWidth={2.5} />
+                
+                {/* Shine effect */}
+                <div className="absolute inset-0 rounded-full bg-gradient-to-tr from-transparent via-white/40 to-transparent opacity-50"></div>
+              </div>
             </div>
           </div>
         )}
 
-        {/* Video Controls Overlay - Mobile Optimized */}
+        {/* Premium Video Controls with Glassmorphism */}
         {videoData.videoUrl && (
-          <div className={`absolute bottom-0 left-0 right-0 bg-gradient-to-t from-black/90 to-transparent px-4 py-3 safe-bottom transition-opacity duration-300 ${showControls ? 'opacity-100' : 'opacity-0'}`}>
-            {/* Progress Bar */}
-            <div
-              ref={progressRef}
-              className="relative w-full h-1 bg-white/20 rounded-full mb-2 cursor-pointer touch-none"
-              onClick={handleProgressClick}
-              onMouseDown={handleMouseDown}
-              onTouchStart={handleTouchStart}
-            >
-              <div
-                className="absolute top-0 left-0 h-full bg-[#ffffff] rounded-full transition-all duration-100"
-                style={{ width: `${(currentTime / duration) * 100}%` }}
-              />
-              <div
-                className="absolute top-1/2 -translate-y-1/2 w-3 h-3 bg-white rounded-full shadow-lg transition-all duration-100"
-                style={{ left: `${(currentTime / duration) * 100}%`, transform: 'translateX(-50%) translateY(-50%)' }}
-              />
-            </div>
+          <div
+            className={`absolute bottom-0 left-0 right-0 transition-all duration-500 ease-out ${
+              showControls 
+                ? 'opacity-100 translate-y-0' 
+                : 'opacity-0 translate-y-4 pointer-events-none'
+            }`}
+          >
+            {/* Gradient backdrop with blur */}
+            <div className="absolute inset-0 bg-gradient-to-t from-black via-black/95 to-transparent backdrop-blur-md"></div>
+            
+            {/* Content */}
+            <div className="relative px-4 pt-4 pb-[max(1rem,env(safe-area-inset-bottom))]">
+              {/* Optional bonus reward prompt */}
+              {showBonusPrompt && (
+                <div className="mb-4 animate-in slide-in-from-bottom-4 duration-300">
+                  <div className="flex items-center justify-between gap-3 rounded-2xl bg-gradient-to-r from-[#309605]/20 via-[#3ba208]/20 to-[#309605]/20 backdrop-blur-xl border border-[#309605]/30 px-4 py-3 shadow-xl">
+                    <div className="flex flex-col gap-0.5">
+                      <span className="text-sm font-bold text-white drop-shadow-sm">Earn Bonus Treats</span>
+                      <span className="text-xs text-white/80">Watch a quick ad to unlock rewards</span>
+                    </div>
+                    <button
+                      type="button"
+                      onClick={handleBonusClick}
+                      className="px-5 py-2.5 rounded-full bg-gradient-to-r from-white via-white to-white/95 text-sm font-bold text-[#0a0a0a] active:scale-95 hover:shadow-lg transition-all shadow-md"
+                    >
+                      Claim
+                    </button>
+                  </div>
+                </div>
+              )}
 
-            {/* Controls */}
-            <div className="flex items-center justify-between">
-              <div className="flex items-center gap-3">
-                <button
-                  onClick={togglePlayPause}
-                  className="p-1.5 bg-white/20 hover:bg-white/30 rounded-full transition-colors duration-200"
+              {/* Progress Bar with enhanced styling */}
+              <div
+                ref={progressRef}
+                className="relative w-full py-3 -my-2 cursor-pointer touch-none select-none group mb-3"
+                onClick={handleProgressClick}
+                onMouseDown={handleMouseDown}
+                onTouchStart={handleTouchStart}
+                role="slider"
+                aria-valuemin={0}
+                aria-valuemax={duration || 100}
+                aria-valuenow={currentTime}
+                aria-label="Video progress"
+              >
+                {/* Background track */}
+                <div className="h-1 bg-white/20 rounded-full overflow-hidden backdrop-blur-sm">
+                  {/* Buffered/loaded indicator */}
+                  <div className="absolute h-full w-full bg-white/10 rounded-full"></div>
+                  
+                  {/* Progress fill with gradient */}
+                  <div
+                    className="h-full bg-gradient-to-r from-[#309605] via-[#3ba208] to-[#309605] rounded-full transition-all duration-100 relative overflow-hidden"
+                    style={{ width: `${duration > 0 ? (currentTime / duration) * 100 : 0}%` }}
+                  >
+                    {/* Shine effect */}
+                    <div className="absolute inset-0 bg-gradient-to-r from-transparent via-white/30 to-transparent animate-shimmer"></div>
+                  </div>
+                </div>
+                
+                {/* Enhanced thumb with glow */}
+                <div
+                  className="absolute top-1/2 -translate-y-1/2 transition-all duration-100 pointer-events-none"
+                  style={{ left: `${duration > 0 ? (currentTime / duration) * 100 : 0}%`, transform: 'translate(-50%, -50%)' }}
                 >
-                  {isPlaying ? (
-                    <Pause className="w-5 h-5 text-white" />
-                  ) : (
-                    <Play className="w-5 h-5 text-white ml-0.5" />
-                  )}
-                </button>
-
-                <div className="text-white text-xs font-['Inter',sans-serif]">
-                  {formatTime(currentTime)} / {formatTime(duration)}
+                  {/* Glow effect */}
+                  <div className="absolute inset-0 w-5 h-5 bg-[#309605] rounded-full blur-md opacity-60 scale-150"></div>
+                  
+                  {/* Main thumb */}
+                  <div className="relative w-4 h-4 bg-white rounded-full shadow-xl ring-2 ring-black/20 group-hover:scale-125 transition-transform"></div>
                 </div>
               </div>
 
-              <div className="flex items-center gap-2">
-                <div className="relative">
+              <div className="flex items-center justify-between gap-3">
+                {/* Left controls */}
+                <div className="flex items-center gap-3 min-w-0">
+                  {/* Premium Play/Pause button */}
                   <button
                     onClick={(e) => {
                       e.stopPropagation();
-                      setShowQualityMenu(!showQualityMenu);
+                      togglePlayPause();
                     }}
-                    className="p-1.5 bg-white/20 hover:bg-white/30 rounded-full transition-colors duration-200 flex items-center gap-1"
+                    className="relative min-w-[48px] min-h-[48px] flex items-center justify-center rounded-full bg-gradient-to-br from-white/25 via-white/20 to-white/15 backdrop-blur-md border border-white/30 hover:from-white/30 hover:via-white/25 hover:to-white/20 active:scale-95 transition-all duration-200 shadow-lg hover:shadow-xl group"
+                    aria-label={isPlaying ? 'Pause' : 'Play'}
                   >
-                    <Settings className="w-4 h-4 text-white" />
-                    <span className="text-[10px] text-white font-medium">{selectedQuality}</span>
+                    {/* Inner glow */}
+                    <div className="absolute inset-0 rounded-full bg-gradient-to-br from-white/10 to-transparent opacity-0 group-hover:opacity-100 transition-opacity"></div>
+                    
+                    {isPlaying ? (
+                      <Pause className="relative w-5 h-5 text-white shrink-0 drop-shadow-md" strokeWidth={2.5} />
+                    ) : (
+                      <Play className="relative w-5 h-5 text-white ml-0.5 shrink-0 drop-shadow-md" strokeWidth={2.5} />
+                    )}
                   </button>
-
-                  {showQualityMenu && (
-                    <div className="absolute bottom-full right-0 mb-2 bg-black/95 rounded-lg overflow-hidden shadow-xl border border-white/20">
-                      {availableQualities.map((quality) => (
-                        <button
-                          key={quality}
-                          onClick={(e) => {
-                            e.stopPropagation();
-                            handleQualityChange(quality as any);
-                          }}
-                          className={`w-full px-4 py-2 text-left text-sm transition-colors ${
-                            selectedQuality === quality
-                              ? 'bg-[#309605] text-white'
-                              : 'text-white/80 hover:bg-white/10'
-                          }`}
-                        >
-                          {quality === 'auto' ? 'Auto (HLS)' : quality}
-                        </button>
-                      ))}
-                    </div>
-                  )}
+                  
+                  {/* Time display with better typography */}
+                  <span className="text-white text-sm font-medium tabular-nums truncate drop-shadow-sm">
+                    {formatTime(currentTime)} <span className="text-white/50">/</span> {formatTime(duration)}
+                  </span>
                 </div>
 
-                <button
-                  onClick={handleFullscreen}
-                  className="p-1.5 bg-white/20 hover:bg-white/30 rounded-full transition-colors duration-200"
-                >
-                  <Maximize className="w-4 h-4 text-white" />
-                </button>
+                {/* Right controls */}
+                <div className="flex items-center gap-2 shrink-0">
+                  {/* Quality button with enhanced styling */}
+                  <div className="relative">
+                    <button
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        setShowQualityMenu(!showQualityMenu);
+                      }}
+                      className="min-w-[48px] min-h-[48px] flex items-center justify-center gap-1.5 rounded-full bg-gradient-to-br from-white/25 via-white/20 to-white/15 backdrop-blur-md border border-white/30 hover:from-white/30 hover:via-white/25 hover:to-white/20 active:scale-95 transition-all duration-200 shadow-lg hover:shadow-xl px-3"
+                      aria-label="Quality settings"
+                      aria-expanded={showQualityMenu}
+                    >
+                      <Settings className="w-4 h-4 text-white shrink-0 drop-shadow-md" strokeWidth={2.5} />
+                      <span className="text-xs text-white font-semibold max-sm:hidden drop-shadow-sm">{selectedQuality}</span>
+                    </button>
+                    
+                    {showQualityMenu && (
+                      <div className="absolute bottom-full right-0 mb-3 animate-in slide-in-from-bottom-2 fade-in duration-200">
+                        <div className="bg-black/95 backdrop-blur-2xl rounded-2xl overflow-hidden shadow-2xl border border-white/20 min-w-[140px]">
+                          {availableQualities.map((quality, index) => (
+                            <button
+                              key={quality}
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                handleQualityChange(quality as any);
+                              }}
+                              className={`w-full min-h-[48px] px-4 py-3 text-left text-sm font-medium transition-all ${
+                                index === 0 ? 'rounded-t-2xl' : ''
+                              } ${
+                                index === availableQualities.length - 1 ? 'rounded-b-2xl' : ''
+                              } ${
+                                selectedQuality === quality
+                                  ? 'bg-gradient-to-r from-[#309605] to-[#3ba208] text-white shadow-lg'
+                                  : 'text-white/90 hover:bg-white/10 active:bg-white/15'
+                              }`}
+                            >
+                              <span className="drop-shadow-sm">{quality === 'auto' ? 'Auto (HLS)' : quality}</span>
+                            </button>
+                          ))}
+                        </div>
+                      </div>
+                    )}
+                  </div>
+                  
+                  {/* Fullscreen button with enhanced styling */}
+                  <button
+                    onClick={handleFullscreen}
+                    className="min-w-[48px] min-h-[48px] flex items-center justify-center rounded-full bg-gradient-to-br from-white/25 via-white/20 to-white/15 backdrop-blur-md border border-white/30 hover:from-white/30 hover:via-white/25 hover:to-white/20 active:scale-95 transition-all duration-200 shadow-lg hover:shadow-xl"
+                    aria-label="Full screen"
+                  >
+                    <Maximize className="w-4 h-4 text-white shrink-0 drop-shadow-md" strokeWidth={2.5} />
+                  </button>
+                </div>
               </div>
             </div>
           </div>
         )}
       </div>
 
-      {/* Video Details and More Videos - Mobile Optimized */}
-      <div className="bg-black border-t border-white/10 flex-1 overflow-hidden flex flex-col">
-        <ScrollArea className="flex-1">
-          <div className="px-4 py-5 space-y-5 pb-24">
-            {/* Video Details - Mobile Optimized */}
-            <div className="space-y-2">
-              <h1 className="font-['Inter',sans-serif] font-bold text-white text-base leading-snug">
+        {/* Content */}
+        <div className="flex-1 flex flex-col px-4 pt-0 pb-4">
+          <div className="py-5 space-y-5">
+            {/* Title & meta */}
+            <div className="space-y-2.5">
+              <h1 className="text-white font-bold text-base sm:text-lg leading-tight line-clamp-3">
                 {videoData.title}
               </h1>
-
-              <div className="flex items-center gap-3 text-white/60 text-xs">
-                <div className="flex items-center gap-1">
-                  <Eye className="w-3.5 h-3.5" />
-                  <span>{formatNumber(videoData.playCount)} views</span>
-                </div>
-                <div className="flex items-center gap-1">
-                  <Calendar className="w-3.5 h-3.5" />
-                  <span>{formatDistanceToNowStrict(new Date(videoData.createdAt), { addSuffix: true })}</span>
-                </div>
+              <div className="flex items-center gap-4 text-white/60 text-xs">
+                <span className="flex items-center gap-1.5">
+                  <Eye className="w-4 h-4 shrink-0" aria-hidden />
+                  {formatNumber(videoData.playCount)} views
+                </span>
+                <span className="flex items-center gap-1.5">
+                  <Calendar className="w-4 h-4 shrink-0" aria-hidden />
+                  {videoData.createdAt ? formatDistanceToNowStrict(new Date(videoData.createdAt), { addSuffix: true }) : ''}
+                </span>
               </div>
 
-              {/* Action Buttons - Mobile Optimized with Treat */}
-              <div className="grid grid-cols-4 gap-3 py-2">
-                <div className="flex flex-col items-center">
-                  <button
-                    onClick={handleLikeToggle}
-                    className={`w-11 h-11 rounded-full flex items-center justify-center transition-none active:scale-90 ${
-                      isLiked
-                        ? 'bg-red-500/20 text-red-500'
-                        : 'bg-white/10 text-white/80 active:bg-white/20'
-                    }`}
-                  >
-                    <Heart className={`w-5 h-5 transition-none ${isLiked ? 'text-red-500 fill-red-500 scale-110' : 'text-white'}`} />
-                  </button>
-                  <span className="mt-0.5 font-['Inter',sans-serif] text-[10px] text-white/70">
+              {/* Action bar — full bleed, equal-width pills with gap between */}
+              <div className="-mx-4 flex w-[calc(100%+2rem)] min-h-[36px] gap-2">
+                <button
+                  type="button"
+                  onClick={handleLikeToggle}
+                  aria-label={isLiked ? 'Unlike' : 'Like'}
+                  aria-pressed={isLiked}
+                  className={`flex min-w-0 flex-1 items-center justify-center gap-1 rounded-full bg-[#272727] px-2 py-2 text-white ring-1 ring-white/10 transition-colors active:scale-[0.98] hover:bg-[#3a3a3a] focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-white/40 ${
+                    isLiked ? 'ring-white/20' : ''
+                  }`}
+                >
+                  <ThumbsUp
+                    className={`h-4 w-4 shrink-0 ${isLiked ? 'fill-white text-white' : 'text-white'}`}
+                    strokeWidth={isLiked ? 0 : 1.75}
+                  />
+                  <span className="truncate text-xs font-medium tabular-nums leading-none">
                     {formatNumber(likesCount)}
                   </span>
-                </div>
+                </button>
 
-                <div className="flex flex-col items-center">
-                  <button
-                    onClick={handleShare}
-                    className="w-11 h-11 rounded-full bg-white/10 active:bg-white/20 text-white/80 flex items-center justify-center transition-colors duration-200"
-                  >
-                    <Share2 className="w-5 h-5" />
-                  </button>
-                  <span className="mt-0.5 font-['Inter',sans-serif] text-[10px] text-white/70">
-                    Share
-                  </span>
-                </div>
+                <button
+                  type="button"
+                  onClick={handleShare}
+                  aria-label="Share"
+                  className="flex min-w-0 flex-1 items-center justify-center gap-1 rounded-full bg-[#272727] px-2 py-2 text-white ring-1 ring-white/10 transition-colors active:scale-[0.98] hover:bg-[#3a3a3a] focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-white/40"
+                >
+                  <Share2 className="h-4 w-4 shrink-0 text-white" strokeWidth={1.75} />
+                  <span className="truncate text-xs font-medium leading-none">Share</span>
+                </button>
 
-                <div className="flex flex-col items-center">
-                  <button
-                    onClick={() => {
-                      if (!isAuthenticated) {
-                        setShowAuthModal(true);
-                        return;
-                      }
-                      setShowTippingModal(true);
-                    }}
-                    className="w-11 h-11 rounded-full bg-white/10 active:bg-white/20 text-white/80 flex items-center justify-center transition-colors duration-200"
-                  >
-                    <Gift className="w-5 h-5" />
-                  </button>
-                  <span className="mt-0.5 font-['Inter',sans-serif] text-[10px] text-white/70">
-                    Treat
-                  </span>
-                </div>
+                <button
+                  type="button"
+                  onClick={() => {
+                    if (!isAuthenticated) {
+                      setShowAuthModal(true);
+                      return;
+                    }
+                    setShowTippingModal(true);
+                  }}
+                  aria-label="Send a treat"
+                  className="flex min-w-0 flex-1 items-center justify-center gap-1 rounded-full bg-[#272727] px-2 py-2 text-white ring-1 ring-white/10 transition-colors active:scale-[0.98] hover:bg-[#3a3a3a] focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-white/40"
+                >
+                  <Gift className="h-4 w-4 shrink-0 text-white" strokeWidth={1.75} />
+                  <span className="truncate text-xs font-medium leading-none">Treat</span>
+                </button>
 
-                <div className="flex flex-col items-center">
-                  <button
-                    onClick={() => setShowReportModal(true)}
-                    className="w-11 h-11 rounded-full bg-red-500/10 active:bg-red-500/20 text-red-400 flex items-center justify-center transition-colors duration-200"
-                  >
-                    <Flag className="w-5 h-5" />
-                  </button>
-                  <span className="mt-0.5 font-['Inter',sans-serif] text-[10px] text-red-400">
-                    Report
-                  </span>
-                </div>
+                <button
+                  type="button"
+                  onClick={() => setShowReportModal(true)}
+                  aria-label="Report"
+                  className="flex min-w-0 flex-1 items-center justify-center gap-1 rounded-full bg-[#272727] px-2 py-2 text-white ring-1 ring-white/10 transition-colors active:scale-[0.98] hover:bg-[#3a3a3a] focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-white/40"
+                >
+                  <Flag className="h-4 w-4 shrink-0 text-white" strokeWidth={1.75} />
+                  <span className="truncate text-xs font-medium leading-none">Report</span>
+                </button>
               </div>
 
               {/* Description */}
               {videoData.description && (
-                <p className="font-['Inter',sans-serif] text-white/70 text-xs leading-relaxed">
+                <p className="text-white/70 text-sm leading-relaxed line-clamp-4">
                   {videoData.description}
                 </p>
               )}
-            </div>
+              </div>
 
-            {/* Tabbed Section - Comments & Watch Next */}
-            <div className="space-y-4">
-              {/* Tab Navigation */}
-              <div className="flex gap-2 border-b border-white/10">
+            {/* Tabs - Comments & Watch Next (44px min height, accessible) */}
+                  <div className="space-y-4">
+              <div
+                className="flex border-b border-white/10"
+                role="tablist"
+                aria-label="Comments and Watch Next"
+              >
                 <button
+                  role="tab"
+                  aria-selected={activeTab === 'comments'}
+                  aria-controls="comments-panel"
+                  id="tab-comments"
                   onClick={() => setActiveTab('comments')}
-                  className={`flex-1 flex items-center justify-center gap-2 py-3 text-sm font-medium transition-all duration-200 relative ${
+                  className={`flex-1 flex items-center justify-center gap-2 min-h-[48px] text-sm font-semibold transition-colors relative focus-visible:ring-2 focus-visible:ring-[#309605] focus-visible:ring-inset ${
                     activeTab === 'comments'
                       ? 'text-white'
-                      : 'text-white/50 hover:text-white/70'
+                      : 'text-white/50 hover:text-white/70 active:text-white/80'
                   }`}
                 >
-                  <MessageCircle className="w-4 h-4" />
-                  Comments ({comments.length})
+                  <MessageCircle className="w-4 h-4 shrink-0" aria-hidden />
+                  <span>Comments</span>
+                  <span className="tabular-nums">({comments.length})</span>
                   {activeTab === 'comments' && (
-                    <div className="absolute bottom-0 left-0 right-0 h-0.5 bg-white" />
+                    <span className="absolute bottom-0 left-0 right-0 h-0.5 bg-[#309605]" aria-hidden />
                   )}
                 </button>
-                
                 <button
+                  role="tab"
+                  aria-selected={activeTab === 'watchNext'}
+                  aria-controls="watchnext-panel"
+                  id="tab-watchnext"
                   onClick={() => setActiveTab('watchNext')}
-                  className={`flex-1 flex items-center justify-center gap-2 py-3 text-sm font-medium transition-all duration-200 relative ${
+                  className={`flex-1 flex items-center justify-center gap-2 min-h-[48px] text-sm font-semibold transition-colors relative focus-visible:ring-2 focus-visible:ring-[#309605] focus-visible:ring-inset ${
                     activeTab === 'watchNext'
                       ? 'text-white'
-                      : 'text-white/50 hover:text-white/70'
+                      : 'text-white/50 hover:text-white/70 active:text-white/80'
                   }`}
                 >
-                  <Play className="w-4 h-4" />
-                  Watch Next
+                  <Play className="w-4 h-4 shrink-0" aria-hidden />
+                  <span>Watch Next</span>
                   {activeTab === 'watchNext' && (
-                    <div className="absolute bottom-0 left-0 right-0 h-0.5 bg-white" />
+                    <span className="absolute bottom-0 left-0 right-0 h-0.5 bg-[#309605]" aria-hidden />
                   )}
                 </button>
               </div>
 
-              {/* Tab Content */}
-              <div className="min-h-[300px]">
-                {/* Comments Tab Content */}
+              {/* Tab panels */}
+              <div id="comments-panel" role="tabpanel" aria-labelledby="tab-comments" className="min-h-[280px]" hidden={activeTab !== 'comments'}>
                 {activeTab === 'comments' && (
                   <div className="space-y-4">
-                    {/* Add Comment Form - Inline */}
+                    {/* Comment input - 44px min height, clear focus */}
                     {isAuthenticated && (
-                      <form onSubmit={handleAddComment} className="flex items-end gap-2">
-                        <Avatar className="w-8 h-8 flex-shrink-0 mb-0.5">
+                      <form onSubmit={handleAddComment} className="flex items-end gap-3">
+                        <Avatar className="w-9 h-9 flex-shrink-0 ring-2 ring-white/10 rounded-full overflow-hidden">
                           <AvatarImage src={user?.user_metadata?.avatar_url} />
-                          <AvatarFallback className="bg-white/10 text-white/70 text-xs">
+                          <AvatarFallback className="bg-white/10 text-white/70 text-sm">
                             {user?.email?.charAt(0).toUpperCase()}
                           </AvatarFallback>
                         </Avatar>
-                        
-                        <div className="flex-1 flex items-end gap-2 bg-white/[0.06] rounded-full px-4 py-2 min-h-[40px]">
+                        <div className="flex-1 flex items-center gap-2 bg-white/[0.08] rounded-2xl border border-white/10 px-4 min-h-[48px] focus-within:border-[#309605]/50 focus-within:ring-1 focus-within:ring-[#309605]/30 transition-colors">
                           <textarea
                             ref={newCommentRef}
                             value={newComment}
                             onChange={(e) => setNewComment(e.target.value)}
                             placeholder="Add a comment..."
                             rows={1}
-                            className="flex-1 bg-transparent text-white text-sm placeholder-white/35 focus:outline-none resize-none py-0.5 max-h-[80px] leading-[1.4] overflow-hidden"
+                            aria-label="Comment"
+                            maxLength={500}
+                            className="flex-1 bg-transparent text-white text-sm placeholder-white/40 focus:outline-none resize-none py-3 max-h-[100px] leading-relaxed overflow-auto"
                             onKeyDown={(e) => {
                               if (e.key === 'Enter' && !e.shiftKey) {
                                 e.preventDefault();
@@ -1401,26 +1654,28 @@ export const VideoPlayerScreen: React.FC<VideoPlayerScreenProps> = ({ onPlayerVi
                           <button
                             type="submit"
                             disabled={!newComment.trim() || isSubmittingComment}
-                            className="flex-shrink-0 w-7 h-7 flex items-center justify-center rounded-full bg-white disabled:bg-white/15 disabled:cursor-not-allowed active:scale-95 transition-all"
+                            aria-label="Send comment"
+                            className="min-w-[44px] min-h-[44px] w-11 h-11 flex items-center justify-center rounded-full bg-[#309605] text-white disabled:bg-white/15 disabled:opacity-60 disabled:cursor-not-allowed active:scale-95 transition-transform focus-visible:ring-2 focus-visible:ring-[#309605] focus-visible:ring-offset-2 focus-visible:ring-offset-black"
                           >
                             {isSubmittingComment ? (
-                              <div className="w-3.5 h-3.5 border-2 border-black/30 border-t-black rounded-full animate-spin" />
+                              <div className="w-5 h-5 border-2 border-white/30 border-t-white rounded-full animate-spin" />
                             ) : (
-                              <Send className="w-3.5 h-3.5 text-black" />
+                              <Send className="w-4 h-4" />
                             )}
                           </button>
                         </div>
                       </form>
                     )}
 
-                    {/* Comments List */}
-                    <div className="space-y-3">
+                    {/* Comments list */}
+                      <div className="space-y-3">
                       {comments.length === 0 ? (
-                        <div className="text-center py-8">
-                          <MessageCircle className="w-12 h-12 text-white/20 mx-auto mb-2" />
-                          <p className="text-white/50 text-sm">
-                            No comments yet. Be the first!
-                          </p>
+                        <div className="text-center py-12 px-4">
+                          <div className="w-14 h-14 rounded-full bg-white/5 flex items-center justify-center mx-auto mb-3">
+                            <MessageCircle className="w-7 h-7 text-white/30" aria-hidden />
+                          </div>
+                          <p className="text-white/80 font-medium text-sm mb-0.5">No comments yet</p>
+                          <p className="text-white/50 text-xs">Be the first to share your thoughts.</p>
                         </div>
                       ) : (
                         <>
@@ -1428,15 +1683,15 @@ export const VideoPlayerScreen: React.FC<VideoPlayerScreenProps> = ({ onPlayerVi
                           {comments[0] && (
                             <div className="flex items-start gap-3 p-3 bg-white/5 rounded-xl">
                               <Avatar className="w-8 h-8 flex-shrink-0">
-                                <AvatarImage src={comments[0].users.avatar_url || undefined} />
+                                <AvatarImage src={comments[0].users?.avatar_url || undefined} />
                                 <AvatarFallback className="bg-[#309605] text-white text-xs">
-                                  {comments[0].users.display_name.charAt(0)}
+                                  {(comments[0].users?.display_name ?? '').charAt(0) || '?'}
                                 </AvatarFallback>
                               </Avatar>
                               <div className="flex-1 min-w-0">
                                 <div className="flex items-baseline gap-1.5 mb-0.5">
                                   <span className="font-['Inter',sans-serif] font-medium text-white text-xs truncate">
-                                    {comments[0].users.display_name}
+                                    {comments[0].users?.display_name ?? 'Anonymous'}
                                   </span>
                                   <span className="font-['Inter',sans-serif] text-white/40 text-[10px] flex-shrink-0">
                                     {formatDistanceToNowStrict(new Date(comments[0].created_at), { addSuffix: true })}
@@ -1474,15 +1729,16 @@ export const VideoPlayerScreen: React.FC<VideoPlayerScreenProps> = ({ onPlayerVi
                                     <p className="font-['Inter',sans-serif] text-white/75 text-xs leading-relaxed break-words">
                                       {comments[0].comment_text}
                                     </p>
-                                    <div className="flex items-center gap-3 mt-1.5">
+                                    <div className="flex flex-wrap items-center gap-1 mt-2">
                                       <button
                                         onClick={() => handleToggleCommentLike(comments[0].id)}
                                         disabled={likingComments.has(comments[0].id)}
-                                        className={`flex items-center gap-0.5 text-[10px] transition-colors duration-200 ${
-                                          comments[0].is_liked ? 'text-red-500' : 'text-white/50 active:text-white'
+                                        className={`min-h-[36px] inline-flex items-center gap-1 px-2.5 rounded-lg text-xs transition-colors ${
+                                          comments[0].is_liked ? 'text-red-500' : 'text-white/50 active:text-white hover:bg-white/5'
                                         } disabled:opacity-50`}
+                                        aria-label={comments[0].is_liked ? 'Unlike' : 'Like'}
                                       >
-                                        <Heart className={`w-2.5 h-2.5 ${comments[0].is_liked ? 'fill-red-500' : ''}`} />
+                                        <Heart className={`w-3 h-3 shrink-0 ${comments[0].is_liked ? 'fill-red-500' : ''}`} />
                                         <span>{comments[0].likes_count || 0}</span>
                                       </button>
                                       {isAuthenticated && (
@@ -1491,7 +1747,7 @@ export const VideoPlayerScreen: React.FC<VideoPlayerScreenProps> = ({ onPlayerVi
                                             setReplyingTo(comments[0].id);
                                             setReplyText('');
                                           }}
-                                          className="text-white/50 active:text-white text-[10px]"
+                                          className="min-h-[36px] px-2.5 rounded-lg text-white/50 active:text-white hover:bg-white/5 text-xs"
                                         >
                                           Reply
                                         </button>
@@ -1500,21 +1756,21 @@ export const VideoPlayerScreen: React.FC<VideoPlayerScreenProps> = ({ onPlayerVi
                                         <>
                                           <button
                                             onClick={() => handleEditComment(comments[0].id, comments[0].comment_text)}
-                                            className="flex items-center gap-0.5 text-white/50 active:text-white text-[10px]"
+                                            className="min-h-[36px] inline-flex items-center gap-1 px-2.5 rounded-lg text-white/50 active:text-white hover:bg-white/5 text-xs"
                                           >
-                                            <Edit2 className="w-2.5 h-2.5" />
+                                            <Edit2 className="w-3 h-3 shrink-0" />
                                             Edit
                                           </button>
                                           <button
                                             onClick={() => handleDeleteComment(comments[0].id)}
-                                            className="flex items-center gap-0.5 text-red-500/70 active:text-red-500 text-[10px]"
+                                            className="min-h-[36px] inline-flex items-center gap-1 px-2.5 rounded-lg text-red-500/80 active:text-red-500 hover:bg-red-500/10 text-xs"
                                           >
-                                            <Trash2 className="w-2.5 h-2.5" />
+                                            <Trash2 className="w-3 h-3 shrink-0" />
                                             Delete
                                           </button>
                                         </>
                                       )}
-                                    </div>
+                            </div>
                                   </>
                                 )}
                                 {replyingTo === comments[0].id && (
@@ -1543,25 +1799,25 @@ export const VideoPlayerScreen: React.FC<VideoPlayerScreenProps> = ({ onPlayerVi
                                     >
                                       Cancel
                                     </button>
-                                  </div>
+                          </div>
                                 )}
                               </div>
-                            </div>
-                          )}
+                      </div>
+                    )}
 
                           {/* Additional Comments */}
                           {showAllComments && comments.slice(1).map((comment) => (
                             <div key={comment.id} className="flex items-start gap-3 p-3 bg-white/5 rounded-xl">
                               <Avatar className="w-8 h-8 flex-shrink-0">
-                                <AvatarImage src={comment.users.avatar_url || undefined} />
+                                <AvatarImage src={comment.users?.avatar_url || undefined} />
                                 <AvatarFallback className="bg-[#309605] text-white text-xs">
-                                  {comment.users.display_name.charAt(0)}
+                                  {(comment.users?.display_name ?? '').charAt(0) || '?'}
                                 </AvatarFallback>
                               </Avatar>
                               <div className="flex-1 min-w-0">
                                 <div className="flex items-baseline gap-1.5 mb-0.5">
                                   <span className="font-['Inter',sans-serif] font-medium text-white text-xs truncate">
-                                    {comment.users.display_name}
+                                    {comment.users?.display_name ?? 'Anonymous'}
                                   </span>
                                   <span className="font-['Inter',sans-serif] text-white/40 text-[10px] flex-shrink-0">
                                     {formatDistanceToNowStrict(new Date(comment.created_at), { addSuffix: true })}
@@ -1593,21 +1849,22 @@ export const VideoPlayerScreen: React.FC<VideoPlayerScreenProps> = ({ onPlayerVi
                                         Cancel
                                       </button>
                                     </div>
-                                  </div>
-                                ) : (
+                  </div>
+                ) : (
                                   <>
                                     <p className="font-['Inter',sans-serif] text-white/75 text-xs leading-relaxed break-words">
                                       {comment.comment_text}
                                     </p>
-                                    <div className="flex items-center gap-3 mt-1.5">
+                                    <div className="flex flex-wrap items-center gap-1 mt-2">
                                       <button
                                         onClick={() => handleToggleCommentLike(comment.id)}
                                         disabled={likingComments.has(comment.id)}
-                                        className={`flex items-center gap-0.5 text-[10px] transition-colors duration-200 ${
-                                          comment.is_liked ? 'text-red-500' : 'text-white/50 active:text-white'
+                                        className={`min-h-[36px] inline-flex items-center gap-1 px-2.5 rounded-lg text-xs transition-colors ${
+                                          comment.is_liked ? 'text-red-500' : 'text-white/50 active:text-white hover:bg-white/5'
                                         } disabled:opacity-50`}
+                                        aria-label={comment.is_liked ? 'Unlike' : 'Like'}
                                       >
-                                        <Heart className={`w-2.5 h-2.5 ${comment.is_liked ? 'fill-red-500' : ''}`} />
+                                        <Heart className={`w-3 h-3 shrink-0 ${comment.is_liked ? 'fill-red-500' : ''}`} />
                                         <span>{comment.likes_count || 0}</span>
                                       </button>
                                       {isAuthenticated && (
@@ -1616,7 +1873,7 @@ export const VideoPlayerScreen: React.FC<VideoPlayerScreenProps> = ({ onPlayerVi
                                             setReplyingTo(comment.id);
                                             setReplyText('');
                                           }}
-                                          className="text-white/50 active:text-white text-[10px]"
+                                          className="min-h-[36px] px-2.5 rounded-lg text-white/50 active:text-white hover:bg-white/5 text-xs"
                                         >
                                           Reply
                                         </button>
@@ -1625,16 +1882,16 @@ export const VideoPlayerScreen: React.FC<VideoPlayerScreenProps> = ({ onPlayerVi
                                         <>
                                           <button
                                             onClick={() => handleEditComment(comment.id, comment.comment_text)}
-                                            className="flex items-center gap-0.5 text-white/50 active:text-white text-[10px]"
+                                            className="min-h-[36px] inline-flex items-center gap-1 px-2.5 rounded-lg text-white/50 active:text-white hover:bg-white/5 text-xs"
                                           >
-                                            <Edit2 className="w-2.5 h-2.5" />
+                                            <Edit2 className="w-3 h-3 shrink-0" />
                                             Edit
                                           </button>
                                           <button
                                             onClick={() => handleDeleteComment(comment.id)}
-                                            className="flex items-center gap-0.5 text-red-500/70 active:text-red-500 text-[10px]"
+                                            className="min-h-[36px] inline-flex items-center gap-1 px-2.5 rounded-lg text-red-500/80 active:text-red-500 hover:bg-red-500/10 text-xs"
                                           >
-                                            <Trash2 className="w-2.5 h-2.5" />
+                                            <Trash2 className="w-3 h-3 shrink-0" />
                                             Delete
                                           </button>
                                         </>
@@ -1674,13 +1931,13 @@ export const VideoPlayerScreen: React.FC<VideoPlayerScreenProps> = ({ onPlayerVi
                             </div>
                           ))}
 
-                          {/* View More Button */}
+                          {/* View more - 44px touch target */}
                           {comments.length > 1 && (
                             <button
                               onClick={() => setShowAllComments(!showAllComments)}
-                              className="w-full py-2 text-center text-[#309605] hover:text-[#3ba208] text-xs font-medium transition-colors duration-200"
+                              className="w-full min-h-[48px] py-3 text-center text-[#309605] hover:text-[#3ba208] active:bg-white/5 rounded-xl text-sm font-semibold transition-colors focus-visible:ring-2 focus-visible:ring-[#309605] focus-visible:ring-inset"
                             >
-                              {showAllComments ? 'Show Less' : `View ${comments.length - 1} More Comments`}
+                              {showAllComments ? 'Show less' : `View ${comments.length - 1} more`}
                             </button>
                           )}
                         </>
@@ -1688,8 +1945,9 @@ export const VideoPlayerScreen: React.FC<VideoPlayerScreenProps> = ({ onPlayerVi
                     </div>
                   </div>
                 )}
+              </div>
 
-                {/* Watch Next Tab Content */}
+              <div id="watchnext-panel" role="tabpanel" aria-labelledby="tab-watchnext" className="min-h-[280px]" hidden={activeTab !== 'watchNext'}>
                 {activeTab === 'watchNext' && (
                   <div>
                     {isLoadingRelated ? (
@@ -1702,44 +1960,44 @@ export const VideoPlayerScreen: React.FC<VideoPlayerScreenProps> = ({ onPlayerVi
                                 <Skeleton className="h-3 w-full bg-white/10" />
                                 <Skeleton className="h-2 w-3/4 bg-white/10" />
                                 <Skeleton className="h-2 w-1/2 bg-white/10" />
-                              </div>
+                          </div>
                             </CardContent>
                           </Card>
                         ))}
                       </div>
                     ) : relatedVideos.length === 0 ? (
-                      <div className="flex flex-col items-center justify-center py-8 px-4 bg-gradient-to-br from-[#309605]/10 to-transparent rounded-xl border border-[#309605]/20">
-                        <div className="w-16 h-16 bg-gradient-to-br from-[#309605]/20 to-[#3ba208]/20 rounded-full flex items-center justify-center mb-3">
-                          <Play className="w-8 h-8 text-[#309605]" />
+                      <div className="flex flex-col items-center justify-center py-10 px-6 bg-white/[0.04] rounded-2xl border border-white/10">
+                        <div className="w-16 h-16 bg-[#309605]/20 rounded-full flex items-center justify-center mb-4">
+                          <Play className="w-8 h-8 text-[#309605]" aria-hidden />
                         </div>
-                        <h4 className="text-white font-semibold text-base mb-1">You've caught up!</h4>
-                        <p className="text-white/60 text-sm text-center mb-4 max-w-xs">
-                          Discover more amazing content from creators worldwide
+                        <h4 className="text-white font-semibold text-base mb-1">You're all caught up</h4>
+                        <p className="text-white/60 text-sm text-center mb-5 max-w-[260px]">
+                          Discover more from creators worldwide
                         </p>
-                        <div className="flex gap-2">
+                        <div className="flex flex-col sm:flex-row gap-3 w-full sm:w-auto">
                           <button
                             onClick={() => navigate('/')}
-                            className="px-4 py-2 bg-gradient-to-r from-[#309605] to-[#3ba208] hover:from-[#3ba208] hover:to-[#309605] rounded-lg text-white text-sm font-medium transition-all duration-200 shadow-lg shadow-[#309605]/25"
+                            className="min-h-[48px] px-5 py-3 bg-gradient-to-r from-[#309605] to-[#3ba208] rounded-xl text-white text-sm font-semibold transition-all active:scale-[0.98] focus-visible:ring-2 focus-visible:ring-[#309605] focus-visible:ring-offset-2 focus-visible:ring-offset-black"
                           >
                             Explore Home
                           </button>
                           <button
                             onClick={() => navigate('/explore')}
-                            className="px-4 py-2 bg-white/10 hover:bg-white/20 rounded-lg text-white text-sm font-medium transition-all duration-200"
+                            className="min-h-[48px] px-5 py-3 bg-white/10 hover:bg-white/15 rounded-xl text-white text-sm font-medium transition-colors active:scale-[0.98] focus-visible:ring-2 focus-visible:ring-white/40 focus-visible:ring-offset-2 focus-visible:ring-offset-black"
                           >
                             Browse Genres
                           </button>
                         </div>
                       </div>
                     ) : (
-                      <div className="grid grid-cols-2 gap-3">
+                      <div className="grid grid-cols-2 gap-3 sm:gap-4">
                         {relatedVideos.map((video) => {
                           if (!video?.id || !video?.title) return null;
 
                           return (
                             <Card
                               key={video.id}
-                              className="bg-transparent border border-white/10 cursor-pointer overflow-hidden group hover:border-white/20 active:border-[#309605]/50 transition-colors duration-200"
+                              className="bg-white/[0.03] border border-white/10 cursor-pointer overflow-hidden group hover:border-white/20 active:border-[#309605]/50 active:scale-[0.98] transition-all duration-200 rounded-xl focus-visible:ring-2 focus-visible:ring-[#309605] focus-visible:ring-offset-2 focus-visible:ring-offset-black"
                               onClick={() => handleVideoChange(video.id)}
                             >
                               <CardContent className="p-0">
@@ -1765,8 +2023,8 @@ export const VideoPlayerScreen: React.FC<VideoPlayerScreenProps> = ({ onPlayerVi
                                   ) : (
                                     <div className="w-full h-full flex items-center justify-center bg-gradient-to-br from-[#309605]/20 to-black/80">
                                       <Play className="w-6 h-6 text-white/60" />
-                                    </div>
-                                  )}
+                      </div>
+                    )}
 
                                   {/* Play Icon Overlay */}
                                   <div className="absolute inset-0 bg-black/40 opacity-0 group-active:opacity-100 transition-opacity duration-150 flex items-center justify-center">
@@ -1774,13 +2032,6 @@ export const VideoPlayerScreen: React.FC<VideoPlayerScreenProps> = ({ onPlayerVi
                                       <Play className="w-5 h-5 text-white ml-0.5" />
                                     </div>
                                   </div>
-
-                                  {/* Duration Badge */}
-                                  {video.duration > 0 && (
-                                    <div className="absolute bottom-1.5 right-1.5 px-1.5 py-0.5 bg-black/90 rounded text-white text-[10px] font-semibold">
-                                      {formatTime(video.duration)}
-                                    </div>
-                                  )}
                                 </div>
 
                                 <div className="p-2.5 bg-black/40">
@@ -1799,16 +2050,16 @@ export const VideoPlayerScreen: React.FC<VideoPlayerScreenProps> = ({ onPlayerVi
                             </Card>
                           );
                         })}
-                      </div>
-                    )}
                   </div>
                 )}
               </div>
+                )}
             </div>
           </div>
-        </ScrollArea>
+          </div>
+        </div>
       </div>
-
+      
       {/* Lazy-loaded Modals with Suspense */}
       <Suspense fallback={null}>
         {/* Comments Modal */}
@@ -1822,24 +2073,24 @@ export const VideoPlayerScreen: React.FC<VideoPlayerScreenProps> = ({ onPlayerVi
         )}
 
         {/* Tipping Modal */}
-        {showTippingModal && videoData && (
+        {showTippingModal && videoData && videoData.creator?.id && (
           <TippingModal
             onClose={() => setShowTippingModal(false)}
             onSuccess={handleTipSuccess}
             recipientId={videoData.creator.id}
             contentId={videoId}
             contentType="video"
-            recipientName={videoData.creator.name}
+            recipientName={videoData.creator.name ?? ''}
             recipientAvatar={videoData.creator.avatar || null}
           />
         )}
 
         {/* Report Modal */}
-        {showReportModal && videoData && (
+        {showReportModal && videoData && videoData.creator?.id != null && (
           <ReportModal
             contentType="video"
             contentId={videoId!}
-            contentTitle={videoData.title}
+            contentTitle={videoData.title ?? ''}
             reportedUserId={videoData.creator.id}
             onClose={() => setShowReportModal(false)}
             onSuccess={() => {

@@ -1,20 +1,22 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import {
   Heart,
-  Download,
   Play,
   Pause,
   Share2,
   MessageCircle,
-  X,
+  ArrowLeft,
   SkipForward,
   SkipBack,
   Flag,
   Shuffle,
   Repeat,
   Edit,
-  Trash2
+  Trash2,
+  Music,
+  Gift
 } from 'lucide-react';
+import { cn } from '../../lib/utils';
 import { sharePlaylist } from '../../lib/shareService';
 import {
   supabase,
@@ -26,17 +28,23 @@ import {
 import { useAuth } from '../../contexts/AuthContext';
 import { useAlert } from '../../contexts/AlertContext';
 import { useDownloadManager } from '../../hooks/useDownloadManager';
-import { CommentsModal } from '../../components/CommentsModal';
+import { CommentsModal, prefetchContentComments } from '../../components/CommentsModal';
 import { ReportModal } from '../../components/ReportModal';
+import { TippingModal } from '../../components/TippingModal';
 import { trackPlaylistPlayed, recordContribution } from '../../lib/contributionService';
 import { EditPlaylistModal } from '../../components/EditPlaylistModal';
 import { AuthModal } from '../../components/AuthModal';
-import { useParams, useNavigate } from 'react-router-dom';
+import { useParams, useNavigate, useSearchParams } from 'react-router-dom';
 import { useMusicPlayer } from '../../contexts/MusicPlayerContext';
 import { playlistCache } from '../../lib/playlistCache';
-import { PlayerStaticAdBanner } from '../../components/PlayerStaticAdBanner';
-import { getNativeAdsForPlacement, NativeAdCard } from '../../lib/nativeAdService';
 import { LoadingLogo } from '../../components/LoadingLogo';
+import { LazyImage } from '../../components/LazyImage';
+import { Spinner } from '../../components/Spinner';
+import { useAdPlacement } from '../../hooks/useAdPlacement';
+import { usePlayerBottomBanner } from '../../hooks/usePlayerBottomBanner';
+import { favoritesCache } from '../../lib/favoritesCache';
+import { getNativeAdsForPlacement, NativeAdCard } from '../../lib/nativeAdService';
+import { PlayerStaticAdBanner } from '../../components/PlayerStaticAdBanner';
 
 interface PlaylistTrack {
   id: string;
@@ -78,12 +86,14 @@ const PlaylistPlayer: React.FC<PlaylistPlayerScreenProps & {
   autoPlay?: boolean;
   startTrackIndex?: number;
   onShowAuthModal?: () => void;
+  isListenerCurationsPlaylist?: boolean;
 }> = ({
   playlistData,
   onPlayerVisibilityChange,
   autoPlay = true,
   startTrackIndex = 0,
-  onShowAuthModal
+  onShowAuthModal,
+  isListenerCurationsPlaylist = false
 }) => {
   const navigate = useNavigate();
   const { user, isAuthenticated, isInitialized } = useAuth();
@@ -92,13 +102,16 @@ const PlaylistPlayer: React.FC<PlaylistPlayerScreenProps & {
   const [showTrackList, setShowTrackList] = useState(true);
   const [showCommentsModal, setShowCommentsModal] = useState(false);
   const [showReportModal, setShowReportModal] = useState(false);
+  const [showTippingModal, setShowTippingModal] = useState(false);
   const [showEditPlaylistModal, setShowEditPlaylistModal] = useState(false);
   const [showAuthModal, setShowAuthModal] = useState(false);
   const [isBuffering, setIsBuffering] = useState(false);
   const [commentCount, setCommentCount] = useState(0);
   const [tracks, setTracks] = useState<PlaylistTrack[]>(playlistData.tracks);
-  const [userCountry, setUserCountry] = useState<string | undefined>();
-  const [staticAd, setStaticAd] = useState<NativeAdCard | null>(null);
+  const [isMiniPlayerActive, setIsMiniPlayerActive] = useState(false);
+  const [inlineAd, setInlineAd] = useState<NativeAdCard | null>(null);
+  const [showInlineAd, setShowInlineAd] = useState(false);
+  const nativeAdTimersRef = useRef<{ show?: number; hide?: number }>({});
 
   const { isDownloaded, downloadSong, deleteSong, getDownloadProgress } = useDownloadManager();
   const [isDownloadInProgress, setIsDownloadInProgress] = useState(false);
@@ -107,6 +120,7 @@ const PlaylistPlayer: React.FC<PlaylistPlayerScreenProps & {
     currentSong,
     isPlaying,
     audioElement,
+    playlistContext,
     playSong,
     togglePlayPause,
     hideFullPlayer,
@@ -118,17 +132,86 @@ const PlaylistPlayer: React.FC<PlaylistPlayerScreenProps & {
     toggleShuffle: globalToggleShuffle,
     isShuffleEnabled: globalIsShuffleEnabled,
   } = useMusicPlayer();
+  const thisPlaylistContext = `playlist-${playlistData.id}`;
+  const isThisPlaylistActive = playlistContext === thisPlaylistContext;
 
   const currentTrack = tracks?.[currentTrackIndex] || null;
+  const { showSongBonusRewarded, showBanner, hideBanner, removeBanner, showInterstitial } = useAdPlacement('PlaylistPlayerScreen');
+  const [showSongBonusPrompt, setShowSongBonusPrompt] = useState(false);
+  const songsPlayedSinceInterstitialRef = useRef(0);
+  const interstitialTimeoutRef = useRef<number | null>(null);
+
+  // Listen for global bonus events and surface a small user-initiated prompt.
+  useEffect(() => {
+    const handler = () => {
+      setShowSongBonusPrompt(true);
+    };
+    window.addEventListener('globalSongBonusAvailable', handler as EventListener);
+    return () => {
+      window.removeEventListener('globalSongBonusAvailable', handler as EventListener);
+    };
+  }, []);
+
+  usePlayerBottomBanner(
+    'playlist_player_bottom_banner',
+    showBanner,
+    hideBanner,
+    () => ({
+      contentId: playlistData?.id,
+      contentType: 'playlist',
+    }),
+    [playlistData?.id],
+    true,
+    0,
+    false
+  );
+
+  // Auto interstitial: every 2 songs played in this playlist (trigger mid-way through the 2nd song).
+  useEffect(() => {
+    const t = tracks?.[currentTrackIndex] || null;
+    if (!t?.id) return;
+
+    songsPlayedSinceInterstitialRef.current += 1;
+    const shouldTrigger = songsPlayedSinceInterstitialRef.current >= 2;
+    if (!shouldTrigger) return;
+    songsPlayedSinceInterstitialRef.current = 0;
+
+    if (interstitialTimeoutRef.current != null) {
+      window.clearTimeout(interstitialTimeoutRef.current);
+      interstitialTimeoutRef.current = null;
+    }
+
+    const durationSeconds = typeof t.duration === 'number' && t.duration > 0 ? t.duration : undefined;
+    const midMs = durationSeconds ? Math.max(12_000, Math.floor((durationSeconds * 1000) / 2)) : 30_000;
+
+    interstitialTimeoutRef.current = window.setTimeout(() => {
+      showInterstitial('playlist_midplay_interstitial', {
+        contentId: t.id,
+        contentType: 'song',
+      }, { muteAppAudio: true }).catch(() => {});
+    }, midMs);
+
+    return () => {
+      if (interstitialTimeoutRef.current != null) {
+        window.clearTimeout(interstitialTimeoutRef.current);
+        interstitialTimeoutRef.current = null;
+      }
+    };
+  }, [currentTrackIndex, tracks, showInterstitial]);
 
   useEffect(() => {
     if (!isInitialized) return;
 
-    const initializePlayer = async () => {
-      await loadTrackFavoriteStatus();
-    };
+    // Apply favoritesCache immediately so hearts stay correct when leaving/returning (before async load)
+    if (playlistData?.tracks?.length) {
+      setTracks(prev => prev.map(t => ({
+        ...t,
+        isFavorited: t.isFavorited ?? favoritesCache.isSongFavorited(t.id)
+      })));
+    }
 
-    initializePlayer();
+    // Load track favorite status in background — don't block display (cache already set initial state)
+    loadTrackFavoriteStatus().catch(() => {});
 
     onPlayerVisibilityChange?.(true);
     window.dispatchEvent(new CustomEvent('playlistPlayerVisibilityChange', {
@@ -150,22 +233,27 @@ const PlaylistPlayer: React.FC<PlaylistPlayerScreenProps & {
         }));
 
       if (playlistTracks.length > 0) {
-        // Find first playable track
-        const firstPlayableIndex = playlistData.tracks.findIndex(track => track.audioUrl);
-        const playableIndexInFiltered = firstPlayableIndex >= 0 ?
-          playlistTracks.findIndex(track => track.id === playlistData.tracks[firstPlayableIndex].id) : 0;
+        const startPlayback = async () => {
+          const firstPlayableIndex = playlistData.tracks.findIndex(track => track.audioUrl);
+          const playableIndexInFiltered = firstPlayableIndex >= 0
+            ? playlistTracks.findIndex(track => track.id === playlistData.tracks[firstPlayableIndex].id)
+            : 0;
 
-        const targetSong = playlistTracks[playableIndexInFiltered];
-        const isSameSongPlaying = currentSong?.id === targetSong?.id;
-        const isPlayingFromThisPlaylist = currentSong?.id && playlistTracks.some(song => song.id === currentSong.id);
+          const targetSong = playlistTracks[playableIndexInFiltered];
+          if (isThisPlaylistActive || !targetSong) {
+            return;
+          }
 
-        if (targetSong && !isSameSongPlaying && !isPlayingFromThisPlaylist) {
-          playSong(targetSong, false, playlistTracks, playableIndexInFiltered, `playlist-${playlistData.id}`, null);
-        }
+          // Just start playback; playlist-level rewarded ads are handled by the
+          // global "every 2 songs" logic, not on open.
+          playSong(targetSong, false, playlistTracks, playableIndexInFiltered, thisPlaylistContext, null, playlistData.id);
+        };
 
-        setTimeout(() => {
-          hideFullPlayer();
-        }, 100);
+        startPlayback().finally(() => {
+          setTimeout(() => {
+            hideFullPlayer();
+          }, 100);
+        });
       }
     }
 
@@ -177,83 +265,119 @@ const PlaylistPlayer: React.FC<PlaylistPlayerScreenProps & {
     };
   }, [onPlayerVisibilityChange, autoPlay, playlistData]);
 
+  // Load a single inline native ad for playlist player (non-blocking)
+  useEffect(() => {
+    let mounted = true;
+    (async () => {
+      try {
+        const ads = await getNativeAdsForPlacement('playlist_player', null, null, 1);
+        if (!mounted) return;
+        setInlineAd(ads[0] ?? null);
+      } catch {
+        if (!mounted) return;
+        setInlineAd(null);
+      }
+    })();
+    return () => {
+      mounted = false;
+    };
+  }, [playlistData.id]);
+
+  // Delay-show the native ad (up to ~60s), then auto-hide after 30s.
+  useEffect(() => {
+    setShowInlineAd(false);
+    if (nativeAdTimersRef.current.show) window.clearTimeout(nativeAdTimersRef.current.show);
+    if (nativeAdTimersRef.current.hide) window.clearTimeout(nativeAdTimersRef.current.hide);
+    nativeAdTimersRef.current = {};
+
+    if (!inlineAd) return;
+
+    const minDelayMs = 5_000;
+    const maxDelayMs = 60_000;
+    const delayMs = Math.floor(minDelayMs + Math.random() * (maxDelayMs - minDelayMs));
+
+    nativeAdTimersRef.current.show = window.setTimeout(() => {
+      setShowInlineAd(true);
+      nativeAdTimersRef.current.hide = window.setTimeout(() => {
+        setShowInlineAd(false);
+      }, 30_000);
+    }, delayMs);
+
+    return () => {
+      if (nativeAdTimersRef.current.show) window.clearTimeout(nativeAdTimersRef.current.show);
+      if (nativeAdTimersRef.current.hide) window.clearTimeout(nativeAdTimersRef.current.hide);
+      nativeAdTimersRef.current = {};
+    };
+  }, [inlineAd, playlistData.id]);
+
+  // No additional timers: rewarded ads are handled by song-transition logic only.
+
   useEffect(() => {
     loadCommentCount();
   }, [currentTrackIndex]);
 
   useEffect(() => {
+    if (!isThisPlaylistActive) return;
     if (currentSong && tracks) {
       const trackIndex = tracks.findIndex(track => track.id === currentSong.id);
       if (trackIndex >= 0 && trackIndex !== currentTrackIndex) {
         setCurrentTrackIndex(trackIndex);
       }
     }
-  }, [currentSong, tracks, currentTrackIndex]);
+  }, [isThisPlaylistActive, currentSong, tracks, currentTrackIndex]);
 
+  // Keep buffering state in sync with actual audio events (readyState alone doesn't trigger re-renders)
   useEffect(() => {
-    // Only show buffering state when:
-    // 1. The current track matches what's playing in the global player
-    // 2. We're trying to play (isPlaying should be true from context)
-    // 3. The audio element exists and is in a loading state
-    if (currentSong?.id === currentTrack?.id && audioElement) {
-      // If we're supposed to be playing but audio isn't ready, show buffering
-      if (isPlaying && audioElement.readyState < 3) {
-        setIsBuffering(true);
-      } else {
-        setIsBuffering(false);
-      }
+    if (currentSong?.id !== currentTrack?.id || !audioElement) {
+      setIsBuffering(false);
+      return;
+    }
+    const onWaiting = () => setIsBuffering(true);
+    const onCanPlay = () => setIsBuffering(false);
+    const onPlaying = () => setIsBuffering(false);
+    const onStalled = () => setIsBuffering(true);
+    const onError = () => setIsBuffering(false);
+    audioElement.addEventListener('waiting', onWaiting);
+    audioElement.addEventListener('canplay', onCanPlay);
+    audioElement.addEventListener('playing', onPlaying);
+    audioElement.addEventListener('stalled', onStalled);
+    audioElement.addEventListener('error', onError);
+    // Initial state from current readyState
+    if (isPlaying && audioElement.readyState < 3) {
+      setIsBuffering(true);
     } else {
       setIsBuffering(false);
     }
-  }, [isPlaying, currentSong, currentTrack, audioElement]);
+    return () => {
+      audioElement.removeEventListener('waiting', onWaiting);
+      audioElement.removeEventListener('canplay', onCanPlay);
+      audioElement.removeEventListener('playing', onPlaying);
+      audioElement.removeEventListener('stalled', onStalled);
+      audioElement.removeEventListener('error', onError);
+    };
+  }, [isPlaying, currentSong?.id, currentTrack?.id, audioElement]);
 
-  // Load user country and static ad
   useEffect(() => {
-    const loadUserData = async () => {
-      if (isAuthenticated && user) {
-        try {
-          const { data, error } = await supabase
-            .from('users')
-            .select('country')
-            .eq('id', user.id)
-            .maybeSingle();
+    if (!isThisPlaylistActive || !isPlaying || !playlistData?.id) return;
+    prefetchContentComments(playlistData.id, 'playlist').catch(() => {});
+  }, [isThisPlaylistActive, isPlaying, playlistData?.id]);
 
-          if (!error && data) {
-            setUserCountry(data.country);
-          }
-        } catch (error) {
-          console.error('Error loading user country:', error);
-        }
-      }
+  // Detect mini player state
+  useEffect(() => {
+    const checkMiniPlayer = () => {
+      setIsMiniPlayerActive(document.body.classList.contains('mini-player-active'));
     };
 
-    loadUserData();
-  }, [isAuthenticated, user]);
+    checkMiniPlayer();
 
-  // Load static ad for playlist player screen
-  useEffect(() => {
-    const loadStaticAd = async () => {
-      try {
-        const ads = await getNativeAdsForPlacement(
-          'playlist_player',
-          userCountry,
-          null, // genre targeting not needed for player ads
-          1 // Only need one ad
-        );
+    const observer = new MutationObserver(checkMiniPlayer);
+    observer.observe(document.body, {
+      attributes: true,
+      attributeFilter: ['class']
+    });
 
-        if (ads && ads.length > 0) {
-          setStaticAd(ads[0]);
-        } else {
-          setStaticAd(null);
-        }
-      } catch (error) {
-        console.error('Failed to load static ad:', error);
-        setStaticAd(null);
-      }
-    };
-
-    loadStaticAd();
-  }, [userCountry]);
+    return () => observer.disconnect();
+  }, []);
 
   const loadTrackFavoriteStatus = async () => {
     if (!isAuthenticated || !playlistData?.tracks || playlistData.tracks.length === 0) return;
@@ -277,9 +401,10 @@ const PlaylistPlayer: React.FC<PlaylistPlayerScreenProps & {
 
       const favoritedSongIds = new Set(favorites?.map(fav => fav.song_id) || []);
 
+      // Merge with favoritesCache so hearts stay correct when leaving/returning (cache updated on toggle)
       const tracksWithFavorites = playlistData.tracks.map(track => ({
         ...track,
-        isFavorited: favoritedSongIds.has(track.id)
+        isFavorited: favoritedSongIds.has(track.id) || favoritesCache.isSongFavorited(track.id)
       }));
 
       setTracks(tracksWithFavorites);
@@ -310,7 +435,7 @@ const PlaylistPlayer: React.FC<PlaylistPlayerScreenProps & {
       return;
     }
 
-    if (currentSong?.id === track.id) {
+    if (isThisPlaylistActive && currentSong?.id === track.id) {
       togglePlayPause();
       setCurrentTrackIndex(trackIndex);
       return;
@@ -335,17 +460,15 @@ const PlaylistPlayer: React.FC<PlaylistPlayerScreenProps & {
     const playlistIndex = playlistTracks.findIndex(song => song.id === track.id);
 
     if (playlistIndex >= 0) {
-      playSong(playlistTracks[playlistIndex], false, playlistTracks, playlistIndex, `playlist-${playlistData.id}`, null);
+      playSong(playlistTracks[playlistIndex], false, playlistTracks, playlistIndex, thisPlaylistContext, null, playlistData.id);
 
       // Track playlist play for contribution rewards (only if not the owner)
       if (user?.id && playlistData.userId && user.id !== playlistData.userId) {
         trackPlaylistPlayed(playlistData.userId, playlistData.id, user.id).catch(console.error);
       }
 
-      setTimeout(() => {
-        hideFullPlayer();
-        setIsBuffering(false);
-      }, 200);
+      setTimeout(() => hideFullPlayer(), 200);
+      // isBuffering is cleared by audio 'canplay'/'playing' events in useEffect
     }
   };
 
@@ -470,18 +593,13 @@ const PlaylistPlayer: React.FC<PlaylistPlayerScreenProps & {
     }
   };
 
-  const handleSharePlaylist = async () => {
-    try {
-      await recordShareEvent(playlistData.id, 'playlist');
-    } catch (error) {
-      console.error('Error recording share event:', error);
-    }
-
-    try {
-      await sharePlaylist(playlistData.id, playlistData.title);
-    } catch (error) {
+  const handleSharePlaylist = () => {
+    sharePlaylist(playlistData.id, playlistData.title).catch((error) => {
       console.error('Error sharing playlist:', error);
-    }
+    });
+    recordShareEvent(playlistData.id, 'playlist').catch((error) => {
+      console.error('Error recording share event:', error);
+    });
   };
 
   const handleDeletePlaylist = async () => {
@@ -551,7 +669,11 @@ const PlaylistPlayer: React.FC<PlaylistPlayerScreenProps & {
       detail: { isVisible: false }
     }));
 
-    navigate(-1);
+    if (window.history.length > 1) {
+      navigate(-1);
+    } else {
+      navigate('/');
+    }
   };
 
   const formatTime = (time: number): string => {
@@ -576,281 +698,357 @@ const PlaylistPlayer: React.FC<PlaylistPlayerScreenProps & {
   // Removed redundant loading state - handled by parent component
 
   return (
-    <div className="fixed inset-0 z-50 flex flex-col bg-gradient-to-b from-[#1a1a1a] via-[#0d0d0d] to-[#000000] animate-in fade-in duration-300 touch-manipulation overflow-y-auto pb-[140px]">
-      {/* Close Button */}
-      <div className="absolute top-4 left-4 z-20">
-        <button
-          onClick={handleClose}
-          className="p-2 bg-black/50 hover:bg-white/10 rounded-full transition-all active:scale-95 backdrop-blur-sm"
-          aria-label="Close player"
-        >
-          <X className="w-6 h-6 text-white" />
-        </button>
+    <div className="flex flex-col min-h-screen bg-gradient-to-b from-[#0a0a0a] via-[#0d0d0d] to-[#111111] fixed inset-0 z-50 pb-[env(safe-area-inset-bottom,0px)] overflow-hidden">
+      {/* Header - Same safe area as Explore */}
+      <div className="sticky top-0 z-10 bg-[#0d0d0d]/95 backdrop-blur-md border-b border-white/[0.04]">
+        <div className="flex items-center justify-between px-4 pt-5 pb-3">
+          <button
+            onClick={handleClose}
+            className="min-w-[40px] min-h-[40px] flex items-center justify-center bg-white/10 hover:bg-white/20 active:bg-white/30 rounded-full transition-all active:scale-95"
+            aria-label="Go back"
+          >
+            <ArrowLeft className="w-5 h-5 text-white" strokeWidth={2.5} />
+          </button>
+          <h1 className="font-sans font-bold text-white text-lg">
+            Playlist
+          </h1>
+          {/* Right side actions for owner */}
+          <div className="flex items-center gap-1">
+            {playlistData.isOwner ? (
+              <>
+                <button
+                  onClick={() => setShowEditPlaylistModal(true)}
+                  className="min-w-[40px] min-h-[40px] flex items-center justify-center hover:bg-white/10 rounded-full transition-all active:scale-95"
+                  aria-label="Edit playlist"
+                >
+                  <Edit className="w-5 h-5 text-white/80" />
+                </button>
+                <button
+                  onClick={handleDeletePlaylist}
+                  className="min-w-[40px] min-h-[40px] flex items-center justify-center hover:bg-red-500/20 rounded-full transition-all active:scale-95"
+                  aria-label="Delete playlist"
+                >
+                  <Trash2 className="w-5 h-5 text-red-400" />
+                </button>
+              </>
+            ) : (
+              <div className="w-[40px]" />
+            )}
+          </div>
+        </div>
       </div>
 
-      {/* Edit/Delete Buttons for Owner */}
-      {playlistData.isOwner && (
-        <div className="absolute top-4 right-4 z-20 flex items-center gap-2">
-          <button
-            onClick={() => setShowEditPlaylistModal(true)}
-            className="p-2 bg-black/50 hover:bg-white/10 rounded-full transition-all active:scale-95 backdrop-blur-sm"
-            aria-label="Edit playlist"
-          >
-            <Edit className="w-5 h-5 text-white" />
-          </button>
-          <button
-            onClick={handleDeletePlaylist}
-            className="p-2 bg-black/50 hover:bg-red-500/20 rounded-full transition-all active:scale-95 backdrop-blur-sm"
-            aria-label="Delete playlist"
-          >
-            <Trash2 className="w-5 h-5 text-red-400" />
-          </button>
-        </div>
-      )}
-
-      {/* Main Content */}
-      <div className="flex-1 flex flex-col px-5 py-6 pt-16">
-        {/* Playlist Artwork */}
-        <div className="w-full max-w-[280px] mx-auto mb-4">
-          <div className="relative aspect-square rounded-3xl overflow-hidden shadow-2xl">
-            {playlistData.coverImageUrl ? (
-              <img
-                src={playlistData.coverImageUrl}
-                alt={playlistData.title}
-                className="w-full h-full object-cover"
-              />
-            ) : (
-              <div className="w-full h-full bg-gradient-to-br from-[#309605] to-[#3ba208] flex items-center justify-center">
-                <span className="text-white text-6xl font-bold">♪</span>
-              </div>
-            )}
-            <div className="absolute inset-0 bg-gradient-to-t from-black/20 to-transparent"></div>
-          </div>
-        </div>
-
-        {/* Static Ad Banner */}
-        {staticAd && (
-          <div className="w-full max-w-sm mx-auto mb-4">
-            <PlayerStaticAdBanner ad={staticAd} />
-          </div>
-        )}
-
-        {/* Playlist Information */}
-        <div className="text-center mb-6 w-full max-w-sm mx-auto">
-          <h1 className="font-bold text-white text-2xl mb-1 truncate px-2">
-            {playlistData.title}
-          </h1>
-          {playlistData.description && (
-            <p className="text-white/60 text-sm mb-2 px-2 line-clamp-2">
-              {playlistData.description}
-            </p>
-          )}
-          <p className="text-white/40 text-sm">
-            {tracks?.length} tracks • {formatDuration(playlistData.totalDuration)}
-          </p>
-        </div>
-
-        {/* Playback Controls */}
-        <div className="flex items-center justify-center gap-4 w-full max-w-sm mx-auto mb-8">
-          <button
-            onClick={handleToggleShuffle}
-            className={`p-2.5 rounded-full transition-all active:scale-95 ${
-              globalIsShuffleEnabled
-                ? 'text-white bg-white/20'
-                : 'text-white/50 hover:text-white/70 hover:bg-white/10'
-            }`}
-            aria-label="Shuffle"
-          >
-            <Shuffle className="w-5 h-5" />
-          </button>
-
-          <button
-            onClick={playPreviousTrack}
-            className="p-3 text-white/70 hover:text-white hover:bg-white/10 rounded-full transition-all active:scale-95"
-            aria-label="Previous"
-          >
-            <SkipBack className="w-6 h-6" fill="currentColor" />
-          </button>
-
-          <button
-            onClick={() => playTrack(currentTrackIndex)}
-            className="w-16 h-16 bg-white rounded-full flex items-center justify-center active:scale-95 transition-all duration-200 shadow-2xl hover:shadow-3xl"
-            aria-label={isPlaying && currentSong?.id === currentTrack?.id ? "Pause" : "Play"}
-          >
-            {isPlaying && currentSong?.id === currentTrack?.id ? (
-              <Pause className="w-7 h-7 text-black" fill="black" />
-            ) : (
-              <Play className="w-7 h-7 ml-1 text-black" fill="black" />
-            )}
-          </button>
-
-          <button
-            onClick={playNextTrack}
-            className="p-3 text-white/70 hover:text-white hover:bg-white/10 rounded-full transition-all active:scale-95"
-            aria-label="Next"
-          >
-            <SkipForward className="w-6 h-6" fill="currentColor" />
-          </button>
-
-          <button
-            onClick={handleToggleRepeat}
-            className={`p-2.5 rounded-full transition-all active:scale-95 relative ${
-              globalRepeatMode !== 'off'
-                ? 'text-white bg-white/20'
-                : 'text-white/50 hover:text-white/70 hover:bg-white/10'
-            }`}
-            aria-label={`Repeat ${globalRepeatMode}`}
-          >
-            <Repeat className="w-5 h-5" />
-            {globalRepeatMode === 'one' && (
-              <span className="absolute -top-0.5 -right-0.5 w-3.5 h-3.5 bg-white rounded-full flex items-center justify-center">
-                <span className="text-black text-[9px] font-bold">1</span>
-              </span>
-            )}
-          </button>
-        </div>
-
-        {/* Social Actions Grid */}
-        <div className="w-full max-w-sm mx-auto mb-6">
-          <div className="grid grid-cols-4 gap-3">
-            <button
-              onClick={() => setShowCommentsModal(true)}
-              className="flex flex-col items-center justify-center gap-2 p-3 rounded-2xl bg-white/5 hover:bg-white/10 active:scale-95 transition-all"
-            >
-              <div className="w-11 h-11 rounded-full bg-white/10 flex items-center justify-center relative">
-                <MessageCircle className="w-5 h-5 text-white" />
-                {commentCount > 0 && (
-                  <span className="absolute -top-1 -right-1 bg-[#309605] text-white text-[9px] font-bold rounded-full min-w-[18px] h-[18px] flex items-center justify-center px-1">
-                    {commentCount > 99 ? '99+' : commentCount}
-                  </span>
-                )}
-              </div>
-              <span className="text-white/70 text-[10px] font-medium">Comment</span>
-            </button>
-
-            <button
-              onClick={handleDownloadTrack}
-              disabled={isDownloadInProgress || !currentTrack?.audioUrl}
-              className="flex flex-col items-center justify-center gap-2 p-3 rounded-2xl bg-white/5 hover:bg-white/10 active:scale-95 transition-all disabled:opacity-50"
-            >
-              <div className={`w-11 h-11 rounded-full flex items-center justify-center ${
-                trackIsDownloaded ? 'bg-[#309605]/20' : 'bg-white/10'
-              }`}>
-                {isDownloadInProgress || downloadProgress ? (
-                  <LoadingLogo variant="pulse" size={20} />
-                ) : (
-                  <Download className={`w-5 h-5 ${trackIsDownloaded ? 'text-[#309605]' : 'text-white'}`} />
-                )}
-              </div>
-              <span className="text-white/70 text-[10px] font-medium">
-                {trackIsDownloaded ? 'Saved' : 'Download'}
-              </span>
-            </button>
-
-            <button
-              onClick={handleSharePlaylist}
-              className="flex flex-col items-center justify-center gap-2 p-3 rounded-2xl bg-white/5 hover:bg-white/10 active:scale-95 transition-all"
-            >
-              <div className="w-11 h-11 rounded-full bg-white/10 flex items-center justify-center">
-                <Share2 className="w-5 h-5 text-white" />
-              </div>
-              <span className="text-white/70 text-[10px] font-medium">Share</span>
-            </button>
-
-            <button
-              onClick={() => setShowReportModal(true)}
-              className="flex flex-col items-center justify-center gap-2 p-3 rounded-2xl bg-white/5 hover:bg-white/10 active:scale-95 transition-all"
-            >
-              <div className="w-11 h-11 rounded-full bg-white/10 flex items-center justify-center">
-                <Flag className="w-5 h-5 text-white" />
-              </div>
-              <span className="text-white/70 text-[10px] font-medium">Report</span>
-            </button>
-          </div>
-        </div>
-
-        {/* Track List */}
-        <div className="w-full max-w-sm mx-auto">
-          <div className="flex items-center justify-between mb-4 px-2">
-            <h2 className="font-bold text-white text-lg">Tracks</h2>
-            <button
-              onClick={() => setShowTrackList(!showTrackList)}
-              className="text-white/60 hover:text-white text-sm transition-colors"
-            >
-              {showTrackList ? 'Hide' : 'Show'}
-            </button>
-          </div>
-
-          {showTrackList && (
-            <div className="space-y-2">
-              {tracks && tracks.length > 0 ? tracks.map((track, index) => (
-                <div
-                  key={track.id}
-                  className={`flex items-center gap-3 p-3 rounded-2xl transition-all cursor-pointer group ${
-                    currentSong?.id === track.id
-                      ? 'bg-white/10'
-                      : 'bg-white/5 hover:bg-white/10'
-                  }`}
-                  onClick={() => playTrack(index)}
-                >
-                  <div className={`w-8 h-8 rounded-full flex items-center justify-center flex-shrink-0 text-sm font-bold ${
-                    currentSong?.id === track.id ? 'bg-[#309605] text-white' : 'bg-white/10 text-white/60'
-                  }`}>
-                    {currentSong?.id === track.id && isPlaying ? (
-                      <Pause className="w-4 h-4" fill="currentColor" />
-                    ) : (
-                      <span>{track.trackNumber || (index + 1)}</span>
-                    )}
-                  </div>
-
-                  <div className="flex-1 min-w-0">
-                    <p className={`font-medium text-sm truncate ${
-                      currentSong?.id === track.id ? 'text-white' : 'text-white/90'
-                    }`}>
-                      {track.title || 'Untitled Track'}
-                    </p>
-                    <p className="text-white/50 text-xs truncate">
-                      {track.featuredArtists && track.featuredArtists.length > 0
-                        ? `${track.artist} ft. ${track.featuredArtists.join(', ')}`
-                        : track.artist
-                      }
-                    </p>
-                  </div>
-
-                  <div className="flex items-center gap-2">
-                    {isAuthenticated && (
-                      <button
-                        onClick={(e) => handleToggleTrackFavorite(track.id, e)}
-                        className="p-1.5 rounded-full transition-all"
-                      >
-                        <Heart className={`w-4 h-4 transition-all duration-[50ms] ${track.isFavorited ? 'text-red-500 fill-red-500' : 'text-white'}`} />
-                      </button>
-                    )}
-
-                    {playlistData.isOwner && (
-                      <button
-                        onClick={(e) => handleRemoveTrackFromPlaylist(track.id, e)}
-                        className="p-1.5 hover:bg-red-500/20 rounded-full transition-all opacity-0 group-hover:opacity-100"
-                      >
-                        <Trash2 className="w-4 h-4 text-red-400" />
-                      </button>
-                    )}
-
-                    <span className="text-white/50 text-xs w-12 text-right">
-                      {formatTime(track.duration)}
-                    </span>
-                  </div>
+      {/* Scrollable Content Container */}
+      <div
+        className="flex-1 overflow-y-auto px-4 pb-4 scrollbar-hide"
+        style={{
+          paddingBottom: isMiniPlayerActive
+            ? 'calc(12.5rem + env(safe-area-inset-bottom, 0px))'
+            : 'calc(8rem + env(safe-area-inset-bottom, 0px))'
+        }}
+      >
+        <div className="flex flex-col gap-6 py-4">
+          {/* Playlist Header Card */}
+          <div className="relative overflow-hidden rounded-2xl">
+            {/* Background: Track image collage or playlist cover */}
+            <div className="absolute inset-0 z-0">
+              {tracks.length > 0 && tracks.some(t => t.coverImageUrl) ? (
+                <div className="grid grid-cols-2 grid-rows-2 w-full h-full">
+                  {tracks
+                    .filter(t => t.coverImageUrl)
+                    .slice(0, 4)
+                    .map((t, idx) => (
+                      <img
+                        key={idx}
+                        src={t.coverImageUrl!}
+                        alt=""
+                        className="w-full h-full object-cover"
+                        onError={(e) => { (e.target as HTMLImageElement).style.display = 'none'; }}
+                      />
+                    ))}
                 </div>
-              )) : (
-                <div className="text-center py-12">
-                  <div className="w-16 h-16 bg-white/5 rounded-full flex items-center justify-center mx-auto mb-4">
-                    <Play className="w-8 h-8 text-white/30" />
-                  </div>
-                  <p className="text-white/50">No tracks in this playlist</p>
+              ) : playlistData.coverImageUrl ? (
+                <img
+                  src={playlistData.coverImageUrl}
+                  alt={playlistData.title}
+                  className="w-full h-full object-cover"
+                />
+              ) : null}
+              <div className="absolute inset-0 bg-gradient-to-b from-black/60 via-black/70 to-black/90" />
+            </div>
+
+            <div className="relative z-10 p-6 pb-7 min-h-[200px] flex flex-col justify-end">
+              {/* Play button */}
+              <button
+                onClick={() => playTrack(currentTrackIndex)}
+                className="absolute top-5 right-5 w-12 h-12 rounded-full bg-[#00ad74] hover:bg-[#009c68] active:bg-[#008a5d] flex items-center justify-center shadow-lg shadow-[#00ad74]/30 transition-all active:scale-90"
+                aria-label={isThisPlaylistActive && isPlaying && currentSong?.id === currentTrack?.id ? "Pause" : "Play all"}
+              >
+                {isThisPlaylistActive && isPlaying && currentSong?.id === currentTrack?.id ? (
+                  <Pause className="w-5 h-5 text-white" fill="white" />
+                ) : (
+                  <Play className="w-5 h-5 text-white ml-0.5" fill="white" />
+                )}
+              </button>
+
+              <h2 className="font-sans font-bold text-white text-2xl leading-tight mb-2">
+                {playlistData.title}
+              </h2>
+
+              {playlistData.description && (
+                <p className="font-sans text-white/70 text-sm leading-relaxed mb-3 max-w-[85%] line-clamp-2">
+                  {playlistData.description}
+                </p>
+              )}
+
+              <div className="flex items-center justify-between gap-3 text-white/50 text-xs font-sans">
+                <div className="flex items-center gap-2">
+                  <Music className="w-3.5 h-3.5" />
+                  <span>{tracks.length} tracks</span>
+                  <span className="mx-1">·</span>
+                  <span>{formatDuration(playlistData.totalDuration)}</span>
+                </div>
+                <div className="flex items-center gap-0.5 flex-shrink-0">
+                  <button
+                    onClick={() => setShowCommentsModal(true)}
+                    className="p-2 rounded-full text-white/80 hover:text-white hover:bg-white/10 transition-all relative"
+                    title="Comments"
+                  >
+                    <MessageCircle className="w-[18px] h-[18px]" />
+                    {commentCount > 0 && (
+                      <span className="absolute -top-0.5 -right-0.5 text-[10px] font-bold text-white/80 tabular-nums">
+                        {commentCount >= 1000 ? `${(commentCount / 1000).toFixed(1).replace(/\.0$/, '')}K` : commentCount}
+                      </span>
+                    )}
+                  </button>
+                  <button
+                    onClick={handleSharePlaylist}
+                    className="p-2 rounded-full text-white/80 hover:text-white hover:bg-white/10 transition-all"
+                    title="Share"
+                  >
+                    <Share2 className="w-[18px] h-[18px]" />
+                  </button>
+                  {isListenerCurationsPlaylist && !playlistData.isOwner && (
+                    <button
+                      onClick={() => setShowTippingModal(true)}
+                      className="p-2 rounded-full text-white/80 hover:text-white hover:bg-white/10 transition-all"
+                      title="Tip creator"
+                    >
+                      <Gift className="w-[18px] h-[18px]" />
+                    </button>
+                  )}
+                  <button
+                    onClick={() => setShowReportModal(true)}
+                    className="p-2 rounded-full text-red-500 hover:text-red-400 hover:bg-red-500/10 transition-all"
+                    title="Report"
+                  >
+                    <Flag className="w-[18px] h-[18px]" />
+                  </button>
+                </div>
+              </div>
+
+              {/* Inline Native Ad inside header when available */}
+              {inlineAd && showInlineAd && (
+                <div className="mt-4">
+                  <PlayerStaticAdBanner ad={inlineAd} className="rounded-xl" />
                 </div>
               )}
             </div>
+          </div>
+
+          {/* song_bonus ~every 1.5 songs; rewarded interstitial every 3. Claim → VITE_ADMOB_REWARDED_ID */}
+          {showSongBonusPrompt && (
+            <div className="mt-3 mb-2 mx-4 flex items-center justify-between gap-3 rounded-2xl bg-white/10 border border-white/15 px-3 py-2 shadow-lg">
+              <div className="flex flex-col">
+                <span className="text-xs font-semibold text-white">Get bonus score</span>
+                <span className="text-[11px] text-white/70">Watch a short ad to earn extra treats.</span>
+              </div>
+              <button
+                type="button"
+                onClick={() => {
+                  setShowSongBonusPrompt(false);
+                  if (!currentTrack?.id) return;
+                  showSongBonusRewarded({ contentId: currentTrack.id }).catch(() => {});
+                }}
+                className="px-3 py-1.5 rounded-full bg-white text-xs font-semibold text-black active:scale-95 hover:opacity-90 transition-all"
+              >
+                Claim
+              </button>
+            </div>
           )}
+
+          {/* Playback Controls */}
+          <div className="flex items-center justify-center gap-6 px-2">
+            <button
+              onClick={handleToggleShuffle}
+              className={cn(
+                'p-2 rounded-full transition-all active:scale-95',
+                globalIsShuffleEnabled
+                  ? 'text-[#00ad74] bg-[#00ad74]/20'
+                  : 'text-white/50 hover:text-white/70 hover:bg-white/10'
+              )}
+              aria-label="Shuffle"
+            >
+              <Shuffle className="w-5 h-5" />
+            </button>
+            <button onClick={playPreviousTrack} className="text-white hover:scale-110 active:scale-95 transition-transform p-1" aria-label="Previous track">
+              <SkipBack className="w-6 h-6 fill-current" />
+            </button>
+            <button
+              onClick={() => playTrack(currentTrackIndex)}
+              className="w-14 h-14 rounded-full flex items-center justify-center bg-white text-[#0a0a0a] hover:scale-[1.06] active:scale-95 transition-all duration-200 shadow-lg"
+              aria-label={isThisPlaylistActive && isPlaying && currentSong?.id === currentTrack?.id ? 'Pause' : 'Play'}
+            >
+              {isBuffering ? (
+                <Spinner size={20} className="text-[#0a0a0a]" />
+              ) : isThisPlaylistActive && isPlaying && currentSong?.id === currentTrack?.id ? (
+                <Pause className="w-6 h-6" />
+              ) : (
+                <Play className="w-6 h-6 ml-0.5" />
+              )}
+            </button>
+            <button onClick={playNextTrack} className="text-white hover:scale-110 active:scale-95 transition-transform p-1" aria-label="Next track">
+              <SkipForward className="w-6 h-6 fill-current" />
+            </button>
+            <button
+              onClick={handleToggleRepeat}
+              className={cn(
+                'p-2 rounded-full transition-all active:scale-95 relative',
+                globalRepeatMode !== 'off'
+                  ? 'text-[#00ad74] bg-[#00ad74]/20'
+                  : 'text-white/50 hover:text-white/70 hover:bg-white/10'
+              )}
+              aria-label={`Repeat ${globalRepeatMode}`}
+            >
+              <Repeat className="w-5 h-5" />
+              {globalRepeatMode === 'one' && (
+                <span className="absolute -top-0.5 -right-0.5 w-3.5 h-3.5 bg-[#00ad74] rounded-full flex items-center justify-center">
+                  <span className="text-white text-[10px] font-bold">1</span>
+                </span>
+              )}
+            </button>
+          </div>
+
+          {/* Track List */}
+          <div className="flex flex-col gap-2">
+            <div className="flex items-center justify-between px-1 mb-1">
+              <h4 className="font-sans font-semibold text-white text-sm">
+                Tracks
+              </h4>
+              <button
+                onClick={() => setShowTrackList(!showTrackList)}
+                className="text-white/60 hover:text-white text-xs transition-colors"
+              >
+                {showTrackList ? 'Hide' : 'Show'}
+              </button>
+            </div>
+
+            {showTrackList && (
+              tracks.length === 0 ? (
+                <div className="flex flex-col items-center justify-center py-12">
+                  <Music className="w-12 h-12 text-white/40 mb-3" />
+                  <p className="font-sans text-white/60 text-sm">
+                    No tracks in this playlist
+                  </p>
+                </div>
+              ) : (
+                <div className="flex flex-col gap-2">
+                  {tracks.map((track, index) => {
+                    const isCurrentTrack = isThisPlaylistActive && currentSong?.id === track.id;
+                    const isPlayingTrack = isCurrentTrack && isPlaying;
+
+                    return (
+                      <div
+                        key={track.id}
+                        className={cn(
+                          'group rounded-xl p-4 transition-all cursor-pointer',
+                          isCurrentTrack
+                            ? 'bg-white/15'
+                            : 'bg-white/5 hover:bg-white/10 active:bg-white/15'
+                        )}
+                        onClick={() => playTrack(index)}
+                      >
+                        <div className="flex items-center gap-3">
+                          {/* Track Number / Play Icon */}
+                          <div className="w-8 h-8 flex items-center justify-center flex-shrink-0">
+                            <span className={cn(
+                              'font-sans text-sm group-hover:hidden',
+                              isCurrentTrack ? 'text-white font-semibold' : 'text-white/60'
+                            )}>
+                              {track.trackNumber || (index + 1)}
+                            </span>
+                            <Play
+                              className="w-4 h-4 hidden group-hover:block text-white"
+                              fill="white"
+                            />
+                          </div>
+
+                          {/* Cover Image */}
+                          <div className="w-12 h-12 rounded-lg overflow-hidden bg-white/5 flex-shrink-0 shadow">
+                            {track.coverImageUrl ? (
+                              <LazyImage
+                                src={track.coverImageUrl}
+                                alt={track.title}
+                                className="w-full h-full object-cover"
+                              />
+                            ) : (
+                              <div className="w-full h-full flex items-center justify-center">
+                                <Music className="w-5 h-5 text-white/40" />
+                              </div>
+                            )}
+                          </div>
+
+                          {/* Song Info */}
+                          <div className="flex-1 flex flex-col gap-0.5 min-w-0">
+                            <p className={cn(
+                              'font-sans font-medium text-sm truncate leading-tight',
+                              isCurrentTrack ? 'text-white' : 'text-white'
+                            )}>
+                              {track.title || 'Untitled Track'}
+                            </p>
+                            <span className="font-sans text-white/60 text-xs truncate">
+                              {track.featuredArtists && track.featuredArtists.length > 0
+                                ? `${track.artist} ft. ${track.featuredArtists.join(', ')}`
+                                : track.artist
+                              }
+                            </span>
+                          </div>
+
+                          {/* Actions */}
+                          <div className="flex items-center gap-1">
+                            {isAuthenticated && (
+                              <button
+                                onClick={(e) => handleToggleTrackFavorite(track.id, e)}
+                                className="p-1.5 rounded-full transition-all hover:bg-white/10"
+                                aria-label={track.isFavorited ? 'Remove from favorites' : 'Add to favorites'}
+                              >
+                                <Heart className={cn('w-4 h-4 transition-all duration-[50ms]', track.isFavorited ? 'text-red-500 fill-red-500' : 'text-white/70')} />
+                              </button>
+                            )}
+
+                            {playlistData.isOwner && (
+                              <button
+                                onClick={(e) => handleRemoveTrackFromPlaylist(track.id, e)}
+                                className="p-1.5 hover:bg-red-500/20 rounded-full transition-all opacity-0 group-hover:opacity-100"
+                                aria-label="Remove from playlist"
+                              >
+                                <Trash2 className="w-4 h-4 text-red-400" />
+                              </button>
+                            )}
+
+                            {/* Duration */}
+                            <span className="font-sans text-white/60 text-xs flex-shrink-0 w-10 text-right tabular-nums">
+                              {formatTime(track.duration)}
+                            </span>
+                          </div>
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              )
+            )}
+          </div>
         </div>
       </div>
 
@@ -877,6 +1075,18 @@ const PlaylistPlayer: React.FC<PlaylistPlayerScreenProps & {
           onSuccess={() => {
             setShowReportModal(false);
           }}
+        />
+      )}
+
+      {showTippingModal && (
+        <TippingModal
+          onClose={() => setShowTippingModal(false)}
+          onSuccess={() => setShowTippingModal(false)}
+          recipientId={playlistData.userId}
+          recipientName={playlistData.userName ?? undefined}
+          recipientAvatar={playlistData.userAvatar ?? undefined}
+          contentId={playlistData.id}
+          contentType="playlist"
         />
       )}
 
@@ -922,7 +1132,9 @@ const PlaylistPlayer: React.FC<PlaylistPlayerScreenProps & {
 
 export const PlaylistPlayerScreen: React.FC<PlaylistPlayerScreenProps> = ({ onPlayerVisibilityChange, onOpenMusicPlayer }) => {
   const { playlistId } = useParams<{ playlistId: string }>();
+  const [searchParams] = useSearchParams();
   const navigate = useNavigate();
+  const isListenerCurationsPlaylist = searchParams.get('source') === 'listener_curations';
   const [playlistData, setPlaylistData] = useState<PlaylistData | null>(null);
   const [error, setError] = useState<string | null>(null);
 
@@ -1265,18 +1477,18 @@ export const PlaylistPlayerScreen: React.FC<PlaylistPlayerScreenProps> = ({ onPl
   // Only show error state - no loading skeleton for instant feel
   if (error) {
     return (
-      <div className="fixed inset-0 bg-gradient-to-b from-[#1a1a1a] via-[#0d0d0d] to-[#000000] z-50 flex items-center justify-center p-4">
-        <div className="bg-white/10 backdrop-blur-sm border border-white/20 rounded-3xl p-8 text-center max-w-md">
+      <div className="fixed inset-0 bg-[#0a0a0a] z-50 flex items-center justify-center p-4">
+        <div className="text-center max-w-md">
           <div className="w-16 h-16 bg-red-500/20 rounded-full flex items-center justify-center mx-auto mb-6">
             <Flag className="w-8 h-8 text-red-400" />
           </div>
           <h3 className="font-bold text-white text-xl mb-4">Playlist Not Found</h3>
-          <p className="text-white/70 text-sm mb-6">
+          <p className="text-white/60 text-sm mb-6">
             {error || 'The playlist you\'re looking for doesn\'t exist or has been removed.'}
           </p>
           <button
-            onClick={() => navigate(-1)}
-            className="w-full bg-[#309605] hover:bg-[#3ba208] text-white font-semibold py-3 px-6 rounded-xl transition-colors"
+            onClick={() => (window.history.length > 1 ? navigate(-1) : navigate('/'))}
+            className="px-6 py-2.5 rounded-full bg-white text-[#0a0a0a] font-semibold text-sm hover:opacity-90 active:scale-95 transition-all"
           >
             Go Back
           </button>
@@ -1292,50 +1504,39 @@ export const PlaylistPlayerScreen: React.FC<PlaylistPlayerScreenProps> = ({ onPl
   // Show loading skeleton while fetching playlist data
   if (!playlistData) {
     return (
-      <div className="fixed inset-0 z-50 flex flex-col bg-gradient-to-b from-[#1a1a1a] via-[#0d0d0d] to-[#000000] animate-in fade-in duration-300 touch-manipulation overflow-y-auto pb-[140px]">
-        <div className="flex-1 flex flex-col px-5 py-6 pt-16">
-          {/* Playlist Artwork Skeleton */}
-          <div className="w-full max-w-[280px] mx-auto mb-4">
-            <div className="aspect-square rounded-3xl bg-white/5 animate-pulse" />
-          </div>
-
-          {/* Playlist Information Skeleton */}
-          <div className="text-center mb-6 w-full max-w-sm mx-auto space-y-2">
-            <div className="h-8 bg-white/5 rounded-xl animate-pulse mx-auto w-3/4" />
-            <div className="h-4 bg-white/5 rounded-xl animate-pulse mx-auto w-1/2" />
-            <div className="h-4 bg-white/5 rounded-xl animate-pulse mx-auto w-1/3" />
-          </div>
-
-          {/* Playback Controls Skeleton */}
-          <div className="flex items-center justify-center gap-4 w-full max-w-sm mx-auto mb-8">
+      <div className="flex flex-col min-h-screen bg-gradient-to-b from-[#0a0a0a] via-[#0d0d0d] to-[#111111] fixed inset-0 z-50 pb-[env(safe-area-inset-bottom,0px)] overflow-hidden">
+        {/* Header Skeleton */}
+        <div className="sticky top-0 z-10 bg-gradient-to-b from-[#0a0a0a] to-transparent backdrop-blur-md">
+          <div className="flex items-center justify-between px-4 py-2" style={{ paddingTop: 'calc(1.25rem + env(safe-area-inset-top, 0px) * 0.25)', paddingBottom: '1.25rem' }}>
             <div className="w-10 h-10 bg-white/5 rounded-full animate-pulse" />
-            <div className="w-12 h-12 bg-white/5 rounded-full animate-pulse" />
-            <div className="w-16 h-16 bg-white/5 rounded-full animate-pulse" />
-            <div className="w-12 h-12 bg-white/5 rounded-full animate-pulse" />
-            <div className="w-10 h-10 bg-white/5 rounded-full animate-pulse" />
+            <div className="h-6 w-20 bg-white/5 rounded animate-pulse" />
+            <div className="w-10 h-10" />
           </div>
+        </div>
 
-          {/* Social Actions Grid Skeleton */}
-          <div className="w-full max-w-sm mx-auto mb-6">
-            <div className="grid grid-cols-4 gap-3">
-              {Array.from({ length: 4 }).map((_, i) => (
-                <div key={i} className="flex flex-col items-center justify-center gap-2 p-3 rounded-2xl bg-white/5 animate-pulse">
-                  <div className="w-11 h-11 rounded-full bg-white/10" />
-                  <div className="h-3 w-12 bg-white/10 rounded" />
-                </div>
-              ))}
+        <div className="flex-1 overflow-y-auto px-4 pb-4">
+          <div className="flex flex-col gap-6 py-4">
+            {/* Header Card Skeleton */}
+            <div className="rounded-2xl bg-white/5 p-6 pb-7 min-h-[200px] animate-pulse">
+              <div className="h-6 w-32 bg-white/10 rounded mb-4" />
+              <div className="h-8 w-3/4 bg-white/10 rounded mb-3" />
+              <div className="h-4 w-full bg-white/10 rounded mb-2" />
+              <div className="h-4 w-1/2 bg-white/10 rounded" />
             </div>
-          </div>
 
-          {/* Track List Skeleton */}
-          <div className="w-full max-w-sm mx-auto">
-            <div className="flex items-center justify-between mb-4 px-2">
-              <div className="h-6 w-20 bg-white/5 rounded animate-pulse" />
-              <div className="h-5 w-16 bg-white/5 rounded animate-pulse" />
+            {/* Controls Skeleton */}
+            <div className="flex items-center justify-center gap-6">
+              <div className="w-10 h-10 bg-white/5 rounded-full animate-pulse" />
+              <div className="w-10 h-10 bg-white/5 rounded-full animate-pulse" />
+              <div className="w-14 h-14 bg-white/5 rounded-full animate-pulse" />
+              <div className="w-10 h-10 bg-white/5 rounded-full animate-pulse" />
+              <div className="w-10 h-10 bg-white/5 rounded-full animate-pulse" />
             </div>
-            <div className="space-y-2">
-              {Array.from({ length: 5 }).map((_, i) => (
-                <div key={i} className="h-16 bg-white/5 rounded-2xl animate-pulse" />
+
+            {/* Track List Skeleton */}
+            <div className="flex flex-col gap-3">
+              {Array.from({ length: 8 }).map((_, i) => (
+                <div key={i} className="h-16 bg-white/5 rounded-xl animate-pulse" />
               ))}
             </div>
           </div>
@@ -1347,11 +1548,12 @@ export const PlaylistPlayerScreen: React.FC<PlaylistPlayerScreenProps> = ({ onPl
   return (
     <PlaylistPlayer
       playlistData={playlistData}
-      autoPlay={false}
+      autoPlay={true}
       startTrackIndex={0}
       onPlayerVisibilityChange={onPlayerVisibilityChange}
       onShowAuthModal={handleShowAuthModal}
       onOpenMusicPlayer={onOpenMusicPlayer}
+      isListenerCurationsPlaylist={isListenerCurationsPlaylist}
     />
   );
 };
