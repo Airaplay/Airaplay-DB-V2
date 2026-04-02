@@ -1,14 +1,12 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { useLocation, useNavigate } from 'react-router-dom';
 import { Spinner } from '../../components/Spinner';
-import { Heart, ArrowDownToLine, SkipBack, SkipForward, Play, Pause, Share2, MessageCircle, Gift, Plus, Check, Flag, X } from 'lucide-react';
+import { Heart, Download, SkipBack, SkipForward, Play, Pause, Share2, MessageCircle, Gift, Plus, Check, Flag, X } from 'lucide-react';
 import { Avatar, AvatarFallback, AvatarImage } from '../../components/ui/avatar';
-import { isQualifiedPlaybackDurationSeconds, recordPlayback } from '../../lib/playbackTracker';
+import { recordPlayback } from '../../lib/playbackTracker';
 import { supabase, isSongFavorited, toggleSongFavorite, recordShareEvent, isFollowing, followUser, unfollowUser, getRandomSongs, getFollowerCount, getUserPlaylistsForSong, toggleSongInPlaylist, getContentCommentsCount } from '../../lib/supabase';
 import { shareSong } from '../../lib/shareService';
-import { useOfflineSong } from '../../hooks/useOfflineSong';
-import { deleteOfflineSong, downloadOfflineSong } from '../../lib/offlineAudioService';
-import { ensureOfflineDownloadAllowedWithPaywall } from '../../lib/offlineDownloadEntitlement';
+import { useDownloadManager } from '../../hooks/useDownloadManager';
 import { useMusicPlayer } from '../../hooks/useMusicPlayer';
 import { useAuth } from '../../contexts/AuthContext';
 import { useAlert } from '../../contexts/AlertContext';
@@ -112,7 +110,7 @@ export const MusicPlayerScreen: React.FC<MusicPlayerScreenProps> = ({
   const location = useLocation();
   const navigate = useNavigate();
   const { user, session, isAuthenticated, isInitialized } = useAuth();
-  const { showAlert, showConfirm } = useAlert();
+  const { showAlert } = useAlert();
   const audioRef = useRef<HTMLAudioElement>(null);
   const videoRef = useRef<HTMLVideoElement>(null);
   const [internalIsPlaying, setInternalIsPlaying] = useState(false);
@@ -158,7 +156,7 @@ export const MusicPlayerScreen: React.FC<MusicPlayerScreenProps> = ({
     }
   }, []));
 
-  const { isAvailable: songIsDownloaded } = useOfflineSong(song?.id);
+  const { isDownloaded, downloadSong, deleteSong, getDownloadProgress } = useDownloadManager();
   const [isDownloadInProgress, setIsDownloadInProgress] = useState(false);
   const [showDownloadConfirm, setShowDownloadConfirm] = useState(false);
 
@@ -827,17 +825,6 @@ export const MusicPlayerScreen: React.FC<MusicPlayerScreenProps> = ({
     if (playbackStartTimeRef.current && !hasRecordedPlaybackRef.current) {
       const durationListened = Math.floor((Date.now() - playbackStartTimeRef.current) / 1000);
       recordPlayback(song.id, durationListened, !!song.videoUrl, false, session ?? undefined);
-      if (!song.videoUrl && isQualifiedPlaybackDurationSeconds(durationListened, { isVideo: false, isClip: false })) {
-        try {
-          window.dispatchEvent(
-            new CustomEvent('qualifiedSongListen', {
-              detail: { songId: song.id, durationListenedSeconds: durationListened },
-            })
-          );
-        } catch {
-          // Never block playback.
-        }
-      }
       hasRecordedPlaybackRef.current = true;
       playbackStartTimeRef.current = null;
     }
@@ -911,10 +898,6 @@ export const MusicPlayerScreen: React.FC<MusicPlayerScreenProps> = ({
   };
 
   const handleToggleDownload = async () => {
-    if (!isAuthenticated) {
-      onShowAuthModal?.();
-      return;
-    }
     if (!song.audioUrl) {
       showAlert({
         title: 'Cannot Download',
@@ -923,36 +906,37 @@ export const MusicPlayerScreen: React.FC<MusicPlayerScreenProps> = ({
       });
       return;
     }
-    if (songIsDownloaded) {
-      await deleteOfflineSong(song.id);
-      showAlert({
-        title: 'Download Removed',
-        message: 'Song removed from offline downloads',
-        type: 'success'
-      });
-      return;
-    }
 
-    setShowDownloadConfirm(true);
+    const songIsDownloaded = isDownloaded(song.id);
+
+    if (songIsDownloaded) {
+      const downloadedSongs = JSON.parse(localStorage.getItem('downloaded_songs') || '[]');
+      const downloadedSong = downloadedSongs.find((ds: any) => ds.songId === song.id);
+      if (downloadedSong) {
+        deleteSong(downloadedSong.id);
+        showAlert({
+          title: 'Download Removed',
+          message: 'Song removed from offline downloads',
+          type: 'success'
+        });
+      }
+    } else {
+      setShowDownloadConfirm(true);
+    }
   };
 
   const handleConfirmDownload = async () => {
     setShowDownloadConfirm(false);
     setIsDownloadInProgress(true);
     try {
-      const allowed = await ensureOfflineDownloadAllowedWithPaywall(showConfirm, showAlert);
-      if (!allowed) return;
-
-      await downloadOfflineSong(
-        {
-          songId: song.id,
-          title: song.title,
-          artist: song.artist,
-          coverImageUrl: song.coverImageUrl || null,
-          durationSeconds: typeof song.duration === 'number' ? song.duration : null,
-        },
-        song.audioUrl
-      );
+      await downloadSong({
+        id: song.id,
+        title: song.title,
+        artist: song.artist,
+        duration: formatTime(song.duration || 0),
+        audioUrl: song.audioUrl,
+        coverImageUrl: song.coverImageUrl || undefined,
+      });
       showAlert({
         title: 'Download Complete',
         message: 'Song downloaded for offline listening!',
@@ -962,7 +946,7 @@ export const MusicPlayerScreen: React.FC<MusicPlayerScreenProps> = ({
       console.error('Error downloading song:', error);
       showAlert({
         title: 'Download Failed',
-        message: error instanceof Error ? error.message : 'Failed to download song. Please try again.',
+        message: 'Failed to download song. Please try again.',
         type: 'error'
       });
     } finally {
@@ -1097,7 +1081,8 @@ export const MusicPlayerScreen: React.FC<MusicPlayerScreenProps> = ({
     onClose();
   };
 
-  const downloadProgress = null;
+  const songIsDownloaded = isDownloaded(song.id);
+  const downloadProgress = getDownloadProgress(song.id);
 
   return (
     <div className="music-player-root fixed inset-0 z-50 flex flex-col bg-[#0a0a0a] animate-in fade-in duration-300 touch-manipulation overflow-hidden pb-[env(safe-area-inset-bottom,0px)]">
@@ -1345,24 +1330,6 @@ export const MusicPlayerScreen: React.FC<MusicPlayerScreenProps> = ({
                     </>
                   )}
                 </div>
-                <button
-                  type="button"
-                  onClick={handleToggleDownload}
-                  disabled={isDownloadInProgress || !song.audioUrl}
-                  className={cn(
-                    'p-2 rounded-full transition-all',
-                    songIsDownloaded ? 'text-[#00ad74]' : 'text-white/80 hover:text-white hover:bg-white/10',
-                    (isDownloadInProgress || !song.audioUrl) && 'opacity-50 cursor-not-allowed'
-                  )}
-                  title={songIsDownloaded ? 'Remove offline download' : 'Download for offline'}
-                  aria-label={songIsDownloaded ? 'Remove offline download' : 'Download for offline'}
-                >
-                  {isDownloadInProgress ? (
-                    <Spinner size={18} className="text-white/80" />
-                  ) : (
-                    <ArrowDownToLine className="w-[18px] h-[18px]" strokeWidth={2.25} />
-                  )}
-                </button>
                 <button
                   onClick={handleShare}
                   className="p-2 rounded-full text-white/80 hover:text-white hover:bg-white/10 transition-all"
