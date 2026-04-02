@@ -3,6 +3,7 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from '../../components/ui/ta
 import { Card } from '../../components/ui/card';
 import { DollarSign, Settings, CreditCard, Package, BarChart, Download, Clock, Coins, RefreshCw, TrendingUp, AlertTriangle, Users, Wallet } from 'lucide-react';
 import { supabase } from '../../lib/supabase';
+import { sanitizeForFilter } from '../../lib/filterSecurity';
 import { useEffect } from 'react';
 import { RevenueBreakdownChart } from '../../components/RevenueBreakdownChart';
 import { CollabSettingsTab } from './CollabSettingsTab';
@@ -173,74 +174,79 @@ const WithdrawalSettingsTab = () => {
     }).format(amount);
   };
 
-  const inputCls = "w-full px-3 py-2 bg-gray-50 border border-gray-200 rounded-lg text-sm text-gray-900 focus:outline-none focus:ring-2 focus:ring-[#309605] focus:border-transparent";
-  const labelCls = "block text-xs font-medium text-gray-600 mb-1.5";
-
   if (isLoading) {
     return (
-      <div className="space-y-4 animate-pulse">
-        <div className="h-48 bg-gray-100 rounded-xl" />
-        <div className="h-32 bg-gray-100 rounded-xl" />
-      </div>
+      <Card className="bg-white rounded-lg shadow p-6">
+        <div className="flex items-center justify-center py-12">
+          <LoadingLogo variant="pulse" size={32} />
+          <p className="ml-4 text-gray-700">Loading withdrawal settings...</p>
+        </div>
+      </Card>
     );
   }
 
   return (
-    <div className="space-y-4">
+    <div className="space-y-6">
       <div className="flex items-center justify-between">
-        <div className="flex items-center gap-2">
-          <div className="w-6 h-6 rounded-md bg-green-50 flex items-center justify-center">
-            <Settings className="w-3.5 h-3.5 text-[#309605]" />
-          </div>
-          <p className="text-sm font-semibold text-gray-800">Withdrawal Settings</p>
-        </div>
+        <h3 className="text-xl font-semibold text-gray-900">Withdrawal Settings</h3>
         <button
           onClick={fetchWithdrawalSettings}
-          className="p-1.5 bg-gray-50 hover:bg-gray-100 border border-gray-200 rounded-lg text-gray-500 transition-colors"
+          className="p-2 bg-gray-100 hover:bg-gray-200 rounded-lg text-gray-700"
           title="Refresh"
         >
-          <RefreshCw className="w-3.5 h-3.5" />
+          <RefreshCw className="w-5 h-5" />
         </button>
       </div>
 
+      {/* Success/Error Messages */}
       {(success || error) && (
-        <div className={`p-3 rounded-lg text-xs font-medium ${
-          error ? 'bg-red-50 border border-red-100 text-red-700' : 'bg-green-50 border border-green-100 text-green-700'
+        <div className={`p-4 rounded-lg ${
+          error ? 'bg-red-100 border border-red-200' : 'bg-green-100 border border-green-200'
         }`}>
-          {error || success}
+          <p className={`${
+            error ? 'text-red-700' : 'text-green-700'
+          }`}>
+            {error || success}
+          </p>
         </div>
       )}
 
-      <div className="bg-white rounded-xl border border-gray-100 shadow-sm p-5">
-        <form onSubmit={handleSubmit} className="space-y-5">
-          <div className="flex items-center justify-between p-3 bg-gray-50 border border-gray-100 rounded-lg">
-            <div>
-              <p className="text-sm font-medium text-gray-800">Enable Withdrawals</p>
-              <p className="text-xs text-gray-500 mt-0.5">Allow users to withdraw treat earnings to USD</p>
-            </div>
-            <label className="relative inline-flex items-center cursor-pointer flex-shrink-0">
-              <input
-                type="checkbox"
-                name="is_withdrawal_enabled"
-                checked={settings.is_withdrawal_enabled}
-                onChange={handleInputChange}
-                className="sr-only"
-              />
-              <div className={`w-10 h-5.5 rounded-full transition-colors duration-200 ${
-                settings.is_withdrawal_enabled ? 'bg-[#309605]' : 'bg-gray-300'
-              }`} style={{ height: '22px', width: '40px' }}>
-                <div className={`w-4 h-4 bg-white rounded-full shadow transform transition-transform duration-200 ${
-                  settings.is_withdrawal_enabled ? 'translate-x-5' : 'translate-x-0.5'
-                } mt-[3px] ml-[3px]`} />
+      <Card className="bg-white rounded-lg shadow">
+        <div className="p-6">
+          <form onSubmit={handleSubmit} className="space-y-6">
+            {/* Withdrawal Enable/Disable */}
+            <div className="flex items-center justify-between p-4 bg-gray-50 rounded-lg">
+              <div>
+                <h4 className="font-medium text-gray-900 mb-1">Enable Withdrawals</h4>
+                <p className="text-gray-600 text-sm">
+                  Allow users to withdraw their treat earnings to USD
+                </p>
               </div>
-            </label>
-          </div>
+              <label className="relative inline-flex items-center cursor-pointer">
+                <input
+                  type="checkbox"
+                  name="is_withdrawal_enabled"
+                  checked={settings.is_withdrawal_enabled}
+                  onChange={handleInputChange}
+                  className="sr-only"
+                />
+                <div className={`w-11 h-6 rounded-full transition-colors duration-200 ${
+                  settings.is_withdrawal_enabled ? 'bg-[#309605]' : 'bg-gray-300'
+                }`}>
+                  <div className={`w-5 h-5 bg-white rounded-full shadow transform transition-transform duration-200 ${
+                    settings.is_withdrawal_enabled ? 'translate-x-5' : 'translate-x-0'
+                  } mt-0.5 ml-0.5`}></div>
+                </div>
+              </label>
+            </div>
 
-          <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+            {/* Minimum Withdrawal Amount */}
             <div>
-              <label className={labelCls}>Minimum Withdrawal Amount (USD)</label>
+              <label className="block text-gray-700 text-sm font-medium mb-2">
+                Minimum Withdrawal Amount (USD) *
+              </label>
               <div className="relative">
-                <span className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-400 text-sm">$</span>
+                <span className="absolute left-3 top-1/2 transform -translate-y-1/2 text-gray-500">$</span>
                 <input
                   type="number"
                   name="minimum_withdrawal_amount"
@@ -249,17 +255,22 @@ const WithdrawalSettingsTab = () => {
                   min="1"
                   step="0.01"
                   required
-                  className={`${inputCls} pl-7`}
+                  className="w-full pl-8 pr-4 py-3 bg-white border border-gray-300 rounded-lg text-gray-900 focus:outline-none focus:ring-2 focus:ring-[#309605] focus:border-[#309605]"
                   placeholder="10.00"
                 />
               </div>
-              <p className="mt-1 text-xs text-gray-400">Minimum before users can request withdrawal</p>
+              <p className="mt-1 text-xs text-gray-500">
+                Users must accumulate at least this amount before they can request a withdrawal
+              </p>
             </div>
 
+            {/* Treat to USD Rate */}
             <div>
-              <label className={labelCls}>Treat to USD Rate</label>
+              <label className="block text-gray-700 text-sm font-medium mb-2">
+                Treat to USD Conversion Rate *
+              </label>
               <div className="relative">
-                <span className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-400 text-sm">$</span>
+                <span className="absolute left-3 top-1/2 transform -translate-y-1/2 text-gray-500">$</span>
                 <input
                   type="number"
                   name="treat_to_usd_rate"
@@ -268,132 +279,169 @@ const WithdrawalSettingsTab = () => {
                   min="0.001"
                   step="0.001"
                   required
-                  className={`${inputCls} pl-7`}
+                  className="w-full pl-8 pr-4 py-3 bg-white border border-gray-300 rounded-lg text-gray-900 focus:outline-none focus:ring-2 focus:ring-[#309605] focus:border-[#309605]"
                   placeholder="1.000"
                 />
               </div>
-              <p className="mt-1 text-xs text-[#309605] font-medium">1 Treat = {formatCurrency(settings.treat_to_usd_rate)} · 100 treats = {formatCurrency(100 * settings.treat_to_usd_rate)}</p>
-            </div>
-          </div>
-
-          <div className="border-t border-gray-100 pt-4">
-            <div className="flex items-center gap-2 mb-3">
-              <div className="w-6 h-6 rounded-md bg-yellow-50 flex items-center justify-center">
-                <DollarSign className="w-3.5 h-3.5 text-yellow-600" />
-              </div>
-              <p className="text-xs font-semibold text-gray-700">Withdrawal Fees</p>
-            </div>
-            <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-              <div>
-                <label className={labelCls}>Percentage Fee (%)</label>
-                <div className="relative">
-                  <input
-                    type="number"
-                    name="withdrawal_fee_percentage"
-                    value={settings.withdrawal_fee_percentage}
-                    onChange={handleInputChange}
-                    min="0"
-                    max="100"
-                    step="0.1"
-                    className={`${inputCls} pr-7`}
-                    placeholder="0.0"
-                  />
-                  <span className="absolute right-3 top-1/2 -translate-y-1/2 text-gray-400 text-sm">%</span>
-                </div>
-                <p className="mt-1 text-xs text-gray-400">Percentage of withdrawal amount</p>
-              </div>
-
-              <div>
-                <label className={labelCls}>Fixed Fee (USD)</label>
-                <div className="relative">
-                  <span className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-400 text-sm">$</span>
-                  <input
-                    type="number"
-                    name="withdrawal_fee_fixed"
-                    value={settings.withdrawal_fee_fixed}
-                    onChange={handleInputChange}
-                    min="0"
-                    step="0.01"
-                    className={`${inputCls} pl-7`}
-                    placeholder="0.00"
-                  />
-                </div>
-                <p className="mt-1 text-xs text-gray-400">Fixed amount per withdrawal</p>
-              </div>
-            </div>
-
-            <div className="mt-3 p-3 bg-amber-50 border border-amber-100 rounded-lg">
-              <p className="text-xs font-medium text-amber-700 mb-1">Fee example for $100.00 withdrawal:</p>
-              <div className="text-xs text-amber-600 space-y-0.5">
-                <p>Percentage fee: {formatCurrency(100 * (settings.withdrawal_fee_percentage / 100))} · Fixed fee: {formatCurrency(settings.withdrawal_fee_fixed)}</p>
-                <p className="font-semibold">User receives: {formatCurrency(100 - ((100 * (settings.withdrawal_fee_percentage / 100)) + settings.withdrawal_fee_fixed))}</p>
-              </div>
-            </div>
-          </div>
-
-          <div className="border-t border-gray-100 pt-4">
-            <p className="text-xs font-semibold text-gray-600 mb-3">Current Settings Summary</p>
-            <div className="grid grid-cols-3 gap-3">
-              <div className="p-3 bg-gray-50 border border-gray-100 rounded-lg">
-                <div className="flex items-center gap-1.5 mb-1">
-                  <div className={`w-2 h-2 rounded-full ${settings.is_withdrawal_enabled ? 'bg-green-500' : 'bg-red-400'}`} />
-                  <span className="text-xs font-medium text-gray-600">Status</span>
-                </div>
-                <p className={`text-xs font-semibold ${settings.is_withdrawal_enabled ? 'text-green-700' : 'text-red-600'}`}>
-                  {settings.is_withdrawal_enabled ? 'Enabled' : 'Disabled'}
+              <p className="mt-1 text-xs text-gray-500">
+                How much USD each treat is worth (e.g., 0.01 means 1 treat = $0.01)
+              </p>
+              <div className="mt-2 p-3 bg-blue-50 border border-blue-200 rounded-lg">
+                <p className="text-blue-700 text-sm">
+                  <strong>Current Rate:</strong> 1 Treat = {formatCurrency(settings.treat_to_usd_rate)}
+                </p>
+                <p className="text-blue-600 text-xs mt-1">
+                  Example: 100 treats = {formatCurrency(100 * settings.treat_to_usd_rate)}
                 </p>
               </div>
+            </div>
 
-              <div className="p-3 bg-gray-50 border border-gray-100 rounded-lg">
-                <div className="flex items-center gap-1.5 mb-1">
-                  <DollarSign className="w-3 h-3 text-blue-500" />
-                  <span className="text-xs font-medium text-gray-600">Minimum</span>
+            {/* Withdrawal Fees Section */}
+            <div className="border-t border-gray-200 pt-6">
+              <h4 className="font-medium text-gray-900 mb-4 flex items-center">
+                <DollarSign className="w-5 h-5 mr-2 text-yellow-600" />
+                Withdrawal Fees
+              </h4>
+              
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                {/* Percentage Fee */}
+                <div>
+                  <label className="block text-gray-700 text-sm font-medium mb-2">
+                    Percentage Fee (%)
+                  </label>
+                  <div className="relative">
+                    <input
+                      type="number"
+                      name="withdrawal_fee_percentage"
+                      value={settings.withdrawal_fee_percentage}
+                      onChange={handleInputChange}
+                      min="0"
+                      max="100"
+                      step="0.1"
+                      className="w-full px-4 py-3 bg-white border border-gray-300 rounded-lg text-gray-900 focus:outline-none focus:ring-2 focus:ring-[#309605] focus:border-[#309605]"
+                      placeholder="0.0"
+                    />
+                    <span className="absolute right-3 top-1/2 transform -translate-y-1/2 text-gray-500">%</span>
+                  </div>
+                  <p className="mt-1 text-xs text-gray-500">
+                    Percentage of withdrawal amount charged as fee
+                  </p>
                 </div>
-                <p className="text-xs font-semibold text-gray-800">{formatCurrency(settings.minimum_withdrawal_amount)}</p>
+
+                {/* Fixed Fee */}
+                <div>
+                  <label className="block text-gray-700 text-sm font-medium mb-2">
+                    Fixed Fee (USD)
+                  </label>
+                  <div className="relative">
+                    <span className="absolute left-3 top-1/2 transform -translate-y-1/2 text-gray-500">$</span>
+                    <input
+                      type="number"
+                      name="withdrawal_fee_fixed"
+                      value={settings.withdrawal_fee_fixed}
+                      onChange={handleInputChange}
+                      min="0"
+                      step="0.01"
+                      className="w-full pl-8 pr-4 py-3 bg-white border border-gray-300 rounded-lg text-gray-900 focus:outline-none focus:ring-2 focus:ring-[#309605] focus:border-[#309605]"
+                      placeholder="0.00"
+                    />
+                  </div>
+                  <p className="mt-1 text-xs text-gray-500">
+                    Fixed amount charged for each withdrawal
+                  </p>
+                </div>
               </div>
 
-              <div className="p-3 bg-gray-50 border border-gray-100 rounded-lg">
-                <div className="flex items-center gap-1.5 mb-1">
-                  <Coins className="w-3 h-3 text-yellow-500" />
-                  <span className="text-xs font-medium text-gray-600">Rate</span>
+              {/* Fee Calculation Example */}
+              <div className="mt-4 p-4 bg-yellow-50 border border-yellow-200 rounded-lg">
+                <h5 className="font-medium text-yellow-800 mb-2">Fee Calculation Example</h5>
+                <div className="text-yellow-700 text-sm space-y-1">
+                  <p>For a $100.00 withdrawal:</p>
+                  <p>• Percentage fee: {formatCurrency(100 * (settings.withdrawal_fee_percentage / 100))}</p>
+                  <p>• Fixed fee: {formatCurrency(settings.withdrawal_fee_fixed)}</p>
+                  <p>• Total fees: {formatCurrency((100 * (settings.withdrawal_fee_percentage / 100)) + settings.withdrawal_fee_fixed)}</p>
+                  <p className="font-medium">• User receives: {formatCurrency(100 - ((100 * (settings.withdrawal_fee_percentage / 100)) + settings.withdrawal_fee_fixed))}</p>
                 </div>
-                <p className="text-xs font-semibold text-gray-800">1 = {formatCurrency(settings.treat_to_usd_rate)}</p>
-              </div>
               </div>
             </div>
 
-          <div className="flex justify-end pt-3 border-t border-gray-100">
+            {/* Current Status Summary */}
+            <div className="border-t border-gray-200 pt-6">
+              <h4 className="font-medium text-gray-900 mb-4">Current Settings Summary</h4>
+              <div className="grid grid-cols-3 gap-4">
+                <div className="p-4 bg-gray-50 rounded-lg">
+                  <div className="flex items-center gap-2 mb-2">
+                    <div className={`w-3 h-3 rounded-full ${settings.is_withdrawal_enabled ? 'bg-green-500' : 'bg-red-500'}`}></div>
+                    <span className="font-medium text-gray-900">Status</span>
+                  </div>
+                  <p className={`text-sm ${settings.is_withdrawal_enabled ? 'text-green-700' : 'text-red-700'}`}>
+                    {settings.is_withdrawal_enabled ? 'Withdrawals Enabled' : 'Withdrawals Disabled'}
+                  </p>
+                </div>
+                
+                <div className="p-4 bg-gray-50 rounded-lg">
+                  <div className="flex items-center gap-2 mb-2">
+                    <DollarSign className="w-4 h-4 text-blue-600" />
+                    <span className="font-medium text-gray-900">Minimum</span>
+                  </div>
+                  <p className="text-sm text-gray-700">
+                    {formatCurrency(settings.minimum_withdrawal_amount)}
+                  </p>
+                </div>
+                
+                <div className="p-4 bg-gray-50 rounded-lg">
+                  <div className="flex items-center gap-2 mb-2">
+                    <Coins className="w-4 h-4 text-yellow-600" />
+                    <span className="font-medium text-gray-900">Exchange Rate</span>
+                  </div>
+                  <p className="text-sm text-gray-700">
+                    1 Treat = {formatCurrency(settings.treat_to_usd_rate)}
+                  </p>
+                </div>
+              </div>
+            </div>
+
+            {/* Submit Button */}
+            <div className="flex justify-end pt-4">
               <button
                 type="submit"
                 disabled={isSubmitting}
-                className="flex items-center gap-2 px-4 py-2 bg-[#309605] hover:bg-[#3ba208] disabled:opacity-50 disabled:cursor-not-allowed rounded-lg text-white text-sm font-medium transition-colors"
+                className="px-6 py-3 bg-gradient-to-r from-[#309605] to-[#3ba208] hover:from-[#3ba208] hover:to-[#309605] disabled:opacity-50 disabled:cursor-not-allowed rounded-lg text-white font-medium transition-all duration-200 shadow-lg shadow-[#309605]/25 flex items-center gap-2"
               >
                 {isSubmitting ? (
                   <>
-                    <LoadingLogo variant="pulse" size={16} />
-                    Saving...
+                    <LoadingLogo variant="pulse" size={20} />
+                    <span>Saving...</span>
                   </>
                 ) : (
                   <>
-                    <Settings className="w-4 h-4" />
-                    Save Settings
+                    <Settings className="w-5 h-5" />
+                    <span>Save Settings</span>
                   </>
                 )}
               </button>
             </div>
-        </form>
-      </div>
+          </form>
+        </div>
+      </Card>
 
-      <div className="p-3 bg-blue-50 border border-blue-100 rounded-lg">
-        <p className="text-xs font-semibold text-blue-700 mb-1.5">Important Information</p>
-        <ul className="space-y-1 text-xs text-blue-600">
-          <li>• Withdrawal settings apply globally to all users</li>
-          <li>• Disabling withdrawals prevents all new withdrawal requests</li>
-          <li>• Existing pending withdrawals will not be affected by changes</li>
-          <li>• The treat-to-USD rate affects how much users receive when withdrawing</li>
-          <li>• Changes take effect immediately after saving</li>
-        </ul>
-      </div>
+      {/* Information Card */}
+      <Card className="bg-blue-50 border border-blue-200">
+        <div className="p-6">
+          <h4 className="font-medium text-blue-800 mb-3 flex items-center">
+            <AlertTriangle className="w-5 h-5 mr-2" />
+            Important Information
+          </h4>
+          <ul className="space-y-2 text-blue-700 text-sm">
+            <li>• Withdrawal settings apply globally to all users</li>
+            <li>• Disabling withdrawals will prevent all new withdrawal requests</li>
+            <li>• Existing pending withdrawals will not be affected by settings changes</li>
+            <li>• The treat-to-USD rate affects how much users receive when withdrawing</li>
+            <li>• Fees are deducted from the withdrawal amount before sending to users</li>
+            <li>• Changes take effect immediately after saving</li>
+          </ul>
+        </div>
+      </Card>
     </div>
   );
 };
@@ -648,114 +696,189 @@ const OverviewTab = () => {
 
   if (isLoading) {
     return (
-      <div className="space-y-3 animate-pulse">
-        <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
-          {[1,2,3,4].map(i => <div key={i} className="bg-gray-100 rounded-xl h-24" />)}
+      <Card className="bg-white rounded-lg shadow p-6">
+        <div className="flex items-center justify-center py-12">
+          <LoadingLogo variant="pulse" size={32} />
+          <p className="ml-4 text-gray-700">Loading treat overview...</p>
         </div>
-        <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
-          {[1,2].map(i => <div key={i} className="bg-gray-100 rounded-xl h-40" />)}
-        </div>
-      </div>
+      </Card>
     );
   }
 
   if (error) {
     return (
-      <div className="bg-white rounded-xl border border-gray-100 shadow-sm p-6 text-center">
-        <div className="w-10 h-10 bg-red-50 rounded-full flex items-center justify-center mx-auto mb-3">
-          <AlertTriangle className="w-5 h-5 text-red-500" />
+      <Card className="bg-white rounded-lg shadow p-6">
+        <div className="p-6 bg-red-100 border border-red-200 rounded-lg text-center">
+          <AlertTriangle className="w-8 h-8 text-red-500 mx-auto mb-2" />
+          <p className="text-red-700">{error}</p>
+          <button
+            onClick={fetchOverviewData}
+            className="mt-4 px-4 py-2 bg-red-100 hover:bg-red-200 text-red-700 rounded-lg"
+          >
+            Try Again
+          </button>
         </div>
-        <p className="text-sm text-red-600 mb-3">{error}</p>
-        <button onClick={fetchOverviewData} className="px-3 py-1.5 text-xs bg-red-50 hover:bg-red-100 text-red-700 rounded-lg border border-red-100 transition-colors">
-          Try Again
-        </button>
-      </div>
+      </Card>
     );
   }
 
   return (
-    <div className="space-y-4">
+    <div className="space-y-6">
       <div className="flex items-center justify-between">
-        <div className="flex items-center gap-2">
-          <div className="w-6 h-6 rounded-md bg-green-50 flex items-center justify-center">
-            <DollarSign className="w-3.5 h-3.5 text-[#309605]" />
-          </div>
-          <p className="text-sm font-semibold text-gray-800">Treat System Overview</p>
+        <div>
+          <h3 className="text-xl font-semibold text-gray-900">Treat System Overview</h3>
           {lastUpdated && (
-            <span className="text-xs text-gray-400">· Updated {lastUpdated.toLocaleTimeString()}</span>
+            <p className="text-sm text-gray-500 mt-1">
+              Last updated: {lastUpdated.toLocaleTimeString()}
+            </p>
           )}
         </div>
         <button
           onClick={fetchOverviewData}
-          className="p-1.5 bg-gray-50 hover:bg-gray-100 border border-gray-200 rounded-lg text-gray-500 transition-colors"
-          title="Refresh"
+          className="p-2 bg-gray-100 hover:bg-gray-200 rounded-lg text-gray-700"
+          title="Refresh data"
         >
-          <RefreshCw className="w-3.5 h-3.5" />
+          <RefreshCw className="w-5 h-5" />
         </button>
       </div>
 
-      <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
-        {[
-          { label: 'Total Revenue', value: new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD' }).format(overviewData.totalTreatsRevenue), sub: `${formatNumber(overviewData.totalTreatsSold)} treats sold`, icon: <DollarSign className="w-3.5 h-3.5 text-green-600" />, bg: 'bg-green-50' },
-          { label: 'Treats Sent Out', value: formatNumber(overviewData.totalTreatsSentOut), sub: 'Tips and purchases', icon: <TrendingUp className="w-3.5 h-3.5 text-blue-600" />, bg: 'bg-blue-50' },
-          { label: 'Promotion Spending', value: formatNumber(overviewData.totalTreatsSpentOnPromotions), sub: `${formatNumber(overviewData.totalBonusTreatsGiven)} bonuses`, icon: <BarChart className="w-3.5 h-3.5 text-orange-600" />, bg: 'bg-orange-50' },
-          { label: 'Pending Withdrawals', value: overviewData.pendingWithdrawals.toString(), sub: `${formatCurrency(overviewData.pendingWithdrawalAmount)} pending`, icon: <Clock className="w-3.5 h-3.5 text-yellow-600" />, bg: 'bg-yellow-50' },
-        ].map((stat) => (
-          <div key={stat.label} className="bg-white rounded-xl border border-gray-100 shadow-sm p-4">
-            <div className="flex items-center gap-2 mb-2">
-              <div className={`w-6 h-6 rounded-md ${stat.bg} flex items-center justify-center`}>{stat.icon}</div>
-              <p className="text-xs font-medium text-gray-500 leading-tight">{stat.label}</p>
+      {/* Stats Cards */}
+      <div className="grid grid-cols-4 gap-4">
+        <Card className="bg-white rounded-lg shadow p-6">
+          <div className="flex items-center justify-between mb-4">
+            <h4 className="text-gray-700 font-medium">Total Revenue (USD)</h4>
+            <div className="w-10 h-10 rounded-full bg-green-100 flex items-center justify-center">
+              <DollarSign className="w-5 h-5 text-green-600" />
             </div>
-            <p className="text-xl font-bold text-gray-900">{stat.value}</p>
-            <p className="text-xs text-gray-400 mt-0.5">{stat.sub}</p>
           </div>
-        ))}
+          <div className="flex items-end justify-between">
+            <div>
+              <p className="text-2xl font-bold text-gray-900">
+                {new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD' }).format(overviewData.totalTreatsRevenue)}
+              </p>
+              <p className="text-green-600 text-sm">from completed payments</p>
+              <p className="text-gray-500 text-xs">{formatNumber(overviewData.totalTreatsSold)} treats sold</p>
+            </div>
+          </div>
+        </Card>
+
+        <Card className="bg-white rounded-lg shadow p-6">
+          <div className="flex items-center justify-between mb-4">
+            <h4 className="text-gray-700 font-medium">Treats Sent Out</h4>
+            <div className="w-10 h-10 rounded-full bg-blue-100 flex items-center justify-center">
+              <TrendingUp className="w-5 h-5 text-blue-600" />
+            </div>
+          </div>
+          <div className="flex items-end justify-between">
+            <div>
+              <p className="text-2xl font-bold text-gray-900">{formatNumber(overviewData.totalTreatsSentOut)}</p>
+              <p className="text-blue-600 text-sm">treats spent by users</p>
+              <p className="text-gray-500 text-xs">Tips and purchases only</p>
+            </div>
+          </div>
+        </Card>
+
+        <Card className="bg-white rounded-lg shadow p-6">
+          <div className="flex items-center justify-between mb-4">
+            <h4 className="text-gray-700 font-medium">Promotion Spending</h4>
+            <div className="w-10 h-10 rounded-full bg-orange-100 flex items-center justify-center">
+              <BarChart className="w-5 h-5 text-orange-600" />
+            </div>
+          </div>
+          <div className="flex items-end justify-between">
+            <div>
+              <p className="text-2xl font-bold text-gray-900">{formatNumber(overviewData.totalTreatsSpentOnPromotions)}</p>
+              <p className="text-orange-600 text-sm">total promotion cost</p>
+              <p className="text-gray-500 text-xs">{formatNumber(overviewData.totalBonusTreatsGiven)} bonuses + {formatNumber(overviewData.totalTreatsSpentOnPromotions - overviewData.totalBonusTreatsGiven)} campaigns</p>
+            </div>
+          </div>
+        </Card>
+
+        <Card className="bg-white rounded-lg shadow p-6">
+          <div className="flex items-center justify-between mb-4">
+            <h4 className="text-gray-700 font-medium">Pending Withdrawals</h4>
+            <div className="w-10 h-10 rounded-full bg-yellow-100 flex items-center justify-center">
+              <Clock className="w-5 h-5 text-yellow-600" />
+            </div>
+          </div>
+          <div className="flex items-end justify-between">
+            <div>
+              <p className="text-2xl font-bold text-gray-900">{overviewData.pendingWithdrawals}</p>
+              <p className="text-yellow-600 text-sm">requests pending</p>
+              <p className="text-gray-500 text-xs">{formatCurrency(overviewData.pendingWithdrawalAmount)} USD total</p>
+            </div>
+          </div>
+        </Card>
       </div>
 
-      <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-        <div className="bg-white rounded-xl border border-gray-100 shadow-sm p-4">
-          <div className="flex items-center gap-2 mb-3">
-            <div className="w-6 h-6 rounded-md bg-yellow-50 flex items-center justify-center">
-              <Coins className="w-3.5 h-3.5 text-yellow-600" />
+      {/* Additional Stats */}
+      <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+        <Card className="bg-white rounded-lg shadow p-6">
+          <h4 className="text-lg font-semibold text-gray-900 mb-4 flex items-center">
+            <Coins className="w-5 h-5 mr-2 text-yellow-600" />
+            Treat System Health
+          </h4>
+          <div className="space-y-4">
+            <div className="flex justify-between items-center">
+              <span className="text-gray-700">Active Users with Wallets</span>
+              <span className="font-bold text-gray-900">{formatNumber(overviewData.totalActiveUsers)}</span>
             </div>
-            <p className="text-xs font-semibold text-gray-700">System Health</p>
+            <div className="flex justify-between items-center">
+              <span className="text-gray-700">Total Transactions</span>
+              <span className="font-bold text-gray-900">{formatNumber(overviewData.totalTransactions)}</span>
+            </div>
+            <div className="flex justify-between items-center">
+              <span className="text-gray-700">Circulation Rate</span>
+              <span className="font-bold text-gray-900">
+                {overviewData.totalTreatsSold > 0
+                  ? `${((overviewData.totalTreatsSentOut / overviewData.totalTreatsSold) * 100).toFixed(1)}%`
+                  : '0%'
+                }
+              </span>
+            </div>
           </div>
-          <div className="space-y-2">
-            {[
-              { label: 'Active Users with Wallets', value: formatNumber(overviewData.totalActiveUsers) },
-              { label: 'Total Transactions', value: formatNumber(overviewData.totalTransactions) },
-              { label: 'Circulation Rate', value: overviewData.totalTreatsSold > 0 ? `${((overviewData.totalTreatsSentOut / overviewData.totalTreatsSold) * 100).toFixed(1)}%` : '0%' },
-            ].map(({ label, value }) => (
-              <div key={label} className="flex items-center justify-between py-1.5 px-2 bg-gray-50 rounded-lg">
-                <span className="text-xs text-gray-600">{label}</span>
-                <span className="text-xs font-semibold text-gray-900">{value}</span>
-              </div>
-            ))}
-          </div>
-        </div>
+        </Card>
 
-        <div className="bg-white rounded-xl border border-gray-100 shadow-sm p-4">
-          <div className="flex items-center gap-2 mb-3">
-            <div className="w-6 h-6 rounded-md bg-blue-50 flex items-center justify-center">
-              <Download className="w-3.5 h-3.5 text-blue-600" />
-            </div>
-            <p className="text-xs font-semibold text-gray-700">Quick Actions</p>
+        <Card className="bg-white rounded-lg shadow p-6">
+          <h4 className="text-lg font-semibold text-gray-900 mb-4 flex items-center">
+            <BarChart className="w-5 h-5 mr-2 text-blue-600" />
+            Quick Actions
+          </h4>
+          <div className="space-y-3">
+            <button
+              onClick={generateRevenueReport}
+              className="w-full p-3 bg-blue-50 hover:bg-blue-100 border border-blue-200 rounded-lg text-left transition-colors duration-200"
+            >
+              <div className="flex items-center justify-between">
+                <span className="text-blue-700 font-medium">Generate Revenue Report</span>
+                <Download className="w-4 h-4 text-blue-600" />
+              </div>
+            </button>
+            <button
+              onClick={exportTransactionData}
+              className="w-full p-3 bg-green-50 hover:bg-green-100 border border-green-200 rounded-lg text-left transition-colors duration-200"
+            >
+              <div className="flex items-center justify-between">
+                <span className="text-green-700 font-medium">Export Transaction Data</span>
+                <Download className="w-4 h-4 text-green-600" />
+              </div>
+            </button>
+            <button
+              onClick={() => {
+                const analyticsSection = document.querySelector('[data-section="analytics"]');
+                if (analyticsSection) {
+                  analyticsSection.scrollIntoView({ behavior: 'smooth', block: 'start' });
+                }
+              }}
+              className="w-full p-3 bg-purple-50 hover:bg-purple-100 border border-purple-200 rounded-lg text-left transition-colors duration-200"
+            >
+              <div className="flex items-center justify-between">
+                <span className="text-purple-700 font-medium">View Analytics Dashboard</span>
+                <BarChart className="w-4 h-4 text-purple-600" />
+              </div>
+            </button>
           </div>
-          <div className="space-y-2">
-            <button onClick={generateRevenueReport} className="w-full flex items-center justify-between px-3 py-2 bg-blue-50 hover:bg-blue-100 border border-blue-100 rounded-lg transition-colors">
-              <span className="text-xs font-medium text-blue-700">Generate Revenue Report</span>
-              <Download className="w-3.5 h-3.5 text-blue-600" />
-            </button>
-            <button onClick={exportTransactionData} className="w-full flex items-center justify-between px-3 py-2 bg-green-50 hover:bg-green-100 border border-green-100 rounded-lg transition-colors">
-              <span className="text-xs font-medium text-green-700">Export Transaction Data</span>
-              <Download className="w-3.5 h-3.5 text-[#309605]" />
-            </button>
-            <button onClick={() => { const s = document.querySelector('[data-section="analytics"]'); if (s) s.scrollIntoView({ behavior: 'smooth', block: 'start' }); }} className="w-full flex items-center justify-between px-3 py-2 bg-gray-50 hover:bg-gray-100 border border-gray-100 rounded-lg transition-colors">
-              <span className="text-xs font-medium text-gray-700">View Analytics Dashboard</span>
-              <BarChart className="w-3.5 h-3.5 text-gray-500" />
-            </button>
-          </div>
-        </div>
+        </Card>
       </div>
 
       <div data-section="analytics">
@@ -1081,24 +1204,6 @@ const PaymentChannelModal = ({ channel, onClose, onSave }: {
         { key: 'secret_key', label: 'Secret Key', type: 'password' },
         { key: 'currency', label: 'Currency', type: 'text', default: 'USD' }
       ],
-      'google_pay': [
-        { key: 'merchant_id', label: 'Google Merchant ID', type: 'text', placeholder: 'BCR2DN4T...' },
-        { key: 'merchant_name', label: 'Merchant Name', type: 'text', placeholder: 'Airaplay', default: 'Airaplay' },
-        { key: 'gateway', label: 'Gateway Provider', type: 'text', placeholder: 'example', default: 'example' },
-        { key: 'gateway_merchant_id', label: 'Gateway Merchant ID', type: 'text', placeholder: 'exampleGatewayMerchantId' },
-        { key: 'environment', label: 'Environment', type: 'select', options: [
-          { value: 'TEST', label: 'Test' },
-          { value: 'PRODUCTION', label: 'Production' }
-        ], default: 'TEST' },
-        { key: 'allowed_auth_methods', label: 'Auth Methods', type: 'text', default: 'PAN_ONLY,CRYPTOGRAM_3DS', placeholder: 'PAN_ONLY,CRYPTOGRAM_3DS' },
-        { key: 'allowed_card_networks', label: 'Card Networks', type: 'text', default: 'AMEX,DISCOVER,MASTERCARD,VISA', placeholder: 'Comma-separated' },
-        { key: 'total_price_status', label: 'Price Status', type: 'select', options: [
-          { value: 'FINAL', label: 'Final' },
-          { value: 'ESTIMATED', label: 'Estimated' }
-        ], default: 'FINAL' },
-        { key: 'currency', label: 'Currency Code', type: 'text', default: 'USD', placeholder: 'USD, NGN, EUR, etc.' },
-        { key: 'country_code', label: 'Country Code', type: 'text', default: 'US', placeholder: 'US, NG, etc.' }
-      ],
       'usdt_trc20': [
         { key: 'wallet_address', label: 'Wallet Address', type: 'text' },
         { key: 'network', label: 'Network', type: 'text', default: 'TRC20' }
@@ -1166,7 +1271,6 @@ const PaymentChannelModal = ({ channel, onClose, onSave }: {
                 <option value="paystack">Paystack</option>
                 <option value="flutterwave">Flutterwave</option>
                 <option value="stripe">Stripe</option>
-                <option value="google_pay">Google Pay</option>
                 <option value="usdt_trc20">USDT (TRC20)</option>
                 <option value="usdt_erc20">USDT (ERC20)</option>
                 <option value="custom">Custom</option>
@@ -1815,7 +1919,7 @@ const TreatPackageModal = ({ package: pkg, onClose, onSave }: {
 
           <div className="border-t border-gray-200 pt-6">
             <h4 className="font-medium text-gray-900 mb-4">Package Summary</h4>
-            <div className="grid grid-cols-1 md:grid-cols-3 xl:grid-cols-4 gap-4">
+            <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
               <div className="p-4 bg-gray-50 rounded-lg">
                 <div className="flex items-center gap-2 mb-2">
                   <Coins className="w-4 h-4 text-[#309605]" />
@@ -2149,7 +2253,7 @@ const AnalyticsTab = () => {
       <Card className="bg-white rounded-lg shadow">
         <div className="p-6">
           <h4 className="text-lg font-semibold text-gray-900 mb-4 flex items-center">
-            <BarChart className="w-5 h-5 mr-2 text-[#309605]" />
+            <BarChart className="w-5 h-5 mr-2 text-purple-600" />
             Top Promotion Spenders
           </h4>
           {analyticsData?.topPromoSpenders?.length > 0 ? (
@@ -2157,7 +2261,7 @@ const AnalyticsTab = () => {
               {analyticsData.topPromoSpenders.map((user: any, index: number) => (
                 <div key={user.user_id} className="flex items-center justify-between p-4 bg-gray-50 rounded-lg hover:bg-gray-100 transition-colors duration-200">
                   <div className="flex items-center gap-3">
-                    <div className="flex items-center justify-center w-8 h-8 rounded-full bg-green-100 text-green-700 font-bold text-sm">
+                    <div className="flex items-center justify-center w-8 h-8 rounded-full bg-purple-100 text-purple-700 font-bold text-sm">
                       {index + 1}
                     </div>
                     <div>
@@ -2166,7 +2270,7 @@ const AnalyticsTab = () => {
                     </div>
                   </div>
                   <div className="text-right">
-                    <p className="font-bold text-[#309605]">{formatNumber(user.total_promotion_spent)}</p>
+                    <p className="font-bold text-purple-600">{formatNumber(user.total_promotion_spent)}</p>
                     <p className="text-xs text-gray-500">treats</p>
                   </div>
                 </div>
@@ -2230,8 +2334,9 @@ const TransactionsTab = () => {
         query = query.eq('status', statusFilter);
       }
 
-      if (searchQuery) {
-        query = query.or(`description.ilike.%${searchQuery}%`);
+      if (searchQuery?.trim()) {
+        const safe = sanitizeForFilter(searchQuery.trim());
+        if (safe) query = query.or(`description.ilike.%${safe}%`);
       }
 
       const { data, error: fetchError, count } = await query;
@@ -2360,7 +2465,7 @@ const TransactionsTab = () => {
             </div>
           </div>
 
-          <div className="grid grid-cols-2 md:grid-cols-4 xl:grid-cols-6 gap-4 mb-6">
+          <div className="grid grid-cols-4 gap-4 mb-6">
             <div>
               <label className="block text-sm font-medium text-gray-700 mb-2">
                 Search
@@ -2654,7 +2759,7 @@ const TransactionsTab = () => {
                 <button
                   onClick={() => handleDeleteTransaction(selectedTransaction.id)}
                   disabled={deletingId !== null}
-                  className="flex-1 px-4 py-2.5 bg-red-600 hover:bg-red-700 text-white rounded-lg text-sm font-medium transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+                  className="flex-1 px-4 py-3 bg-gradient-to-r from-red-600 to-red-700 hover:from-red-700 hover:to-red-800 text-white rounded-lg font-medium transition-all duration-200 shadow-lg shadow-red-600/25 disabled:opacity-50 disabled:cursor-not-allowed"
                 >
                   {deletingId ? (
                     <div className="flex items-center justify-center gap-2">
@@ -2674,53 +2779,235 @@ const TransactionsTab = () => {
   );
 };
 
+/** Admin-managed monthly Treat cost for offline downloads (table: offline_download_pricing). */
+const OfflineDownloadPricingTab = (): JSX.Element => {
+  const [rowId, setRowId] = useState<string | null>(null);
+  const [monthlyCostTreats, setMonthlyCostTreats] = useState<string>('300');
+  const [isActive, setIsActive] = useState(true);
+  const [isLoading, setIsLoading] = useState(true);
+  const [isSaving, setIsSaving] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [success, setSuccess] = useState<string | null>(null);
+
+  const load = async () => {
+    setIsLoading(true);
+    setError(null);
+    try {
+      const { data, error: qErr } = await supabase
+        .from('offline_download_pricing')
+        .select('id, monthly_cost_treats, is_active, updated_at')
+        .order('updated_at', { ascending: false });
+
+      if (qErr) {
+        throw new Error(qErr.message);
+      }
+
+      const rows = data ?? [];
+      const preferred =
+        rows.find((r) => r.is_active === true) ?? rows[0] ?? null;
+
+      if (preferred) {
+        setRowId(preferred.id);
+        setMonthlyCostTreats(String(preferred.monthly_cost_treats ?? 300));
+        setIsActive(!!preferred.is_active);
+      } else {
+        setRowId(null);
+        setMonthlyCostTreats('300');
+        setIsActive(true);
+      }
+    } catch (e) {
+      console.error(e);
+      setError(e instanceof Error ? e.message : 'Failed to load pricing');
+    } finally {
+      setIsLoading(false);
+    }
+  };
+
+  useEffect(() => {
+    void load();
+  }, []);
+
+  const handleSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setError(null);
+    setSuccess(null);
+    const cost = Math.max(0, Math.floor(Number(monthlyCostTreats)));
+    if (!Number.isFinite(cost) || String(monthlyCostTreats).trim() === '') {
+      setError('Enter a valid whole number of Treats (0 or greater).');
+      return;
+    }
+
+    setIsSaving(true);
+    try {
+      if (rowId) {
+        if (isActive) {
+          const { error: deactivateErr } = await supabase
+            .from('offline_download_pricing')
+            .update({ is_active: false })
+            .neq('id', rowId);
+          if (deactivateErr) {
+            throw new Error(deactivateErr.message);
+          }
+        }
+        const { error: upErr } = await supabase
+          .from('offline_download_pricing')
+          .update({
+            monthly_cost_treats: cost,
+            is_active: isActive,
+          })
+          .eq('id', rowId);
+        if (upErr) {
+          throw new Error(upErr.message);
+        }
+      } else {
+        const { error: insErr } = await supabase.from('offline_download_pricing').insert({
+          monthly_cost_treats: cost,
+          is_active: isActive,
+        });
+        if (insErr) {
+          throw new Error(insErr.message);
+        }
+      }
+
+      setSuccess('Saved. The app uses the latest active row for new subscriptions.');
+      await load();
+    } catch (errSave) {
+      console.error(errSave);
+      const msg = errSave instanceof Error ? errSave.message : 'Save failed';
+      setError(
+        msg.includes('permission') || msg.includes('policy') || msg.includes('42501')
+          ? 'Only admin or manager roles can change this (database policy).'
+          : msg
+      );
+    } finally {
+      setIsSaving(false);
+    }
+  };
+
+  if (isLoading) {
+    return (
+      <Card className="p-8 flex items-center justify-center gap-3">
+        <LoadingLogo variant="pulse" size={24} />
+        <span className="text-gray-600 text-sm">Loading offline download pricing…</span>
+      </Card>
+    );
+  }
+
+  return (
+    <Card className="p-6">
+      <div className="flex items-start gap-3 mb-6">
+        <div className="w-10 h-10 rounded-lg bg-[#e6f7f1] flex items-center justify-center flex-shrink-0">
+          <Download className="w-5 h-5 text-[#309605]" />
+        </div>
+        <div>
+          <h3 className="text-lg font-semibold text-gray-900">Offline download subscription</h3>
+          <p className="text-sm text-gray-500 mt-1 max-w-xl">
+            Treats charged when a user subscribes for 30 days of offline downloads. Users see this price in the app; the server reads the active row (latest by update if several are active—only one active is recommended).
+          </p>
+        </div>
+      </div>
+
+      {error && (
+        <div className="mb-4 p-3 rounded-lg bg-red-50 text-red-700 text-sm border border-red-100">
+          {error}
+        </div>
+      )}
+      {success && (
+        <div className="mb-4 p-3 rounded-lg bg-green-50 text-green-800 text-sm border border-green-100">
+          {success}
+        </div>
+      )}
+
+      <form onSubmit={handleSubmit} className="space-y-4 max-w-md">
+        <div>
+          <label htmlFor="offline-monthly-cost" className="block text-sm font-medium text-gray-700 mb-1">
+            Monthly price (Treats)
+          </label>
+          <input
+            id="offline-monthly-cost"
+            type="number"
+            min={0}
+            step={1}
+            value={monthlyCostTreats}
+            onChange={(e) => setMonthlyCostTreats(e.target.value)}
+            className="w-full px-3 py-2 border border-gray-200 rounded-lg text-gray-900 focus:ring-2 focus:ring-[#309605]/30 focus:border-[#309605] outline-none"
+          />
+        </div>
+        <label className="flex items-center gap-2 cursor-pointer">
+          <input
+            type="checkbox"
+            checked={isActive}
+            onChange={(e) => setIsActive(e.target.checked)}
+            className="rounded border-gray-300 text-[#309605] focus:ring-[#309605]"
+          />
+          <span className="text-sm text-gray-700">Pricing row is active</span>
+        </label>
+        <div className="flex flex-wrap gap-2 pt-2">
+          <button
+            type="submit"
+            disabled={isSaving}
+            className="px-4 py-2 bg-[#309605] text-white rounded-lg text-sm font-medium hover:bg-[#3ba208] disabled:opacity-60"
+          >
+            {isSaving ? 'Saving…' : 'Save'}
+          </button>
+          <button
+            type="button"
+            onClick={() => void load()}
+            className="px-4 py-2 border border-gray-200 text-gray-700 rounded-lg text-sm font-medium hover:bg-gray-50"
+          >
+            Reload
+          </button>
+        </div>
+      </form>
+    </Card>
+  );
+};
+
 export const TreatManagerSection = (): JSX.Element => {
   const [activeTab, setActiveTab] = useState('overview');
 
   return (
-    <div className="space-y-4">
-      <div className="flex items-center gap-2.5">
-        <div className="w-8 h-8 rounded-lg bg-yellow-50 flex items-center justify-center flex-shrink-0">
-          <Coins className="w-4 h-4 text-yellow-600" />
-        </div>
-        <div>
-          <h2 className="text-xl font-bold text-gray-900 leading-tight">Treat Manager</h2>
-          <p className="text-sm text-gray-400 mt-0.5">Manage treat packages, withdrawals, and payment channels</p>
-        </div>
-      </div>
+    <div className="space-y-6">
+      <h2 className="text-2xl font-bold text-gray-900">Treat Manager</h2>
 
       <Tabs value={activeTab} onValueChange={setActiveTab} className="w-full">
         <div className="overflow-x-auto scrollbar-hide mb-4">
-          <TabsList className="flex justify-start bg-gray-50 border border-gray-100 p-1 rounded-xl shadow-sm min-w-full gap-0.5">
-            <TabsTrigger value="overview" className="flex-shrink-0 px-3 py-2 text-xs font-medium rounded-lg data-[state=active]:bg-[#309605] data-[state=active]:text-white data-[state=active]:shadow-sm inline-flex items-center gap-1.5">
-              <DollarSign className="w-3.5 h-3.5" /> Overview
+          <TabsList className="flex justify-start bg-gray-100 p-1 rounded-lg shadow-sm min-w-full">
+            <TabsTrigger value="overview" className="flex-shrink-0 px-4 py-2 text-sm font-medium rounded-md data-[state=active]:bg-[#309605] data-[state=active]:text-white data-[state=active]:shadow">
+              <DollarSign className="w-4 h-4 mr-2" /> Overview
             </TabsTrigger>
-            <TabsTrigger value="withdrawal-settings" className="flex-shrink-0 px-3 py-2 text-xs font-medium rounded-lg data-[state=active]:bg-[#309605] data-[state=active]:text-white data-[state=active]:shadow-sm inline-flex items-center gap-1.5">
-              <Settings className="w-3.5 h-3.5" /> Withdrawal
+            <TabsTrigger value="offline-downloads" className="flex-shrink-0 px-4 py-2 text-sm font-medium rounded-md data-[state=active]:bg-[#309605] data-[state=active]:text-white data-[state=active]:shadow">
+              <Download className="w-4 h-4 mr-2" /> Offline downloads
             </TabsTrigger>
-            <TabsTrigger value="payment-channels" className="flex-shrink-0 px-3 py-2 text-xs font-medium rounded-lg data-[state=active]:bg-[#309605] data-[state=active]:text-white data-[state=active]:shadow-sm inline-flex items-center gap-1.5">
-              <CreditCard className="w-3.5 h-3.5" /> Channels
+            <TabsTrigger value="withdrawal-settings" className="flex-shrink-0 px-4 py-2 text-sm font-medium rounded-md data-[state=active]:bg-[#309605] data-[state=active]:text-white data-[state=active]:shadow">
+              <Settings className="w-4 h-4 mr-2" /> Withdrawal Settings
             </TabsTrigger>
-            <TabsTrigger value="treat-package" className="flex-shrink-0 px-3 py-2 text-xs font-medium rounded-lg data-[state=active]:bg-[#309605] data-[state=active]:text-white data-[state=active]:shadow-sm inline-flex items-center gap-1.5">
-              <Package className="w-3.5 h-3.5" /> Packages
+            <TabsTrigger value="payment-channels" className="flex-shrink-0 px-4 py-2 text-sm font-medium rounded-md data-[state=active]:bg-[#309605] data-[state=active]:text-white data-[state=active]:shadow">
+              <CreditCard className="w-4 h-4 mr-2" /> Payment Channels
             </TabsTrigger>
-            <TabsTrigger value="analytics" className="flex-shrink-0 px-3 py-2 text-xs font-medium rounded-lg data-[state=active]:bg-[#309605] data-[state=active]:text-white data-[state=active]:shadow-sm inline-flex items-center gap-1.5">
-              <BarChart className="w-3.5 h-3.5" /> Analytics
+            <TabsTrigger value="treat-package" className="flex-shrink-0 px-4 py-2 text-sm font-medium rounded-md data-[state=active]:bg-[#309605] data-[state=active]:text-white data-[state=active]:shadow">
+              <Package className="w-4 h-4 mr-2" /> Treat Package
             </TabsTrigger>
-            <TabsTrigger value="transactions" className="flex-shrink-0 px-3 py-2 text-xs font-medium rounded-lg data-[state=active]:bg-[#309605] data-[state=active]:text-white data-[state=active]:shadow-sm inline-flex items-center gap-1.5">
-              <Clock className="w-3.5 h-3.5" /> Transactions
+            <TabsTrigger value="analytics" className="flex-shrink-0 px-4 py-2 text-sm font-medium rounded-md data-[state=active]:bg-[#309605] data-[state=active]:text-white data-[state=active]:shadow">
+              <BarChart className="w-4 h-4 mr-2" /> Analytics
             </TabsTrigger>
-            <TabsTrigger value="collab" className="flex-shrink-0 px-3 py-2 text-xs font-medium rounded-lg data-[state=active]:bg-[#309605] data-[state=active]:text-white data-[state=active]:shadow-sm inline-flex items-center gap-1.5">
-              <Users className="w-3.5 h-3.5" /> Collab
+            <TabsTrigger value="transactions" className="flex-shrink-0 px-4 py-2 text-sm font-medium rounded-md data-[state=active]:bg-[#309605] data-[state=active]:text-white data-[state=active]:shadow">
+              <Clock className="w-4 h-4 mr-2" /> Transactions
             </TabsTrigger>
-            <TabsTrigger value="treat-users" className="flex-shrink-0 px-3 py-2 text-xs font-medium rounded-lg data-[state=active]:bg-[#309605] data-[state=active]:text-white data-[state=active]:shadow-sm inline-flex items-center gap-1.5">
-              <Wallet className="w-3.5 h-3.5" /> Users
+            <TabsTrigger value="collab" className="flex-shrink-0 px-4 py-2 text-sm font-medium rounded-md data-[state=active]:bg-[#309605] data-[state=active]:text-white data-[state=active]:shadow">
+              <Users className="w-4 h-4 mr-2" /> Collab
+            </TabsTrigger>
+            <TabsTrigger value="treat-users" className="flex-shrink-0 px-4 py-2 text-sm font-medium rounded-md data-[state=active]:bg-[#309605] data-[state=active]:text-white data-[state=active]:shadow">
+              <Wallet className="w-4 h-4 mr-2" /> Treat Users
             </TabsTrigger>
           </TabsList>
         </div>
 
         <TabsContent value="overview">
           <OverviewTab />
+        </TabsContent>
+        <TabsContent value="offline-downloads">
+          <OfflineDownloadPricingTab />
         </TabsContent>
         <TabsContent value="withdrawal-settings">
           <WithdrawalSettingsTab />
