@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useCallback } from 'react';
 import { Shield, DollarSign, Clock, TrendingUp, Save, AlertCircle, CheckCircle, Zap } from 'lucide-react';
 import { supabase } from '../../lib/supabase';
 import {
@@ -45,11 +45,7 @@ export const AdSafetyCapsSection = (): JSX.Element => {
   const [cooldownSaving, setCooldownSaving] = useState(false);
   const [cooldownNotice, setCooldownNotice] = useState<{ type: 'ok' | 'err'; text: string } | null>(null);
 
-  useEffect(() => {
-    fetchSafetyCaps();
-  }, []);
-
-  const fetchFullscreenCooldownSettings = async () => {
+  const fetchFullscreenCooldownSettings = useCallback(async () => {
     const { data, error: fetchError } = await supabase
       .from('app_ad_client_settings')
       .select('id, fullscreen_ad_cooldown_seconds')
@@ -65,9 +61,9 @@ export const AdSafetyCapsSection = (): JSX.Element => {
       setFullscreenCooldownInput(data.fullscreen_ad_cooldown_seconds);
       setCommittedFullscreenCooldown(data.fullscreen_ad_cooldown_seconds);
     }
-  };
+  }, []);
 
-  const fetchSafetyCaps = async () => {
+  const fetchSafetyCaps = useCallback(async () => {
     try {
       setIsLoading(true);
       setError(null);
@@ -91,13 +87,17 @@ export const AdSafetyCapsSection = (): JSX.Element => {
           platform_revenue_percentage: parseFloat(data.platform_revenue_percentage),
         });
       }
-    } catch (err: any) {
+    } catch (err: unknown) {
       console.error('Error fetching safety caps:', err);
-      setError(err.message);
+      setError(err instanceof Error ? err.message : 'Failed to load safety caps');
     } finally {
       setIsLoading(false);
     }
-  };
+  }, [fetchFullscreenCooldownSettings]);
+
+  useEffect(() => {
+    void fetchSafetyCaps();
+  }, [fetchSafetyCaps]);
 
   const handleChange = (field: keyof typeof formData, value: number) => {
     setFormData(prev => ({ ...prev, [field]: value }));
@@ -173,9 +173,12 @@ export const AdSafetyCapsSection = (): JSX.Element => {
       invalidateFullscreenAdCooldownCache();
       await refreshFullscreenAdCooldownConfig();
       setCooldownNotice({ type: 'ok', text: 'Global fullscreen ad cooldown updated. Apps pick up changes within a few minutes or on next open.' });
-    } catch (e: any) {
+    } catch (e: unknown) {
       console.error('Save fullscreen cooldown:', e);
-      setCooldownNotice({ type: 'err', text: e?.message || 'Failed to save cooldown.' });
+      setCooldownNotice({
+        type: 'err',
+        text: e instanceof Error ? e.message : 'Failed to save cooldown.',
+      });
     } finally {
       setCooldownSaving(false);
     }
@@ -220,9 +223,9 @@ export const AdSafetyCapsSection = (): JSX.Element => {
       setSuccess('Safety caps and revenue split updated successfully!');
       setIsDirty(false);
       fetchSafetyCaps(); // Refresh data
-    } catch (err: any) {
+    } catch (err: unknown) {
       console.error('Error saving safety caps:', err);
-      setError(err.message);
+      setError(err instanceof Error ? err.message : 'Failed to save configuration');
     } finally {
       setIsSaving(false);
     }
