@@ -53,7 +53,7 @@ const TippingModal = lazy(() => import('../../components/TippingModal').then(m =
 const ReportModal = lazy(() => import('../../components/ReportModal').then(m => ({ default: m.ReportModal })));
 const AuthModal = lazy(() => import('../../components/AuthModal').then(m => ({ default: m.AuthModal })));
 const prefetchContentComments = (contentId: string, contentType: string) =>
-  import('../../components/CommentsModal').then((m) => m.prefetchContentComments(contentId, contentType));
+  import('../../lib/contentCommentsCache').then((m) => m.prefetchContentComments(contentId, contentType));
 
 interface VideoData {
   id: string;
