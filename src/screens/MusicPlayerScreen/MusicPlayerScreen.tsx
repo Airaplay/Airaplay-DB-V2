@@ -1,17 +1,19 @@
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { useLocation, useNavigate } from 'react-router-dom';
 import { Spinner } from '../../components/Spinner';
-import { Heart, Download, SkipBack, SkipForward, Play, Pause, Share2, MessageCircle, Gift, Plus, Check, Flag, X } from 'lucide-react';
+import { Heart, ArrowDownToLine, SkipBack, SkipForward, Play, Pause, Share2, MessageCircle, Gift, Plus, Check, Flag, X } from 'lucide-react';
 import { Avatar, AvatarFallback, AvatarImage } from '../../components/ui/avatar';
 import { recordPlayback } from '../../lib/playbackTracker';
 import { supabase, isSongFavorited, toggleSongFavorite, recordShareEvent, isFollowing, followUser, unfollowUser, getRandomSongs, getFollowerCount, getUserPlaylistsForSong, toggleSongInPlaylist, getContentCommentsCount } from '../../lib/supabase';
 import { shareSong } from '../../lib/shareService';
-import { useDownloadManager } from '../../hooks/useDownloadManager';
+import { useOfflineSong } from '../../hooks/useOfflineSong';
+import { deleteOfflineSong, downloadOfflineSong, isOfflineDownloadPlatformSupported } from '../../lib/offlineAudioService';
+import { ensureOfflineDownloadAllowedWithPaywall } from '../../lib/offlineDownloadEntitlement';
 import { useMusicPlayer } from '../../hooks/useMusicPlayer';
 import { useAuth } from '../../contexts/AuthContext';
 import { useAlert } from '../../contexts/AlertContext';
 import { artistCache } from '../../lib/artistCache';
-import { CommentsModal } from '../../components/CommentsModal';
+import { CommentsModal, prefetchContentComments } from '../../components/CommentsModal';
 import { TippingModal } from '../../components/TippingModal';
 import { CreatePlaylistModal } from '../../components/CreatePlaylistModal';
 import { ReportModal } from '../../components/ReportModal';
@@ -29,7 +31,8 @@ import { PlayerStaticAdBanner } from '../../components/PlayerStaticAdBanner';
 import { favoritesCache } from '../../lib/favoritesCache';
 import { followsCache } from '../../lib/followsCache';
 import { useAdPlacement } from '../../hooks/useAdPlacement';
-import { BannerAdPosition } from '@capacitor-community/admob';
+import { usePlayerBottomBanner } from '../../hooks/usePlayerBottomBanner';
+import { useContentEngagementSync } from '../../hooks/useEngagementSync';
 
 interface Song {
   id: string;
@@ -109,7 +112,7 @@ export const MusicPlayerScreen: React.FC<MusicPlayerScreenProps> = ({
   const location = useLocation();
   const navigate = useNavigate();
   const { user, session, isAuthenticated, isInitialized } = useAuth();
-  const { showAlert } = useAlert();
+  const { showAlert, showConfirm } = useAlert();
   const audioRef = useRef<HTMLAudioElement>(null);
   const videoRef = useRef<HTMLVideoElement>(null);
   const [internalIsPlaying, setInternalIsPlaying] = useState(false);
@@ -136,16 +139,26 @@ export const MusicPlayerScreen: React.FC<MusicPlayerScreenProps> = ({
   const [commentCount, setCommentCount] = useState(0);
   const [userCountry, setUserCountry] = useState<string | undefined>();
   const [inlineAd, setInlineAd] = useState<NativeAdCard | null>(null);
+  const [showInlineAd, setShowInlineAd] = useState(false);
   const [showSongBonusPrompt, setShowSongBonusPrompt] = useState(false);
+  const [currentPlayCount, setCurrentPlayCount] = useState(song.playCount || 0);
+  const nativeAdTimersRef = useRef<{ show?: number; hide?: number }>({});
 
   const {
     repeatMode: globalRepeatMode,
   } = useMusicPlayer();
 
-  const { showBanner, hideBanner, removeBanner, showRewarded } = useAdPlacement('MusicPlayerScreen');
-  const hasShownBannerRef = useRef(false);
+  const { showBanner, hideBanner, removeBanner, showSongBonusRewarded, showInterstitial } = useAdPlacement('MusicPlayerScreen');
+  const interstitialTimeoutRef = useRef<number | null>(null);
 
-  const { isDownloaded, downloadSong, deleteSong, getDownloadProgress } = useDownloadManager();
+  // Subscribe to real-time play count updates for this song
+  useContentEngagementSync(song.id, useCallback((update) => {
+    if (update.metric === 'play_count' && update.contentType === 'song') {
+      setCurrentPlayCount(update.value);
+    }
+  }, []));
+
+  const songIsDownloaded = useOfflineSong(song.id);
   const [isDownloadInProgress, setIsDownloadInProgress] = useState(false);
   const [showDownloadConfirm, setShowDownloadConfirm] = useState(false);
 
@@ -168,7 +181,7 @@ export const MusicPlayerScreen: React.FC<MusicPlayerScreenProps> = ({
     onCloseRef.current = onClose;
   }, [onClose]);
 
-  // Listen for global bonus events (every 10 songs) and surface a small user-initiated prompt.
+  // song_bonus prompt (~every 1.5 songs); auto rewarded interstitial is every 3 (separate in context).
   useEffect(() => {
     const handler = () => {
       setShowSongBonusPrompt(true);
@@ -179,26 +192,53 @@ export const MusicPlayerScreen: React.FC<MusicPlayerScreenProps> = ({
     };
   }, []);
 
-  // Bottom banner: shows on its own when MusicPlayerScreen is open (no song or playback required).
-  // Guarded by ref so StrictMode / re-renders don't spam the native plugin.
-  useEffect(() => {
-    if (hasShownBannerRef.current) return;
-    hasShownBannerRef.current = true;
-    showBanner('music_player_bottom_banner', BannerAdPosition.BOTTOM_CENTER, {
+  usePlayerBottomBanner(
+    'music_player_bottom_banner',
+    showBanner,
+    hideBanner,
+    () => ({
       contentId: song?.id,
       contentType: 'song',
-    }, 0).catch(() => {});
+    }),
+    [song?.id],
+    true,
+    0,
+    false
+  );
+
+  // Auto interstitial: trigger mid-way through every new song.
+  useEffect(() => {
+    if (interstitialTimeoutRef.current != null) {
+      window.clearTimeout(interstitialTimeoutRef.current);
+      interstitialTimeoutRef.current = null;
+    }
+    if (!song?.id) return;
+
+    // "Middle" of song. Fallback if duration missing.
+    const durationSeconds = typeof song.duration === 'number' && song.duration > 0 ? song.duration : undefined;
+    const midMs = durationSeconds ? Math.max(12_000, Math.floor((durationSeconds * 1000) / 2)) : 30_000;
+
+    interstitialTimeoutRef.current = window.setTimeout(() => {
+      showInterstitial('during_song_playback_interstitial', {
+        contentId: song.id,
+        contentType: 'song',
+      }, { muteAppAudio: true }).catch(() => {});
+    }, midMs);
+
     return () => {
-      hideBanner();
+      if (interstitialTimeoutRef.current != null) {
+        window.clearTimeout(interstitialTimeoutRef.current);
+        interstitialTimeoutRef.current = null;
+      }
     };
-  }, [showBanner, hideBanner]);
+  }, [song.id, song.duration, showInterstitial]);
 
   // Load a single inline native ad for the player (non-blocking, does not affect audio)
   useEffect(() => {
     let mounted = true;
     (async () => {
       try {
-        const ads = await getNativeAdsForPlacement('player_inline', userCountry ?? null, null, 1);
+        const ads = await getNativeAdsForPlacement('music_player', userCountry ?? null, null, 1);
         if (!mounted) return;
         setInlineAd(ads[0] ?? null);
       } catch {
@@ -211,6 +251,34 @@ export const MusicPlayerScreen: React.FC<MusicPlayerScreenProps> = ({
     };
   }, [userCountry, song.id]);
 
+  // Delay-show the native ad (up to ~60s), then auto-hide after 30s.
+  useEffect(() => {
+    // Reset visibility on song change
+    setShowInlineAd(false);
+    if (nativeAdTimersRef.current.show) window.clearTimeout(nativeAdTimersRef.current.show);
+    if (nativeAdTimersRef.current.hide) window.clearTimeout(nativeAdTimersRef.current.hide);
+    nativeAdTimersRef.current = {};
+
+    if (!inlineAd) return;
+
+    const minDelayMs = 5_000;   // "after few seconds"
+    const maxDelayMs = 60_000;  // "up to a minute"
+    const delayMs = Math.floor(minDelayMs + Math.random() * (maxDelayMs - minDelayMs));
+
+    nativeAdTimersRef.current.show = window.setTimeout(() => {
+      setShowInlineAd(true);
+      nativeAdTimersRef.current.hide = window.setTimeout(() => {
+        setShowInlineAd(false);
+      }, 30_000);
+    }, delayMs);
+
+    return () => {
+      if (nativeAdTimersRef.current.show) window.clearTimeout(nativeAdTimersRef.current.show);
+      if (nativeAdTimersRef.current.hide) window.clearTimeout(nativeAdTimersRef.current.hide);
+      nativeAdTimersRef.current = {};
+    };
+  }, [inlineAd, song.id]);
+
   // Close player when navigating to different routes
   useEffect(() => {
     const mainRoutes = ['/', '/explore', '/library', '/create', '/profile'];
@@ -222,6 +290,7 @@ export const MusicPlayerScreen: React.FC<MusicPlayerScreenProps> = ({
 
   useEffect(() => {
     currentSongIdRef.current = song.id;
+    setCurrentPlayCount(song.playCount || 0);
 
     setOriginalPlaylist(playlist);
     setShuffledPlaylist(playlist);
@@ -351,6 +420,11 @@ export const MusicPlayerScreen: React.FC<MusicPlayerScreenProps> = ({
       document.removeEventListener('mousedown', handleClickOutside);
     };
   }, [showPlaylistsDropdown]);
+
+  useEffect(() => {
+    if (!isPlaying || !song?.id) return;
+    prefetchContentComments(song.id, 'song').catch(() => {});
+  }, [isPlaying, song?.id]);
 
   const loadArtistData = async () => {
     const artistId = song.artistId;
@@ -826,6 +900,10 @@ export const MusicPlayerScreen: React.FC<MusicPlayerScreenProps> = ({
   };
 
   const handleToggleDownload = async () => {
+    if (!isAuthenticated) {
+      onShowAuthModal?.();
+      return;
+    }
     if (!song.audioUrl) {
       showAlert({
         title: 'Cannot Download',
@@ -834,47 +912,55 @@ export const MusicPlayerScreen: React.FC<MusicPlayerScreenProps> = ({
       });
       return;
     }
-
-    const songIsDownloaded = isDownloaded(song.id);
+    if (!isOfflineDownloadPlatformSupported()) {
+      showAlert({
+        title: 'Offline downloads',
+        message: 'Saving music for offline listening is available in the Android app.',
+        type: 'info'
+      });
+      return;
+    }
 
     if (songIsDownloaded) {
-      const downloadedSongs = JSON.parse(localStorage.getItem('downloaded_songs') || '[]');
-      const downloadedSong = downloadedSongs.find((ds: any) => ds.songId === song.id);
-      if (downloadedSong) {
-        deleteSong(downloadedSong.id);
-        showAlert({
-          title: 'Download Removed',
-          message: 'Song removed from offline downloads',
-          type: 'success'
-        });
-      }
-    } else {
-      setShowDownloadConfirm(true);
+      await deleteOfflineSong(song.id);
+      showAlert({
+        title: 'Download Removed',
+        message: 'Song removed from offline downloads',
+        type: 'success'
+      });
+      return;
     }
+
+    setShowDownloadConfirm(true);
   };
 
   const handleConfirmDownload = async () => {
     setShowDownloadConfirm(false);
     setIsDownloadInProgress(true);
     try {
-      await downloadSong({
-        id: song.id,
-        title: song.title,
-        artist: song.artist,
-        duration: formatTime(song.duration || 0),
-        audioUrl: song.audioUrl,
-        coverImageUrl: song.coverImageUrl || undefined,
-      });
+      const allowed = await ensureOfflineDownloadAllowedWithPaywall(showConfirm, showAlert);
+      if (!allowed) return;
+
+      await downloadOfflineSong(
+        {
+          songId: song.id,
+          title: song.title,
+          artist: song.artist,
+          coverImageUrl: song.coverImageUrl || null,
+          durationSeconds: typeof song.duration === 'number' ? song.duration : null,
+        },
+        song.audioUrl!
+      );
       showAlert({
         title: 'Download Complete',
-        message: 'Song downloaded for offline listening!',
+        message: 'Song saved for offline listening on this device.',
         type: 'success'
       });
     } catch (error) {
       console.error('Error downloading song:', error);
       showAlert({
         title: 'Download Failed',
-        message: 'Failed to download song. Please try again.',
+        message: error instanceof Error ? error.message : 'Failed to download song. Please try again.',
         type: 'error'
       });
     } finally {
@@ -1009,11 +1095,8 @@ export const MusicPlayerScreen: React.FC<MusicPlayerScreenProps> = ({
     onClose();
   };
 
-  const songIsDownloaded = isDownloaded(song.id);
-  const downloadProgress = getDownloadProgress(song.id);
-
   return (
-    <div className="fixed inset-0 z-50 flex flex-col bg-[#0a0a0a] animate-in fade-in duration-300 touch-manipulation overflow-hidden pb-[env(safe-area-inset-bottom,0px)]">
+    <div className="music-player-root fixed inset-0 z-50 flex flex-col bg-[#0a0a0a] animate-in fade-in duration-300 touch-manipulation overflow-hidden pb-[env(safe-area-inset-bottom,0px)]">
       {/* Header — properly grouped and centered with equal-width side columns */}
       <header className="flex-shrink-0 z-20 bg-[#0a0a0a]" style={{ paddingTop: 'calc(1.25rem + env(safe-area-inset-top, 0px) * 0.25)', paddingBottom: '1.25rem' }}>
         <div className="flex flex-row items-center px-3 py-1 min-h-[40px]">
@@ -1084,7 +1167,7 @@ export const MusicPlayerScreen: React.FC<MusicPlayerScreenProps> = ({
           <div className="min-h-0 flex flex-col overflow-hidden">
             {/* Artwork / Inline Native Ad Slot */}
             <div className="px-5 py-4 flex-1 min-h-0">
-              {inlineAd ? (
+              {inlineAd && showInlineAd ? (
                 <PlayerStaticAdBanner
                   ad={inlineAd}
                   className="max-w-[280px] mx-auto rounded-2xl shadow-lg"
@@ -1124,7 +1207,7 @@ export const MusicPlayerScreen: React.FC<MusicPlayerScreenProps> = ({
               </button>
             </div>
 
-            {/* Optional bonus reward prompt (after every 10 songs globally) */}
+            {/* song_bonus ~every 1.5 songs; rewarded interstitial every 3 — separate counters. Claim → VITE_ADMOB_REWARDED_ID */}
             {showSongBonusPrompt && (
               <div className="mx-5 mt-3 mb-1 flex items-center justify-between gap-3 rounded-2xl bg-white/10 border border-white/15 px-3 py-2 shadow-lg">
                 <div className="flex flex-col">
@@ -1136,10 +1219,7 @@ export const MusicPlayerScreen: React.FC<MusicPlayerScreenProps> = ({
                   onClick={() => {
                     setShowSongBonusPrompt(false);
                     if (!song?.id) return;
-                    showRewarded('song_bonus_rewarded', {
-                      contentId: song.id,
-                      contentType: 'song',
-                    }).catch(() => {});
+                    showSongBonusRewarded({ contentId: song.id }).catch(() => {});
                   }}
                   className="px-3 py-1.5 rounded-full bg-white text-xs font-semibold text-black active:scale-95 hover:opacity-90 transition-all"
                 >
@@ -1206,7 +1286,7 @@ export const MusicPlayerScreen: React.FC<MusicPlayerScreenProps> = ({
               >
                 <MessageCircle className="w-5 h-5" />
                 {commentCount > 0 && (
-                  <span className="absolute -top-1 -right-1.5 text-[9px] font-bold text-white/80 tabular-nums">
+                  <span className="absolute -top-1 -right-1.5 text-[10px] font-bold text-white/80 tabular-nums">
                     {commentCount >= 1_000_000 ? `${(commentCount / 1_000_000).toFixed(1).replace(/\.0$/, '')}M` : commentCount >= 1_000 ? `${(commentCount / 1_000).toFixed(1).replace(/\.0$/, '')}K` : commentCount}
                   </span>
                 )}
@@ -1261,6 +1341,28 @@ export const MusicPlayerScreen: React.FC<MusicPlayerScreenProps> = ({
                     </>
                   )}
                 </div>
+                {song.audioUrl ? (
+                  <button
+                    type="button"
+                    onClick={() => void handleToggleDownload()}
+                    disabled={isDownloadInProgress}
+                    className={cn(
+                      'p-2 rounded-full transition-colors disabled:opacity-50',
+                      songIsDownloaded
+                        ? 'shrink-0 hover:bg-red-500/20 active:bg-red-500/25'
+                        : 'text-white/80 hover:text-white hover:bg-white/10'
+                    )}
+                    title={songIsDownloaded ? 'Remove offline download' : 'Download for offline'}
+                  >
+                    {isDownloadInProgress ? (
+                      <Spinner size={18} className="text-white" />
+                    ) : songIsDownloaded ? (
+                      <X className="w-3.5 h-3.5 text-white/50" aria-hidden />
+                    ) : (
+                      <ArrowDownToLine className="w-[18px] h-[18px]" />
+                    )}
+                  </button>
+                ) : null}
                 <button
                   onClick={handleShare}
                   className="p-2 rounded-full text-white/80 hover:text-white hover:bg-white/10 transition-all"
@@ -1276,10 +1378,10 @@ export const MusicPlayerScreen: React.FC<MusicPlayerScreenProps> = ({
                   <Flag className="w-[18px] h-[18px]" />
                 </button>
               </div>
-              {song.playCount != null && song.playCount > 0 && (
+              {currentPlayCount != null && currentPlayCount > 0 && (
                 <div className="flex items-center gap-1.5 text-white/60 text-xs">
                   <Play className="w-3.5 h-3.5" fill="currentColor" />
-                  <span className="font-semibold text-white">{formatNumber(song.playCount)}</span>
+                  <span className="font-semibold text-white">{formatNumber(currentPlayCount)}</span>
                   <span>plays</span>
                 </div>
               )}
@@ -1453,7 +1555,7 @@ export const MusicPlayerScreen: React.FC<MusicPlayerScreenProps> = ({
           border-radius: 10px;
         }
 
-        * {
+        .music-player-root, .music-player-root * {
           -webkit-tap-highlight-color: transparent;
           -webkit-touch-callout: none;
           -webkit-user-select: none;
@@ -1463,7 +1565,7 @@ export const MusicPlayerScreen: React.FC<MusicPlayerScreenProps> = ({
           user-select: none;
         }
 
-        .touch-manipulation {
+        .music-player-root .touch-manipulation {
           touch-action: manipulation;
         }
       `}</style>

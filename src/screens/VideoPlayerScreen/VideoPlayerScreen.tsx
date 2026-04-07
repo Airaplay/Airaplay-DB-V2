@@ -31,6 +31,7 @@ import {
   recordShareEvent
 } from '../../lib/supabase';
 import { videoRecommendationService } from '../../lib/videoRecommendationService';
+import { admobService } from '../../lib/admobService';
 import { logger } from '../../lib/logger';
 import { formatDistanceToNowStrict } from 'date-fns';
 import { recordPlayback } from '../../lib/playbackTracker';
@@ -42,6 +43,9 @@ import { recordContribution } from '../../lib/contributionService';
 import { favoritesCache } from '../../lib/favoritesCache';
 import { followsCache } from '../../lib/followsCache';
 import { getOptimizedImageUrl } from '../../lib/imageOptimization';
+
+/** Rewarded shown after a video ends when Watch Next will auto-advance; prepare near end for instant show. */
+const REWARDED_VIDEO_BEFORE_NEXT_KEY = 'after_video_play_rewarded';
 
 // Lazy load modals for faster initial render (after all imports to avoid "before initialization" in bundle)
 const CommentsModal = lazy(() => import('../../components/CommentsModal').then(m => ({ default: m.CommentsModal })));
@@ -153,10 +157,11 @@ export const VideoPlayerScreen: React.FC<VideoPlayerScreenProps> = ({ onPlayerVi
 
   // Ad state — sticky bottom banner is now managed globally by the app shell.
   // This screen only requests fullscreen formats (interstitial/rewarded).
-  const { showInterstitial, showRewarded } = useAdPlacement('VideoPlayerScreen');
+  const { showRewarded } = useAdPlacement('VideoPlayerScreen');
   const completedVideosSinceBonusRef = useRef(0);
-  const hasRequestedPrerollRef = useRef(false);
   const hasAttemptedInitialAutoplayRef = useRef(false);
+  /** Native prepareRewardVideoAd once per clip when Watch Next exists and playback is near the end. */
+  const hasPreparedRewardedNextRef = useRef(false);
   const [showBonusPrompt, setShowBonusPrompt] = useState(false);
 
   // Before first play (user tap or autoplay): start playback directly (no video-specific fullscreen ad)
@@ -185,37 +190,13 @@ export const VideoPlayerScreen: React.FC<VideoPlayerScreenProps> = ({ onPlayerVi
     doPlay();
   }, [videoId]);
 
-  // Optional interstitial before the first play of each video; uses the same global fullscreen cooldown as the rest of the app.
-  const maybeShowPrerollInterstitial = useCallback(async () => {
-    if (!videoId) return;
-    if (hasRequestedPrerollRef.current) return;
-    hasRequestedPrerollRef.current = true;
-
-    // Light randomization so not every video gets an interstitial even when cooldown allows.
-    if (Math.random() > 0.4) {
-      return;
-    }
-
-    try {
-      await showInterstitial('video_preroll_interstitial', {
-        contentId: videoId,
-        contentType: 'video',
-      });
-    } catch {
-      // Interstitial failures should never block playback.
-    }
-  }, [showInterstitial, videoId]);
-
   // Autoplay should happen only once per loaded video, never after a manual pause.
-  const startInitialAutoplay = useCallback(async () => {
+  // Keep startup path lean: never block first frame behind ad loading/showing.
+  const startInitialAutoplay = useCallback(() => {
     if (hasAttemptedInitialAutoplayRef.current) return;
     hasAttemptedInitialAutoplayRef.current = true;
-    try {
-      await maybeShowPrerollInterstitial();
-    } finally {
-      tryPlayAfterAd();
-    }
-  }, [maybeShowPrerollInterstitial, tryPlayAfterAd]);
+    tryPlayAfterAd();
+  }, [tryPlayAfterAd]);
 
   // Update displayed view count when playback is recorded (play_count from RPC → engagementSync)
   useContentEngagementSync(
@@ -306,9 +287,9 @@ export const VideoPlayerScreen: React.FC<VideoPlayerScreenProps> = ({ onPlayerVi
       return;
     }
 
-    // Reset per-video ad tracking
-    hasRequestedPrerollRef.current = false;
+    // Reset per-video first-play tracking
     hasAttemptedInitialAutoplayRef.current = false;
+    hasPreparedRewardedNextRef.current = false;
     setShowBonusPrompt(false);
     setIsPortraitVideo(false);
     setIsPortraitHint(false);
@@ -693,8 +674,23 @@ export const VideoPlayerScreen: React.FC<VideoPlayerScreenProps> = ({ onPlayerVi
   };
 
   const handleTimeUpdate = () => {
-    if (videoRef.current) {
-      setCurrentTime(videoRef.current.currentTime);
+    const video = videoRef.current;
+    if (!video) return;
+
+    const t = video.currentTime;
+    setCurrentTime(t);
+
+    const dur = video.duration;
+    if (!Number.isFinite(dur) || dur <= 0) return;
+    if (relatedVideos.length === 0) return;
+    if (hasPreparedRewardedNextRef.current) return;
+
+    const remaining = dur - t;
+    // Last ~15s or 10% of duration; cap so very short clips do not prepare at the start.
+    const threshold = Math.min(15, Math.max(4, dur * 0.1), dur * 0.5);
+    if (remaining > 0 && remaining <= threshold) {
+      hasPreparedRewardedNextRef.current = true;
+      void admobService.prepareRewardedAd(REWARDED_VIDEO_BEFORE_NEXT_KEY);
     }
   };
 
@@ -724,17 +720,22 @@ export const VideoPlayerScreen: React.FC<VideoPlayerScreenProps> = ({ onPlayerVi
     await recordPlaybackOnUnmount();
     setPlaybackStartTime(null);
 
-    // Track completed videos; after 2 completions, prompt user for an optional bonus rewarded ad.
+    if (relatedVideos.length > 0) {
+      const nextVideo = relatedVideos[0];
+      try {
+        await admobService.showRewardedAd(videoId!, 'video', REWARDED_VIDEO_BEFORE_NEXT_KEY);
+      } catch {
+        // Dismissal or load failure — still advance Watch Next.
+      }
+      handleVideoChange(nextVideo.id);
+      return;
+    }
+
+    // No auto-next: optional bonus rewarded after every 2 completions (manual engagement).
     completedVideosSinceBonusRef.current += 1;
     if (completedVideosSinceBonusRef.current >= 2) {
       completedVideosSinceBonusRef.current = 0;
       setShowBonusPrompt(true);
-    }
-
-    // Auto-play next video in Watch Next list (if any)
-    if (relatedVideos.length > 0) {
-      const nextVideo = relatedVideos[0];
-      handleVideoChange(nextVideo.id);
     }
   };
 
@@ -1278,7 +1279,7 @@ export const VideoPlayerScreen: React.FC<VideoPlayerScreenProps> = ({ onPlayerVi
           playsInline
             poster={videoData.thumbnailUrl ? getOptimizedImageUrl(videoData.thumbnailUrl, shouldUsePortraitLayout ? { width: 360, height: 640, quality: 75, format: 'webp' } : { width: 640, height: 360, quality: 75, format: 'webp' }) : undefined}
             crossOrigin="anonymous"
-            preload="metadata"
+            preload="auto"
           onTimeUpdate={handleTimeUpdate}
           onLoadedMetadata={handleLoadedMetadata}
           onPlay={handlePlay}

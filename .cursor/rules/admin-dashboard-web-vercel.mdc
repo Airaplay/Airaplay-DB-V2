@@ -1,0 +1,11 @@
+---
+description: Admin Dashboard is web-only and deployed on Vercel; keep bundles browser-safe.
+globs: src/screens/AdminDashboardScreen/**/*,src/screens/AdminLoginScreen/**/*
+alwaysApply: false
+---
+
+# Admin Dashboard (web / Vercel)
+
+- The Admin UI is loaded only in **web** builds (`VITE_APP_TARGET=web` / `build:web`). Production hosting is **Vercel** for this surface.
+- Admin code must run in the **browser**: avoid Capacitor-only or Android-only APIs without guards; do not import native-only modules in a way that breaks the web Rollup bundle.
+- Match whatever CI/Vercel runs (`npm run build:web` or the project’s documented web build command) when verifying admin changes.

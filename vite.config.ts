@@ -28,13 +28,22 @@ export default defineConfig({
   base: "./",
   publicDir: 'public',
   resolve: {
-    alias: {
-      ...(pluginEntry && {
-        "@capgo/capacitor-media-session": pluginEntry,
-      }),
+    alias: [
+      ...(pluginEntry
+        ? [{ find: "@capgo/capacitor-media-session", replacement: pluginEntry }]
+        : []),
+      // Web (Vercel admin): avoid bundling @capacitor/filesystem / preferences — not in web deps.
+      ...(appTarget === "web"
+        ? [
+            {
+              find: /[/\\]offlineAudioService\.ts$/,
+              replacement: path.resolve(__dirname, "src/lib/offlineAudioService.web.stub.ts"),
+            },
+          ]
+        : []),
       // SheetJS: bare "xlsx" → CJS main confuses some Rollup installs; lock to ESM file via Node resolver (hoist/pnpm-safe).
-      xlsx: require.resolve("xlsx/xlsx.mjs"),
-    },
+      { find: "xlsx", replacement: require.resolve("xlsx/xlsx.mjs") },
+    ],
   },
   build: {
     rollupOptions: {

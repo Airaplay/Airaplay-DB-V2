@@ -14,7 +14,9 @@ import {
   Edit,
   Trash2,
   Music,
-  Gift
+  Gift,
+  ArrowDownToLine,
+  X
 } from 'lucide-react';
 import { cn } from '../../lib/utils';
 import { sharePlaylist } from '../../lib/shareService';
@@ -27,7 +29,9 @@ import {
 } from '../../lib/supabase';
 import { useAuth } from '../../contexts/AuthContext';
 import { useAlert } from '../../contexts/AlertContext';
-import { useDownloadManager } from '../../hooks/useDownloadManager';
+import { useOfflineSong } from '../../hooks/useOfflineSong';
+import { deleteOfflineSong, downloadOfflineSong, isOfflineDownloadPlatformSupported } from '../../lib/offlineAudioService';
+import { ensureOfflineDownloadAllowedWithPaywall } from '../../lib/offlineDownloadEntitlement';
 import { CommentsModal, prefetchContentComments } from '../../components/CommentsModal';
 import { ReportModal } from '../../components/ReportModal';
 import { TippingModal } from '../../components/TippingModal';
@@ -87,17 +91,19 @@ const PlaylistPlayer: React.FC<PlaylistPlayerScreenProps & {
   startTrackIndex?: number;
   onShowAuthModal?: () => void;
   isListenerCurationsPlaylist?: boolean;
+  onPlaylistUpdated?: () => void;
 }> = ({
   playlistData,
   onPlayerVisibilityChange,
   autoPlay = true,
   startTrackIndex = 0,
   onShowAuthModal,
-  isListenerCurationsPlaylist = false
+  isListenerCurationsPlaylist = false,
+  onPlaylistUpdated
 }) => {
   const navigate = useNavigate();
   const { user, isAuthenticated, isInitialized } = useAuth();
-  const { showAlert } = useAlert();
+  const { showAlert, showConfirm } = useAlert();
   const [currentTrackIndex, setCurrentTrackIndex] = useState(startTrackIndex);
   const [showTrackList, setShowTrackList] = useState(true);
   const [showCommentsModal, setShowCommentsModal] = useState(false);
@@ -113,7 +119,6 @@ const PlaylistPlayer: React.FC<PlaylistPlayerScreenProps & {
   const [showInlineAd, setShowInlineAd] = useState(false);
   const nativeAdTimersRef = useRef<{ show?: number; hide?: number }>({});
 
-  const { isDownloaded, downloadSong, deleteSong, getDownloadProgress } = useDownloadManager();
   const [isDownloadInProgress, setIsDownloadInProgress] = useState(false);
 
   const {
@@ -136,6 +141,7 @@ const PlaylistPlayer: React.FC<PlaylistPlayerScreenProps & {
   const isThisPlaylistActive = playlistContext === thisPlaylistContext;
 
   const currentTrack = tracks?.[currentTrackIndex] || null;
+  const trackOfflineDownloaded = useOfflineSong(currentTrack?.id);
   const { showSongBonusRewarded, showBanner, hideBanner, removeBanner, showInterstitial } = useAdPlacement('PlaylistPlayerScreen');
   const [showSongBonusPrompt, setShowSongBonusPrompt] = useState(false);
   const songsPlayedSinceInterstitialRef = useRef(0);
@@ -550,46 +556,54 @@ const PlaylistPlayer: React.FC<PlaylistPlayerScreenProps & {
       return;
     }
 
-    const trackIsDownloaded = isDownloaded(currentTrack.id);
+    if (!isOfflineDownloadPlatformSupported()) {
+      showAlert({
+        title: 'Offline downloads',
+        message: 'Saving music for offline listening is available in the Android app.',
+        type: 'info'
+      });
+      return;
+    }
 
-    if (trackIsDownloaded) {
-      const downloadedSongs = JSON.parse(localStorage.getItem('downloaded_songs') || '[]');
-      const downloadedSong = downloadedSongs.find((ds: any) => ds.songId === currentTrack.id);
-      if (downloadedSong) {
-        deleteSong(downloadedSong.id);
-        showAlert({
-          title: 'Download Removed',
-          message: 'Track removed from offline downloads',
-          type: 'success'
-        });
-      }
-    } else {
-      setIsDownloadInProgress(true);
-      try {
-        await downloadSong({
-          id: currentTrack.id,
+    if (trackOfflineDownloaded) {
+      await deleteOfflineSong(currentTrack.id);
+      showAlert({
+        title: 'Download Removed',
+        message: 'Track removed from offline downloads',
+        type: 'success'
+      });
+      return;
+    }
+
+    setIsDownloadInProgress(true);
+    try {
+      const allowed = await ensureOfflineDownloadAllowedWithPaywall(showConfirm, showAlert);
+      if (!allowed) return;
+
+      await downloadOfflineSong(
+        {
+          songId: currentTrack.id,
           title: currentTrack.title,
           artist: currentTrack.artist,
-          album: playlistData.title,
-          duration: formatTime(currentTrack.duration),
-          audioUrl: currentTrack.audioUrl,
-          coverImageUrl: currentTrack.coverImageUrl || playlistData.coverImageUrl || undefined,
-        });
-        showAlert({
-          title: 'Download Complete',
-          message: 'Track downloaded for offline listening!',
-          type: 'success'
-        });
-      } catch (error) {
-        console.error('Error downloading track:', error);
-        showAlert({
-          title: 'Download Failed',
-          message: 'Failed to download track. Please try again.',
-          type: 'error'
-        });
-      } finally {
-        setIsDownloadInProgress(false);
-      }
+          coverImageUrl: currentTrack.coverImageUrl || playlistData.coverImageUrl || null,
+          durationSeconds: typeof currentTrack.duration === 'number' ? currentTrack.duration : null,
+        },
+        currentTrack.audioUrl
+      );
+      showAlert({
+        title: 'Download Complete',
+        message: 'Track saved for offline listening on this device.',
+        type: 'success'
+      });
+    } catch (error) {
+      console.error('Error downloading track:', error);
+      showAlert({
+        title: 'Download Failed',
+        message: error instanceof Error ? error.message : 'Failed to download track. Please try again.',
+        type: 'error'
+      });
+    } finally {
+      setIsDownloadInProgress(false);
     }
   };
 
@@ -692,11 +706,6 @@ const PlaylistPlayer: React.FC<PlaylistPlayerScreenProps & {
     return `${minutes} min`;
   };
 
-  const downloadProgress = currentTrack ? getDownloadProgress(currentTrack.id) : null;
-  const trackIsDownloaded = currentTrack ? isDownloaded(currentTrack.id) : false;
-
-  // Removed redundant loading state - handled by parent component
-
   return (
     <div className="flex flex-col min-h-screen bg-gradient-to-b from-[#0a0a0a] via-[#0d0d0d] to-[#111111] fixed inset-0 z-50 pb-[env(safe-area-inset-bottom,0px)] overflow-hidden">
       {/* Header - Same safe area as Explore */}
@@ -778,22 +787,15 @@ const PlaylistPlayer: React.FC<PlaylistPlayerScreenProps & {
             </div>
 
             <div className="relative z-10 p-6 pb-7 min-h-[200px] flex flex-col justify-end">
-              {/* Play button */}
-              <button
-                onClick={() => playTrack(currentTrackIndex)}
-                className="absolute top-5 right-5 w-12 h-12 rounded-full bg-[#00ad74] hover:bg-[#009c68] active:bg-[#008a5d] flex items-center justify-center shadow-lg shadow-[#00ad74]/30 transition-all active:scale-90"
-                aria-label={isThisPlaylistActive && isPlaying && currentSong?.id === currentTrack?.id ? "Pause" : "Play all"}
-              >
-                {isThisPlaylistActive && isPlaying && currentSong?.id === currentTrack?.id ? (
-                  <Pause className="w-5 h-5 text-white" fill="white" />
-                ) : (
-                  <Play className="w-5 h-5 text-white ml-0.5" fill="white" />
-                )}
-              </button>
-
-              <h2 className="font-sans font-bold text-white text-2xl leading-tight mb-2">
+              <h2 className="font-sans font-bold text-white text-2xl leading-tight mb-1">
                 {playlistData.title}
               </h2>
+
+              {isListenerCurationsPlaylist && (
+                <p className="font-sans text-white/70 text-sm leading-snug mb-2 max-w-[95%]">
+                  by {playlistData.userName?.trim() || 'Unknown'}
+                </p>
+              )}
 
               {playlistData.description && (
                 <p className="font-sans text-white/70 text-sm leading-relaxed mb-3 max-w-[85%] line-clamp-2">
@@ -804,8 +806,6 @@ const PlaylistPlayer: React.FC<PlaylistPlayerScreenProps & {
               <div className="flex items-center justify-between gap-3 text-white/50 text-xs font-sans">
                 <div className="flex items-center gap-2">
                   <Music className="w-3.5 h-3.5" />
-                  <span>{tracks.length} tracks</span>
-                  <span className="mx-1">·</span>
                   <span>{formatDuration(playlistData.totalDuration)}</span>
                 </div>
                 <div className="flex items-center gap-0.5 flex-shrink-0">
@@ -828,6 +828,28 @@ const PlaylistPlayer: React.FC<PlaylistPlayerScreenProps & {
                   >
                     <Share2 className="w-[18px] h-[18px]" />
                   </button>
+                  {currentTrack?.audioUrl ? (
+                    <button
+                      type="button"
+                      onClick={() => void handleDownloadTrack()}
+                      disabled={isDownloadInProgress}
+                      className={cn(
+                        'p-2 rounded-full transition-colors disabled:opacity-50',
+                        trackOfflineDownloaded
+                          ? 'shrink-0 hover:bg-red-500/20 active:bg-red-500/25'
+                          : 'text-white/80 hover:text-white hover:bg-white/10'
+                      )}
+                      title={trackOfflineDownloaded ? 'Remove offline download' : 'Download for offline'}
+                    >
+                      {isDownloadInProgress ? (
+                        <Spinner size={18} className="text-white" />
+                      ) : trackOfflineDownloaded ? (
+                        <X className="w-3.5 h-3.5 text-white/50" aria-hidden />
+                      ) : (
+                        <ArrowDownToLine className="w-[18px] h-[18px]" />
+                      )}
+                    </button>
+                  ) : null}
                   {isListenerCurationsPlaylist && !playlistData.isOwner && (
                     <button
                       onClick={() => setShowTippingModal(true)}
@@ -1096,7 +1118,7 @@ const PlaylistPlayer: React.FC<PlaylistPlayerScreenProps & {
           onClose={() => setShowEditPlaylistModal(false)}
           onSuccess={() => {
             setShowEditPlaylistModal(false);
-            window.location.reload();
+            onPlaylistUpdated?.();
           }}
         />
       )}
@@ -1387,7 +1409,7 @@ export const PlaylistPlayerScreen: React.FC<PlaylistPlayerScreenProps> = ({ onPl
       const [userResult, songsResult] = await Promise.all([
         supabase
           .from('users')
-          .select('id, display_name, avatar_url')
+          .select('id, display_name, username, avatar_url')
           .eq('id', playlistInfo.user_id)
           .maybeSingle(),
         supabase
@@ -1455,7 +1477,7 @@ export const PlaylistPlayerScreen: React.FC<PlaylistPlayerScreenProps> = ({ onPl
         description: playlistInfo.description,
         coverImageUrl: playlistInfo.cover_image_url,
         userId: playlistInfo.user_id,
-        userName: userData?.display_name || 'Unknown User',
+        userName: userData?.display_name?.trim() || userData?.username?.trim() || 'Unknown User',
         userAvatar: userData?.avatar_url,
         tracks: playableTracks.length > 0 ? playableTracks : tracks,
         totalDuration,
@@ -1554,6 +1576,12 @@ export const PlaylistPlayerScreen: React.FC<PlaylistPlayerScreenProps> = ({ onPl
       onShowAuthModal={handleShowAuthModal}
       onOpenMusicPlayer={onOpenMusicPlayer}
       isListenerCurationsPlaylist={isListenerCurationsPlaylist}
+      onPlaylistUpdated={() => {
+        if (playlistId) {
+          playlistCache.delete(playlistId);
+        }
+        loadPlaylistData();
+      }}
     />
   );
 };

@@ -1,6 +1,5 @@
 import { supabase } from './supabase';
 
-/** Fallback if RPC is missing or fails; keep aligned with `get_offline_download_status` in SQL. */
 export const DEFAULT_OFFLINE_DOWNLOAD_MONTHLY_COST_TREATS = 300;
 
 export interface OfflineDownloadStatus {
@@ -101,10 +100,6 @@ type ShowAlert = (
   type?: 'info' | 'success' | 'error' | 'warning'
 ) => void;
 
-/**
- * Ensures the user has an active offline-download subscription, or prompts to pay Treats for 30 more days.
- * Returns true when a new download may proceed.
- */
 export async function ensureOfflineDownloadAllowedWithPaywall(
   showConfirm: ShowConfirm,
   showAlert: ShowAlert
@@ -115,7 +110,7 @@ export async function ensureOfflineDownloadAllowedWithPaywall(
   const cost = status.monthlyCostTreats;
   const ok = await showConfirm({
     title: 'Offline downloads',
-    message: `Offline downloads require an active subscription. Pay ${cost} Treats once to unlock 30 days of access. Renewing early stacks extra time. You need a Treats balance before continuing.`,
+    message: `Offline downloads require an active subscription. Pay ${cost} Treats once to unlock 30 days of access. Renewing early stacks extra time.`,
     confirmText: `Pay ${cost} Treats`,
     cancelText: 'Not now',
     variant: 'default',

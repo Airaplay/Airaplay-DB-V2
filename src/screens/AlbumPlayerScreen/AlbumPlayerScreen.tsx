@@ -37,7 +37,7 @@ import { shareSong, shareAlbum } from '../../lib/shareService';
 import { useAuth } from '../../contexts/AuthContext';
 import { useAlert } from '../../contexts/AlertContext';
 import { useOfflineSong } from '../../hooks/useOfflineSong';
-import { deleteOfflineSong, downloadOfflineSong } from '../../lib/offlineAudioService';
+import { deleteOfflineSong, downloadOfflineSong, isOfflineDownloadPlatformSupported } from '../../lib/offlineAudioService';
 import { ensureOfflineDownloadAllowedWithPaywall } from '../../lib/offlineDownloadEntitlement';
 import { CommentsModal, prefetchContentComments } from '../../components/CommentsModal';
 import { TippingModal } from '../../components/TippingModal';
@@ -133,8 +133,6 @@ const AlbumPlayer: React.FC<AlbumPlayerScreenProps & {
   const [showInlineAd, setShowInlineAd] = useState(false);
   const nativeAdTimersRef = useRef<{ show?: number; hide?: number }>({});
 
-  const currentTrackId = tracks?.[currentTrackIndex]?.id ?? null;
-  const { isAvailable: isTrackDownloaded } = useOfflineSong(currentTrackId);
   const [isDownloadInProgress, setIsDownloadInProgress] = useState(false);
 
   const { showRewarded, showSongBonusRewarded, showBanner, hideBanner, removeBanner, showInterstitial } = useAdPlacement('AlbumPlayerScreen');
@@ -161,6 +159,7 @@ const AlbumPlayer: React.FC<AlbumPlayerScreenProps & {
   const isThisAlbumActive = playlistContext === thisAlbumContext;
 
   const currentTrack = tracks?.[currentTrackIndex] || null;
+  const trackOfflineDownloaded = useOfflineSong(currentTrack?.id);
   const initialPathnameRef = useRef(location.pathname);
 
   // Close player when navigating to different routes (not within album routes)
@@ -817,46 +816,54 @@ const AlbumPlayer: React.FC<AlbumPlayerScreenProps & {
       return;
     }
 
-    const trackIsDownloaded = isTrackDownloaded;
+    if (!isOfflineDownloadPlatformSupported()) {
+      showAlert({
+        title: 'Offline downloads',
+        message: 'Saving music for offline listening is available in the Android app.',
+        type: 'info'
+      });
+      return;
+    }
 
-    if (trackIsDownloaded) {
+    if (trackOfflineDownloaded) {
       await deleteOfflineSong(currentTrack.id);
       showAlert({
         title: 'Download Removed',
         message: 'Track removed from offline downloads',
         type: 'success'
       });
-    } else {
-      setIsDownloadInProgress(true);
-      try {
-        const allowed = await ensureOfflineDownloadAllowedWithPaywall(showConfirm, showAlert);
-        if (!allowed) return;
+      return;
+    }
 
-        await downloadOfflineSong(
-          {
-            songId: currentTrack.id,
-            title: currentTrack.title,
-            artist: currentTrack.artist,
-            coverImageUrl: currentTrack.coverImageUrl || albumData.coverImageUrl || null,
-            durationSeconds: typeof currentTrack.duration === 'number' ? currentTrack.duration : null,
-          },
-          currentTrack.audioUrl
-        );
-        showAlert({
-          title: 'Download Complete',
-          message: 'Track downloaded for offline listening!',
-          type: 'success'
-        });
-      } catch (error) {
-        console.error('Error downloading track:', error);
-        showAlert({
-          title: 'Download Failed',
-          message: error instanceof Error ? error.message : 'Failed to download track. Please try again.',
-          type: 'error'
-        });
-      } finally {
-        setIsDownloadInProgress(false);
-      }
+    setIsDownloadInProgress(true);
+    try {
+      const allowed = await ensureOfflineDownloadAllowedWithPaywall(showConfirm, showAlert);
+      if (!allowed) return;
+
+      await downloadOfflineSong(
+        {
+          songId: currentTrack.id,
+          title: currentTrack.title,
+          artist: currentTrack.artist,
+          coverImageUrl: currentTrack.coverImageUrl || albumData.coverImageUrl || null,
+          durationSeconds: typeof currentTrack.duration === 'number' ? currentTrack.duration : null,
+        },
+        currentTrack.audioUrl
+      );
+      showAlert({
+        title: 'Download Complete',
+        message: 'Track saved for offline listening on this device.',
+        type: 'success'
+      });
+    } catch (error) {
+      console.error('Error downloading track:', error);
+      showAlert({
+        title: 'Download Failed',
+        message: error instanceof Error ? error.message : 'Failed to download track. Please try again.',
+        type: 'error'
+      });
+    } finally {
+      setIsDownloadInProgress(false);
     }
   };
 
@@ -962,11 +969,6 @@ const AlbumPlayer: React.FC<AlbumPlayerScreenProps & {
     }
     return num.toString();
   };
-
-  const downloadProgress = null;
-  const trackIsDownloaded = isTrackDownloaded;
-
-  // Removed redundant loading state - handled by parent component
 
   return (
     <div className="fixed inset-0 z-50 flex flex-col bg-[#0a0a0a] animate-in fade-in duration-300 touch-manipulation overflow-hidden pb-[env(safe-area-inset-bottom,0px)]">
@@ -1176,30 +1178,34 @@ const AlbumPlayer: React.FC<AlbumPlayerScreenProps & {
                 )}
               </div>
               <button
-                type="button"
-                onClick={handleDownloadAlbum}
-                disabled={isDownloadInProgress || !currentTrack?.audioUrl}
-                className={cn(
-                  'p-2 rounded-full transition-all',
-                  trackIsDownloaded ? 'text-[#00ad74]' : 'text-white/80 hover:text-white hover:bg-white/10',
-                  (isDownloadInProgress || !currentTrack?.audioUrl) && 'opacity-50 cursor-not-allowed'
-                )}
-                title={trackIsDownloaded ? 'Remove offline download' : 'Download for offline'}
-                aria-label={trackIsDownloaded ? 'Remove offline download' : 'Download for offline'}
-              >
-                {isDownloadInProgress ? (
-                  <Spinner size={18} className="text-white/80" />
-                ) : (
-                  <ArrowDownToLine className="w-[18px] h-[18px]" strokeWidth={2.25} />
-                )}
-              </button>
-              <button
                 onClick={handleShareAlbum}
                 className="p-2 rounded-full text-white/80 hover:text-white hover:bg-white/10 transition-all"
                 title="Share"
               >
                 <Share2 className="w-[18px] h-[18px]" />
               </button>
+              {currentTrack?.audioUrl ? (
+                <button
+                  type="button"
+                  onClick={() => void handleDownloadAlbum()}
+                  disabled={isDownloadInProgress}
+                  className={cn(
+                    'p-2 rounded-full transition-colors disabled:opacity-50',
+                    trackOfflineDownloaded
+                      ? 'shrink-0 hover:bg-red-500/20 active:bg-red-500/25'
+                      : 'text-white/80 hover:text-white hover:bg-white/10'
+                  )}
+                  title={trackOfflineDownloaded ? 'Remove offline download' : 'Download for offline'}
+                >
+                  {isDownloadInProgress ? (
+                    <Spinner size={18} className="text-white" />
+                  ) : trackOfflineDownloaded ? (
+                    <X className="w-3.5 h-3.5 text-white/50" aria-hidden />
+                  ) : (
+                    <ArrowDownToLine className="w-[18px] h-[18px]" />
+                  )}
+                </button>
+              ) : null}
               <button
                 onClick={handleToggleShuffle}
                 className={cn(
