@@ -13,7 +13,11 @@ import {
   deleteContentComment
 } from '../lib/supabase';
 import { formatDistanceToNowStrict } from 'date-fns';
+import { BannerAdPosition } from '@capacitor-community/admob';
 import { recordContribution } from '../lib/contributionService';
+import { usePlayerBottomBanner } from '../hooks/usePlayerBottomBanner';
+import { DEFAULT_BOTTOM_BANNER_AD_UNIT_ID } from '../lib/adPlacementConstants';
+import { admobService } from '../lib/admobService';
 
 const COMMENTS_CACHE_TTL_MS = 5 * 60 * 1000; // 5 minutes
 const commentsCache = new Map<string, { comments: Comment[]; ts: number }>();
@@ -42,6 +46,112 @@ interface Comment {
   replies?: Comment[];
   likes_count?: number;
   is_liked?: boolean;
+}
+
+const commentsPrefetchPromises = new Map<string, Promise<void>>();
+
+async function fetchCommentsForContent(
+  contentId: string,
+  contentType: string,
+  opts?: { userId?: string; isAuthenticated?: boolean }
+): Promise<Comment[]> {
+  const fetchedComments = await getContentComments(contentId, contentType || 'song');
+  const commentsMap = new Map<string, Comment>();
+  const rootComments: Comment[] = [];
+
+  fetchedComments.forEach((comment: Comment) => {
+    commentsMap.set(comment.id, { ...comment, replies: [] });
+  });
+
+  const commentIds = fetchedComments.map((c: Comment) => c.id);
+  if (commentIds.length > 0) {
+    try {
+      const likesPromises = commentIds.map(id =>
+        supabase.rpc('get_comment_likes_count', { comment_uuid: id })
+      );
+      const likedPromises = opts?.isAuthenticated && opts?.userId
+        ? commentIds.map(id => supabase.rpc('is_comment_liked_by_user', {
+            comment_uuid: id,
+            user_uuid: opts.userId
+          }))
+        : [];
+
+      const [likesResults, likedResults] = await Promise.all([
+        Promise.all(likesPromises),
+        Promise.all(likedPromises)
+      ]);
+
+      commentIds.forEach((id, index) => {
+        const commentWithLikes = commentsMap.get(id);
+        if (commentWithLikes) {
+          commentWithLikes.likes_count = likesResults[index]?.data || 0;
+          commentWithLikes.is_liked = likedResults[index]?.data || false;
+        }
+      });
+    } catch (err) {
+      console.error('Error loading comment likes:', err);
+      commentIds.forEach(id => {
+        const comment = commentsMap.get(id);
+        if (comment) {
+          comment.likes_count = 0;
+          comment.is_liked = false;
+        }
+      });
+    }
+  }
+
+  fetchedComments.forEach((comment: Comment) => {
+    if (comment.parent_comment_id) {
+      const parent = commentsMap.get(comment.parent_comment_id);
+      const currentComment = commentsMap.get(comment.id);
+      if (parent && currentComment) {
+        parent.replies = parent.replies || [];
+        parent.replies.push(currentComment);
+      }
+    } else {
+      const currentComment = commentsMap.get(comment.id);
+      if (currentComment) {
+        rootComments.push(currentComment);
+      }
+    }
+  });
+
+  return rootComments;
+}
+
+export async function prefetchContentComments(contentId: string, contentType: string = 'song'): Promise<void> {
+  const cacheKey = getCommentsCacheKey(contentId, contentType || 'song');
+  const cached = commentsCache.get(cacheKey);
+  if (cached && Date.now() - cached.ts < COMMENTS_CACHE_TTL_MS) {
+    return;
+  }
+
+  const inFlight = commentsPrefetchPromises.get(cacheKey);
+  if (inFlight) {
+    return inFlight;
+  }
+
+  const prefetchPromise = (async () => {
+    try {
+      const { data: authData } = await supabase.auth.getUser();
+      const userId = authData?.user?.id;
+      const prefetchedComments = await fetchCommentsForContent(contentId, contentType || 'song', {
+        userId: userId || undefined,
+        isAuthenticated: !!userId
+      });
+      commentsCache.set(cacheKey, {
+        comments: JSON.parse(JSON.stringify(prefetchedComments)),
+        ts: Date.now()
+      });
+    } catch (err) {
+      console.error('Error prefetching comments:', err);
+    } finally {
+      commentsPrefetchPromises.delete(cacheKey);
+    }
+  })();
+
+  commentsPrefetchPromises.set(cacheKey, prefetchPromise);
+  return prefetchPromise;
 }
 
 export const CommentsModal: React.FC<CommentsModalProps> = ({
@@ -74,6 +184,39 @@ export const CommentsModal: React.FC<CommentsModalProps> = ({
   const editTextRef = useRef<HTMLTextAreaElement>(null);
   const replyTextRef = useRef<HTMLTextAreaElement>(null);
 
+  // Native bottom banner while open (same pattern as TippingModal / TreatWithdrawalModal).
+  // margin 0: body.modal-open hides HTML nav — banner sits at bottom above safe area.
+  const COMMENTS_MODAL_AD_UNIT_ID = DEFAULT_BOTTOM_BANNER_AD_UNIT_ID;
+  const showCommentsModalBanner = async (
+    placementKey?: string,
+    position?: BannerAdPosition,
+    context?: Record<string, unknown>,
+    margin?: number
+  ) => {
+    await admobService
+      .showBanner(
+        position,
+        (context?.contentId as string | undefined) ?? contentId,
+        (context?.contentType as string | undefined) ?? contentType ?? 'song',
+        placementKey,
+        COMMENTS_MODAL_AD_UNIT_ID,
+        margin
+      )
+      .catch(() => {});
+  };
+  const hideCommentsModalBanner = (ownerPlacementKey?: string) => {
+    admobService.hideBannerOwnedBy(ownerPlacementKey).catch(() => {});
+  };
+  usePlayerBottomBanner(
+    'comments_modal_bottom_banner',
+    showCommentsModalBanner,
+    hideCommentsModalBanner,
+    () => ({ contentId, contentType: contentType || 'song' }),
+    [contentId, contentType],
+    true,
+    0
+  );
+
   // Define loadComments BEFORE any hooks or functions that reference it
   const loadComments = useCallback(async (opts?: { silent?: boolean }) => {
     try {
@@ -81,74 +224,9 @@ export const CommentsModal: React.FC<CommentsModalProps> = ({
         setIsLoading(true);
       }
       setError(null);
-
-      const fetchedComments = await getContentComments(contentId, contentType || 'song');
-
-      const commentsMap = new Map<string, Comment>();
-      const rootComments: Comment[] = [];
-
-      fetchedComments.forEach((comment: Comment) => {
-        commentsMap.set(comment.id, { ...comment, replies: [] });
-      });
-
-      // PERFORMANCE: Load all likes in parallel with Promise.all instead of sequential awaits
-      const commentIds = fetchedComments.map((c: Comment) => c.id);
-
-      if (commentIds.length > 0) {
-        try {
-          // Batch fetch all likes counts
-          const likesPromises = commentIds.map(id =>
-            supabase.rpc('get_comment_likes_count', { comment_uuid: id })
-          );
-
-          // Batch fetch user's liked status if authenticated
-          const likedPromises = isAuthenticated && user
-            ? commentIds.map(id => supabase.rpc('is_comment_liked_by_user', {
-                comment_uuid: id,
-                user_uuid: user.id
-              }))
-            : [];
-
-          const [likesResults, likedResults] = await Promise.all([
-            Promise.all(likesPromises),
-            Promise.all(likedPromises)
-          ]);
-
-          // Apply results to comments
-          commentIds.forEach((id, index) => {
-            const commentWithLikes = commentsMap.get(id);
-            if (commentWithLikes) {
-              commentWithLikes.likes_count = likesResults[index]?.data || 0;
-              commentWithLikes.is_liked = likedResults[index]?.data || false;
-            }
-          });
-        } catch (err) {
-          console.error('Error loading comment likes:', err);
-          // Set defaults on error
-          commentIds.forEach(id => {
-            const comment = commentsMap.get(id);
-            if (comment) {
-              comment.likes_count = 0;
-              comment.is_liked = false;
-            }
-          });
-        }
-      }
-
-      fetchedComments.forEach((comment: Comment) => {
-        if (comment.parent_comment_id) {
-          const parent = commentsMap.get(comment.parent_comment_id);
-          const currentComment = commentsMap.get(comment.id);
-          if (parent && currentComment) {
-            parent.replies = parent.replies || [];
-            parent.replies.push(currentComment);
-          }
-        } else {
-          const currentComment = commentsMap.get(comment.id);
-          if (currentComment) {
-            rootComments.push(currentComment);
-          }
-        }
+      const rootComments = await fetchCommentsForContent(contentId, contentType || 'song', {
+        userId: user?.id,
+        isAuthenticated
       });
 
       setComments(rootComments);
@@ -185,6 +263,15 @@ export const CommentsModal: React.FC<CommentsModalProps> = ({
       loadComments();
     }
   }, [contentId, contentType, isInitialized, loadComments]);
+
+  useEffect(() => {
+    document.body.classList.add('modal-open');
+    document.body.classList.add('modal-ad-banner-active');
+    return () => {
+      document.body.classList.remove('modal-open');
+      document.body.classList.remove('modal-ad-banner-active');
+    };
+  }, []);
 
   useEffect(() => {
     const checkMiniPlayer = () => {
@@ -775,21 +862,18 @@ export const CommentsModal: React.FC<CommentsModalProps> = ({
   };
 
   return (
-    <div className="fixed inset-0 bg-black/80 z-[110] flex items-end justify-center">
-      {/* Backdrop */}
+    <div className="fixed inset-0 z-[110] flex items-end justify-center">
+      {/* Backdrop — full viewport (body.modal-open hides bottom nav) */}
       <div
-        className="fixed inset-0"
+        className="absolute inset-0 bg-black/80"
         onClick={onClose}
       />
 
-      {/* Modal Container */}
+      {/* Modal Container — flush to bottom; safe area handled in input section */}
       <div
-        className="relative w-full max-w-lg bg-gradient-to-b from-[#1a1a1a] via-[#0d0d0d] to-[#000000] rounded-t-[20px] flex flex-col animate-in slide-in-from-bottom duration-300"
+        className="relative w-full max-w-lg bg-gradient-to-b from-[#1a1a1a] via-[#0d0d0d] to-[#000000] rounded-t-[24px] flex flex-col animate-in slide-in-from-bottom duration-300 md:rounded-[24px] shadow-[0_-8px_40px_rgba(0,0,0,0.5)]"
         style={{
-          maxHeight: isMiniPlayerActive
-            ? 'calc(100vh - 220px)'
-            : 'calc(100vh - 130px)',
-          marginBottom: isMiniPlayerActive ? '152px' : '64px',
+          maxHeight: isMiniPlayerActive ? 'min(88dvh, 100dvh)' : 'min(92dvh, 100dvh)',
         }}
       >
         {/* Header */}
@@ -866,7 +950,9 @@ export const CommentsModal: React.FC<CommentsModalProps> = ({
         <div
           className="flex-shrink-0 bg-[#0a0a0a] border-t border-white/[0.06]"
           style={{
-            paddingBottom: 'max(env(safe-area-inset-bottom), 12px)',
+            // Clear native adaptive banner (see --aira-banner-height) + safe area
+            paddingBottom:
+              'calc(max(env(safe-area-inset-bottom), 12px) + var(--aira-banner-height, 50px))',
           }}
         >
           {isAuthenticated ? (
@@ -887,26 +973,26 @@ export const CommentsModal: React.FC<CommentsModalProps> = ({
               )}
 
               <form onSubmit={handleAddComment} className="flex items-end gap-2.5">
-                <Avatar className="w-8 h-8 flex-shrink-0 mb-0.5">
+                <Avatar className="w-9 h-9 flex-shrink-0 mb-1 self-end">
                   <AvatarImage src={user?.user_metadata?.avatar_url} />
                   <AvatarFallback className="bg-white/10 text-white/70 text-xs">
                     {user?.email?.charAt(0).toUpperCase()}
                   </AvatarFallback>
                 </Avatar>
                 
-                <div className="flex-1 flex items-end gap-2 bg-white/[0.06] rounded-full px-4 py-2 min-h-[40px]">
+                <div className="flex-1 flex items-end gap-2 bg-white/[0.06] rounded-2xl px-4 py-2.5 min-h-[52px]">
                   <textarea
                     ref={newCommentRef}
                     value={newComment}
                     onChange={(e) => setNewComment(e.target.value)}
                     placeholder={replyingTo ? 'Write a reply...' : 'Add a comment...'}
-                    rows={1}
-                    className="flex-1 bg-transparent text-white text-sm placeholder-white/35 focus:outline-none resize-none py-0.5 max-h-[80px] leading-[1.4]"
+                    rows={2}
+                    className="flex-1 bg-transparent text-white text-[15px] placeholder-white/35 focus:outline-none resize-none py-1 max-h-[160px] leading-[1.45] min-h-[44px]"
                   />
                   <button
                     type="submit"
                     disabled={!newComment.trim() || isSubmitting || isSubmittingReply}
-                    className="flex-shrink-0 w-7 h-7 flex items-center justify-center rounded-full bg-white disabled:bg-white/15 disabled:cursor-not-allowed active:scale-95 transition-all"
+                    className="flex-shrink-0 w-9 h-9 flex items-center justify-center rounded-full bg-white disabled:bg-white/15 disabled:cursor-not-allowed active:scale-95 transition-all self-end mb-0.5"
                   >
                     {isSubmitting || isSubmittingReply ? (
                       <div className="w-3.5 h-3.5 border-2 border-black/30 border-t-black rounded-full animate-spin" />
