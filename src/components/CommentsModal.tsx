@@ -25,6 +25,9 @@ import { usePlayerBottomBanner } from '../hooks/usePlayerBottomBanner';
 import { DEFAULT_BOTTOM_BANNER_AD_UNIT_ID } from '../lib/adPlacementConstants';
 import { admobService } from '../lib/admobService';
 
+/** Re-export so `import { CommentsModal, prefetchContentComments } from './CommentsModal'` stays valid for Rollup and older deploys. */
+export { prefetchContentComments } from '../lib/contentCommentsCache';
+
 interface CommentsModalProps {
   contentId: string;
   contentTitle: string;

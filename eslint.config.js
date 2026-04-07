@@ -59,7 +59,10 @@ export default [
       'react/display-name': 'warn',
       'react-refresh/only-export-components': [
         'warn',
-        { allowConstantExport: true },
+        {
+          allowConstantExport: true,
+          allowExportNames: ['prefetchContentComments'],
+        },
       ],
       '@typescript-eslint/no-unused-vars': [
         'error',
@@ -143,7 +146,10 @@ export default [
       'react/display-name': 'warn',
       'react-refresh/only-export-components': [
         'warn',
-        { allowConstantExport: true },
+        {
+          allowConstantExport: true,
+          allowExportNames: ['prefetchContentComments'],
+        },
       ],
       'no-console': [
         'warn',
