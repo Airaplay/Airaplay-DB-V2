@@ -119,7 +119,7 @@ async function fetchCommentsForContent(
   return rootComments;
 }
 
-export async function prefetchContentComments(contentId: string, contentType: string = 'song'): Promise<void> {
+async function prefetchContentComments(contentId: string, contentType: string = 'song'): Promise<void> {
   const cacheKey = getCommentsCacheKey(contentId, contentType || 'song');
   const cached = commentsCache.get(cacheKey);
   if (cached && Date.now() - cached.ts < COMMENTS_CACHE_TTL_MS) {
@@ -153,6 +153,8 @@ export async function prefetchContentComments(contentId: string, contentType: st
   commentsPrefetchPromises.set(cacheKey, prefetchPromise);
   return prefetchPromise;
 }
+
+export { prefetchContentComments };
 
 export const CommentsModal: React.FC<CommentsModalProps> = ({
   contentId,
