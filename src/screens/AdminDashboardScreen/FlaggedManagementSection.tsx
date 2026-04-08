@@ -92,7 +92,7 @@ export const FlaggedManagementSection = (): JSX.Element => {
             review_status,
             reviewed_at,
             review_notes,
-            user:users!user_bot_flags_user_id_fkey(display_name, email)
+            user:users!user_bot_flags_public_user_id_fkey(display_name, email)
           `)
           .eq('is_flagged', true)
           .order('updated_at', { ascending: false }),
@@ -131,7 +131,7 @@ export const FlaggedManagementSection = (): JSX.Element => {
             review_status,
             reviewed_at,
             review_notes,
-            user:users!flagged_play_events_user_id_fkey(display_name, email)
+            user:users!flagged_play_events_public_user_id_fkey(display_name, email)
           `)
           .eq('review_status', 'pending')
           .order('detected_at', { ascending: false })
