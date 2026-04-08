@@ -21,6 +21,10 @@ interface AdMobConfig {
   credentials_encrypted: string;
   sync_days_back: number;
   default_safety_buffer_percentage: number;
+  auth_type?: "service_account" | "oauth2";
+  oauth_client_id?: string | null;
+  oauth_client_secret_encrypted?: string | null;
+  oauth_refresh_token_encrypted?: string | null;
 }
 
 interface GoogleTokenResponse {
@@ -245,17 +249,36 @@ Deno.serve(async (req: Request) => {
 
 async function testAdMobConnection(config: AdMobConfig): Promise<{ success: boolean; error?: string; account_info?: any }> {
   try {
-    if (!config.credentials_encrypted) {
-      return { success: false, error: "No service account credentials configured" };
+    const authType = config.auth_type ?? "service_account";
+    let accessToken: string | null = null;
+
+    if (authType === "oauth2") {
+      const clientId = config.oauth_client_id ?? null;
+      const clientSecret = config.oauth_client_secret_encrypted ?? null;
+      const refreshToken = config.oauth_refresh_token_encrypted ?? null;
+
+      if (!clientId || !clientSecret || !refreshToken) {
+        return { success: false, error: "Missing OAuth2 credentials (client_id, client_secret, refresh_token)" };
+      }
+
+      accessToken = await getOAuth2AccessToken({
+        clientId,
+        clientSecret,
+        refreshToken,
+      });
+    } else {
+      if (!config.credentials_encrypted) {
+        return { success: false, error: "No service account credentials configured" };
+      }
+
+      const credentials = JSON.parse(config.credentials_encrypted);
+
+      if (!credentials.client_email || !credentials.private_key) {
+        return { success: false, error: "Invalid service account credentials format" };
+      }
+
+      accessToken = await getGoogleAccessToken(credentials);
     }
-
-    const credentials = JSON.parse(config.credentials_encrypted);
-
-    if (!credentials.client_email || !credentials.private_key) {
-      return { success: false, error: "Invalid service account credentials format" };
-    }
-
-    const accessToken = await getGoogleAccessToken(credentials);
 
     if (!accessToken) {
       return { success: false, error: "Failed to obtain access token" };
@@ -381,8 +404,27 @@ async function syncAdMobRevenue(
   syncId: string,
   options: { dateFrom: string; dateTo: string; safetyBuffer: number }
 ): Promise<{ totalRevenue: number; recordsProcessed: number }> {
-  const credentials = JSON.parse(config.credentials_encrypted);
-  const accessToken = await getGoogleAccessToken(credentials);
+  const authType = config.auth_type ?? "service_account";
+  let accessToken: string | null = null;
+
+  if (authType === "oauth2") {
+    const clientId = config.oauth_client_id ?? null;
+    const clientSecret = config.oauth_client_secret_encrypted ?? null;
+    const refreshToken = config.oauth_refresh_token_encrypted ?? null;
+
+    if (!clientId || !clientSecret || !refreshToken) {
+      throw new Error("Missing OAuth2 credentials (client_id, client_secret, refresh_token)");
+    }
+
+    accessToken = await getOAuth2AccessToken({
+      clientId,
+      clientSecret,
+      refreshToken,
+    });
+  } else {
+    const credentials = JSON.parse(config.credentials_encrypted);
+    accessToken = await getGoogleAccessToken(credentials);
+  }
 
   if (!accessToken) {
     throw new Error("Failed to obtain access token for sync");
@@ -524,4 +566,35 @@ function formatDateForDb(dateStr: string): string {
   const month = dateStr.substring(4, 6);
   const day = dateStr.substring(6, 8);
   return `${year}-${month}-${day}`;
+}
+
+async function getOAuth2AccessToken(params: {
+  clientId: string;
+  clientSecret: string;
+  refreshToken: string;
+}): Promise<string | null> {
+  try {
+    const body = new URLSearchParams();
+    body.set("client_id", params.clientId);
+    body.set("client_secret", params.clientSecret);
+    body.set("refresh_token", params.refreshToken);
+    body.set("grant_type", "refresh_token");
+
+    const tokenResponse = await fetch("https://oauth2.googleapis.com/token", {
+      method: "POST",
+      headers: { "Content-Type": "application/x-www-form-urlencoded" },
+      body,
+    });
+
+    if (!tokenResponse.ok) {
+      console.error("OAuth2 refresh token request failed:", await tokenResponse.text());
+      return null;
+    }
+
+    const tokenData: GoogleTokenResponse = await tokenResponse.json();
+    return tokenData.access_token;
+  } catch (error) {
+    console.error("Failed to refresh OAuth2 access token:", error);
+    return null;
+  }
 }

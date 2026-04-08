@@ -169,6 +169,8 @@ export const AdRevenueSection = (): JSX.Element => {
     auth_type: 'service_account' as 'service_account' | 'oauth2',
     service_account_email: '',
     service_account_key: '',
+    oauth_client_json: '',
+    oauth_refresh_token: '',
     auto_sync_enabled: false,
     sync_frequency_hours: 24,
     sync_days_back: 7,
@@ -394,6 +396,8 @@ export const AdRevenueSection = (): JSX.Element => {
           auth_type: data.auth_type || 'service_account',
           service_account_email: data.service_account_email || '',
           service_account_key: '',
+          oauth_client_json: '',
+          oauth_refresh_token: '',
           auto_sync_enabled: data.auto_sync_enabled || false,
           sync_frequency_hours: data.sync_frequency_hours || 24,
           sync_days_back: data.sync_days_back || 7,
@@ -443,8 +447,36 @@ export const AdRevenueSection = (): JSX.Element => {
         updated_at: new Date().toISOString()
       };
 
-      if (admobFormData.service_account_key) {
-        configData.credentials_encrypted = admobFormData.service_account_key;
+      if (admobFormData.auth_type === 'service_account') {
+        if (admobFormData.service_account_key) {
+          configData.credentials_encrypted = admobFormData.service_account_key;
+        }
+      } else if (admobFormData.auth_type === 'oauth2') {
+        if (!admobFormData.oauth_client_json || !admobFormData.oauth_refresh_token) {
+          setError('OAuth2 requires both OAuth Client JSON and Refresh Token');
+          return;
+        }
+
+        let parsed: any;
+        try {
+          parsed = JSON.parse(admobFormData.oauth_client_json);
+        } catch {
+          setError('Invalid OAuth Client JSON (must be valid JSON)');
+          return;
+        }
+
+        const web = parsed?.web ?? parsed?.installed ?? null;
+        const clientId = web?.client_id ?? null;
+        const clientSecret = web?.client_secret ?? null;
+
+        if (!clientId || !clientSecret) {
+          setError('OAuth Client JSON must include web.client_id and web.client_secret (or installed.*)');
+          return;
+        }
+
+        configData.oauth_client_id = clientId;
+        configData.oauth_client_secret_encrypted = clientSecret;
+        configData.oauth_refresh_token_encrypted = admobFormData.oauth_refresh_token;
       }
 
       if (admobConfig) {
@@ -1338,6 +1370,56 @@ export const AdRevenueSection = (): JSX.Element => {
 
             <div>
               <label className="block text-sm font-medium text-gray-700 mb-1">
+                Authentication Type *
+              </label>
+              <select
+                value={admobFormData.auth_type}
+                onChange={(e) => setAdmobFormData(prev => ({ ...prev, auth_type: e.target.value as any }))}
+                className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
+              >
+                <option value="oauth2">OAuth2 (recommended)</option>
+                <option value="service_account">Service Account (may not work for AdMob API)</option>
+              </select>
+              <p className="text-xs text-gray-500 mt-1">
+                AdMob API calls must be authorized via OAuth2 on a user’s behalf.
+              </p>
+            </div>
+
+            {admobFormData.auth_type === 'oauth2' && (
+              <div className="space-y-4">
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-1">
+                    OAuth Client JSON *
+                  </label>
+                  <textarea
+                    value={admobFormData.oauth_client_json}
+                    onChange={(e) => setAdmobFormData(prev => ({ ...prev, oauth_client_json: e.target.value }))}
+                    placeholder='Paste the OAuth client JSON (e.g. {"web":{...}}) here...'
+                    rows={4}
+                    className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500 font-mono text-sm"
+                  />
+                </div>
+
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-1">
+                    OAuth Refresh Token *
+                  </label>
+                  <input
+                    type="password"
+                    value={admobFormData.oauth_refresh_token}
+                    onChange={(e) => setAdmobFormData(prev => ({ ...prev, oauth_refresh_token: e.target.value }))}
+                    placeholder="Paste refresh token here..."
+                    className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500 font-mono text-sm"
+                  />
+                  <p className="text-xs text-gray-500 mt-1">
+                    Must be generated with AdMob scopes (e.g. admob.readonly + admob.report) and offline access.
+                  </p>
+                </div>
+              </div>
+            )}
+
+            <div>
+              <label className="block text-sm font-medium text-gray-700 mb-1">
                 Service Account Email
               </label>
               <input
@@ -1349,21 +1431,23 @@ export const AdRevenueSection = (): JSX.Element => {
               />
             </div>
 
-            <div>
-              <label className="block text-sm font-medium text-gray-700 mb-1">
-                Service Account JSON Key {admobConfig ? '(Leave empty to keep existing)' : '*'}
-              </label>
-              <textarea
-                value={admobFormData.service_account_key}
-                onChange={(e) => setAdmobFormData(prev => ({ ...prev, service_account_key: e.target.value }))}
-                placeholder='Paste your service account JSON key here...'
-                rows={4}
-                className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500 font-mono text-sm"
-              />
-              <p className="text-xs text-gray-500 mt-1">
-                The JSON key from Google Cloud Console. This will be stored securely.
-              </p>
-            </div>
+            {admobFormData.auth_type === 'service_account' && (
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-1">
+                  Service Account JSON Key {admobConfig ? '(Leave empty to keep existing)' : '*'}
+                </label>
+                <textarea
+                  value={admobFormData.service_account_key}
+                  onChange={(e) => setAdmobFormData(prev => ({ ...prev, service_account_key: e.target.value }))}
+                  placeholder='Paste your service account JSON key here...'
+                  rows={4}
+                  className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500 font-mono text-sm"
+                />
+                <p className="text-xs text-gray-500 mt-1">
+                  The JSON key from Google Cloud Console. This will be stored securely.
+                </p>
+              </div>
+            )}
 
             <div className="grid grid-cols-3 xl:grid-cols-4 gap-4">
               <div>
