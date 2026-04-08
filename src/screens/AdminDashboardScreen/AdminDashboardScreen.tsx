@@ -114,9 +114,11 @@ export const AdminDashboardScreen = (): JSX.Element => {
     users: true,
     content: false,
     monetization: false,
+    accountant: false,
     advertising: false,
     engagement: false,
     system: false,
+    account: false,
   });
   const lastRoleCheckRef = useRef<number>(0);
   const ROLE_RECHECK_INTERVAL = 5 * 60 * 1000;
@@ -359,6 +361,20 @@ export const AdminDashboardScreen = (): JSX.Element => {
     );
   };
 
+  const NavActionItem = ({ onClick, icon, label, variant = 'default' }: { onClick: () => void; icon: React.ReactNode; label: string; variant?: 'default' | 'danger' }) => (
+    <button
+      onClick={onClick}
+      className={`w-full flex items-center gap-3 px-3 py-2 rounded-lg text-sm transition-all duration-150 ${
+        variant === 'danger'
+          ? 'text-gray-600 hover:bg-red-50 hover:text-red-600'
+          : 'text-gray-600 hover:bg-gray-50 hover:text-gray-900'
+      }`}
+    >
+      <span className="flex-shrink-0 text-gray-400">{icon}</span>
+      <span className="truncate">{label}</span>
+    </button>
+  );
+
   const NavGroup = ({ groupKey, label, children }: { groupKey: string; label: string; children: React.ReactNode }) => (
     <div className="mb-1">
       <button
@@ -464,14 +480,17 @@ export const AdminDashboardScreen = (): JSX.Element => {
 
           <NavGroup groupKey="monetization" label="Monetization">
             <NavItem section="earnings" icon={<DollarSign className="w-4 h-4" />} label="Earnings & Payouts" />
-            <NavItem section="artist_earnings_ledger" icon={<ScrollText className="w-4 h-4" />} label="Artist Earnings Ledger" />
-            <NavItem section="listener_earnings_ledger" icon={<Headphones className="w-4 h-4" />} label="Listener Earnings Ledger" />
             <NavItem section="support" icon={<Wallet className="w-4 h-4" />} label="Support & Withdrawals" />
+            <NavItem section="treat_manager" icon={<Coins className="w-4 h-4" />} label="Treat Manager" />
+            <NavItem section="promotional_credits" icon={<Gift className="w-4 h-4" />} label="Promo Credits" />
+          </NavGroup>
+
+          <NavGroup groupKey="accountant" label="Accountant">
             <NavItem section="payment_monitoring" icon={<Activity className="w-4 h-4" />} label="Payment Monitoring" />
             <NavItem section="financial_controls" icon={<Shield className="w-4 h-4" />} label="Financial Controls" />
             <NavItem section="accounting" icon={<BookOpen className="w-4 h-4" />} label="Accounting" />
-            <NavItem section="treat_manager" icon={<Coins className="w-4 h-4" />} label="Treat Manager" />
-            <NavItem section="promotional_credits" icon={<Gift className="w-4 h-4" />} label="Promo Credits" />
+            <NavItem section="artist_earnings_ledger" icon={<ScrollText className="w-4 h-4" />} label="Artist Earnings Ledger" />
+            <NavItem section="listener_earnings_ledger" icon={<Headphones className="w-4 h-4" />} label="Listener Earnings Ledger" />
           </NavGroup>
 
           <NavGroup groupKey="advertising" label="Advertising">
@@ -500,6 +519,12 @@ export const AdminDashboardScreen = (): JSX.Element => {
             <NavItem section="blog" icon={<BookOpen className="w-4 h-4" />} label="Blog" />
             <NavItem section="admin_settings" icon={<UserCog className="w-4 h-4" />} label="Admin Settings" />
           </NavGroup>
+
+          <NavGroup groupKey="account" label="Account">
+            <NavItem section="settings" icon={<Settings className="w-4 h-4" />} label="Settings" />
+            <NavActionItem onClick={() => navigate('/')} icon={<Home className="w-4 h-4" />} label="Back to App" />
+            <NavActionItem onClick={handleSignOut} icon={<LogOut className="w-4 h-4" />} label="Sign Out" variant="danger" />
+          </NavGroup>
         </nav>
 
         {/* User Footer */}
@@ -518,22 +543,6 @@ export const AdminDashboardScreen = (): JSX.Element => {
               <p className="text-gray-900 font-medium text-sm truncate">{userProfile?.display_name || 'Admin'}</p>
               <p className="text-xs text-gray-400 truncate capitalize">{userRole}</p>
             </div>
-          </div>
-          <div className="space-y-0.5">
-            <button
-              onClick={() => navigate('/')}
-              className="w-full flex items-center gap-2.5 px-3 py-2 rounded-lg text-gray-500 hover:bg-gray-50 hover:text-gray-700 transition-colors text-sm"
-            >
-              <Home className="w-4 h-4" />
-              <span>Back to App</span>
-            </button>
-            <button
-              onClick={handleSignOut}
-              className="w-full flex items-center gap-2.5 px-3 py-2 rounded-lg text-gray-500 hover:bg-red-50 hover:text-red-600 transition-colors text-sm"
-            >
-              <LogOut className="w-4 h-4" />
-              <span>Sign Out</span>
-            </button>
           </div>
         </div>
       </aside>
