@@ -109,6 +109,7 @@ DECLARE
   v_max_gap_s numeric := NULL;
 
   v_ip_address text := NULL;
+  v_user_agent text := NULL;
   v_distinct_users_same_ip int := 0;
 BEGIN
   -- Check cache first (5 min TTL table already exists).
@@ -378,6 +379,47 @@ BEGIN
   -- Persist a user-level bot flag when we decide it's fraudulent.
   -- This is used by Contributor Score gating and admin review tooling.
   IF v_is_fraudulent THEN
+    -- Best-effort: capture most recent request metadata for audit/review.
+    IF p_content_type IN ('song', 'audio') THEN
+      SELECT lh.ip_address, lh.user_agent
+      INTO v_ip_address, v_user_agent
+      FROM public.listening_history lh
+      WHERE lh.user_id = p_user_id
+      ORDER BY lh.listened_at DESC
+      LIMIT 1;
+    ELSE
+      SELECT vh.ip_address, vh.user_agent
+      INTO v_ip_address, v_user_agent
+      FROM public.video_playback_history vh
+      WHERE vh.user_id = p_user_id
+      ORDER BY vh.watched_at DESC
+      LIMIT 1;
+    END IF;
+
+    -- Append an event row (safe no-op if table not present in some envs).
+    IF EXISTS (
+      SELECT 1
+      FROM information_schema.tables
+      WHERE table_schema = 'public' AND table_name = 'flagged_play_events'
+    ) THEN
+      INSERT INTO public.flagged_play_events (
+        user_id,
+        content_id,
+        content_type,
+        reason,
+        ip_address,
+        user_agent
+      )
+      VALUES (
+        p_user_id,
+        p_content_id,
+        p_content_type,
+        v_fraud_reason,
+        v_ip_address,
+        v_user_agent
+      );
+    END IF;
+
     INSERT INTO public.user_bot_flags (user_id, is_flagged, reason, flagged_at, updated_at)
     VALUES (p_user_id, true, v_fraud_reason, now(), now())
     ON CONFLICT (user_id)

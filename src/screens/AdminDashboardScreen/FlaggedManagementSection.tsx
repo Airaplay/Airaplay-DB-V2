@@ -4,7 +4,7 @@ import { supabase } from '../../lib/supabase';
 import { Card, CardContent } from '../../components/ui/card';
 import { LoadingLogo } from '../../components/LoadingLogo';
 
-type FlaggedTab = 'accounts' | 'referrals';
+type FlaggedTab = 'accounts' | 'referrals' | 'plays';
 
 type ReviewStatus = 'pending' | 'cleared' | 'confirmed';
 
@@ -38,6 +38,21 @@ interface FlaggedReferralRow {
   referred: { display_name: string | null; email: string | null } | null;
 }
 
+interface FlaggedPlayEventRow {
+  id: number;
+  user_id: string;
+  content_id: string;
+  content_type: string;
+  reason: string | null;
+  ip_address: string | null;
+  user_agent: string | null;
+  detected_at: string;
+  review_status: ReviewStatus;
+  reviewed_at: string | null;
+  review_notes: string | null;
+  user: { display_name: string | null; email: string | null } | null;
+}
+
 const formatName = (u: { display_name: string | null; email: string | null } | null): string => {
   if (!u) return 'Unknown';
   return u.display_name || u.email || 'Unknown';
@@ -56,6 +71,7 @@ export const FlaggedManagementSection = (): JSX.Element => {
 
   const [flaggedAccounts, setFlaggedAccounts] = useState<FlaggedAccountRow[]>([]);
   const [flaggedReferrals, setFlaggedReferrals] = useState<FlaggedReferralRow[]>([]);
+  const [flaggedPlays, setFlaggedPlays] = useState<FlaggedPlayEventRow[]>([]);
 
   const [actionNotes, setActionNotes] = useState('');
 
@@ -64,7 +80,7 @@ export const FlaggedManagementSection = (): JSX.Element => {
       setIsLoading(true);
       setError(null);
 
-      const [accountsRes, referralsRes] = await Promise.all([
+      const [accountsRes, referralsRes, playsRes] = await Promise.all([
         supabase
           .from('user_bot_flags')
           .select(`
@@ -101,13 +117,34 @@ export const FlaggedManagementSection = (): JSX.Element => {
           `)
           .eq('flagged_for_abuse', true)
           .order('created_at', { ascending: false }),
+        supabase
+          .from('flagged_play_events')
+          .select(`
+            id,
+            user_id,
+            content_id,
+            content_type,
+            reason,
+            ip_address,
+            user_agent,
+            detected_at,
+            review_status,
+            reviewed_at,
+            review_notes,
+            user:users!flagged_play_events_user_id_fkey(display_name, email)
+          `)
+          .eq('review_status', 'pending')
+          .order('detected_at', { ascending: false })
+          .limit(200),
       ]);
 
       if (accountsRes.error) throw accountsRes.error;
       if (referralsRes.error) throw referralsRes.error;
+      if (playsRes.error) throw playsRes.error;
 
       setFlaggedAccounts((accountsRes.data || []) as any);
       setFlaggedReferrals((referralsRes.data || []) as any);
+      setFlaggedPlays((playsRes.data || []) as any);
     } catch (e: any) {
       console.error('Error loading flagged items:', e);
       setError(e?.message || 'Failed to load flagged items');
@@ -131,6 +168,12 @@ export const FlaggedManagementSection = (): JSX.Element => {
     const confirmed = flaggedReferrals.filter(r => r.abuse_review_status === 'confirmed').length;
     return { total: flaggedReferrals.length, pending, confirmed };
   }, [flaggedReferrals]);
+
+  const playCounts = useMemo(() => {
+    const pending = flaggedPlays.filter(p => p.review_status === 'pending').length;
+    const confirmed = flaggedPlays.filter(p => p.review_status === 'confirmed').length;
+    return { total: flaggedPlays.length, pending, confirmed };
+  }, [flaggedPlays]);
 
   const clearBotFlag = async (userId: string) => {
     try {
@@ -160,6 +203,22 @@ export const FlaggedManagementSection = (): JSX.Element => {
     } catch (e: any) {
       console.error('Error reviewing referral abuse flag:', e);
       alert(e?.message || 'Failed to update referral flag');
+    }
+  };
+
+  const reviewPlayEvent = async (eventId: number, clear: boolean) => {
+    try {
+      const { error: rpcError } = await supabase.rpc('admin_review_flagged_play_event', {
+        p_event_id: eventId,
+        p_clear: clear,
+        p_notes: actionNotes || null,
+      });
+      if (rpcError) throw rpcError;
+      setActionNotes('');
+      await load();
+    } catch (e: any) {
+      console.error('Error reviewing play event:', e);
+      alert(e?.message || 'Failed to update play event');
     }
   };
 
@@ -200,7 +259,7 @@ export const FlaggedManagementSection = (): JSX.Element => {
         </div>
       )}
 
-      <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+      <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
         <Card>
           <CardContent className="p-6">
             <div className="flex items-center justify-between mb-2">
@@ -220,6 +279,17 @@ export const FlaggedManagementSection = (): JSX.Element => {
             </div>
             <p className="text-3xl font-bold text-gray-900">{referralCounts.total}</p>
             <p className="text-xs text-gray-500 mt-1">Confirmed: {referralCounts.confirmed}</p>
+          </CardContent>
+        </Card>
+
+        <Card>
+          <CardContent className="p-6">
+            <div className="flex items-center justify-between mb-2">
+              <h3 className="text-gray-600 text-sm font-medium">Flagged Plays</h3>
+              <span className="text-xs text-gray-500">{playCounts.pending} pending</span>
+            </div>
+            <p className="text-3xl font-bold text-gray-900">{playCounts.total}</p>
+            <p className="text-xs text-gray-500 mt-1">Confirmed: {playCounts.confirmed}</p>
           </CardContent>
         </Card>
       </div>
@@ -244,6 +314,16 @@ export const FlaggedManagementSection = (): JSX.Element => {
           }`}
         >
           Referrals
+        </button>
+        <button
+          onClick={() => setActiveTab('plays')}
+          className={`px-4 py-2 rounded-lg font-medium transition-colors ${
+            activeTab === 'plays'
+              ? 'bg-[#309605] text-white'
+              : 'bg-gray-100 text-gray-700 hover:bg-gray-200'
+          }`}
+        >
+          Content / Plays
         </button>
 
         <div className="flex-1" />
@@ -315,7 +395,7 @@ export const FlaggedManagementSection = (): JSX.Element => {
             </div>
           </CardContent>
         </Card>
-      ) : (
+      ) : activeTab === 'referrals' ? (
         <Card>
           <CardContent className="p-6">
             <h3 className="text-lg font-semibold text-gray-900 mb-4">Flagged Referrals</h3>
@@ -375,6 +455,72 @@ export const FlaggedManagementSection = (): JSX.Element => {
                     <tr>
                       <td colSpan={5} className="py-8 text-center text-gray-500">
                         No flagged referrals.
+                      </td>
+                    </tr>
+                  )}
+                </tbody>
+              </table>
+            </div>
+          </CardContent>
+        </Card>
+      ) : (
+        <Card>
+          <CardContent className="p-6">
+            <h3 className="text-lg font-semibold text-gray-900 mb-4">Flagged Content / Plays</h3>
+
+            <div className="overflow-x-auto scrollbar-hide">
+              <table className="w-full">
+                <thead>
+                  <tr className="border-b border-gray-200">
+                    <th className="text-left py-3 px-4 text-sm font-medium text-gray-700">User</th>
+                    <th className="text-left py-3 px-4 text-sm font-medium text-gray-700">Content</th>
+                    <th className="text-left py-3 px-4 text-sm font-medium text-gray-700">Reason</th>
+                    <th className="text-left py-3 px-4 text-sm font-medium text-gray-700">Detected</th>
+                    <th className="text-left py-3 px-4 text-sm font-medium text-gray-700">Actions</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {flaggedPlays.map((p) => (
+                    <tr key={p.id} className="border-b border-gray-100 hover:bg-gray-50">
+                      <td className="py-3 px-4 text-sm text-gray-900">
+                        <div className="font-medium">{formatName(p.user)}</div>
+                        <div className="text-xs text-gray-500 font-mono">{p.user_id.slice(0, 8)}…</div>
+                      </td>
+                      <td className="py-3 px-4 text-sm text-gray-700">
+                        <div className="font-mono text-xs">{p.content_type}:{p.content_id.slice(0, 8)}…</div>
+                        <div className="text-xs text-gray-400">{p.ip_address || '—'}</div>
+                      </td>
+                      <td className="py-3 px-4 text-sm text-gray-700">{p.reason || '—'}</td>
+                      <td className="py-3 px-4 text-sm text-gray-600">
+                        {p.detected_at ? new Date(p.detected_at).toLocaleString() : '—'}
+                      </td>
+                      <td className="py-3 px-4">
+                        <div className="flex items-center gap-2">
+                          <button
+                            onClick={() => reviewPlayEvent(p.id, false)}
+                            className="px-3 py-2 bg-red-600 text-white rounded-lg hover:bg-red-700 transition-colors text-sm font-medium flex items-center gap-2"
+                            title="Confirm flagged play"
+                          >
+                            <XCircle className="w-4 h-4" />
+                            Confirm
+                          </button>
+                          <button
+                            onClick={() => reviewPlayEvent(p.id, true)}
+                            className="px-3 py-2 bg-gray-900 text-white rounded-lg hover:bg-black transition-colors text-sm font-medium flex items-center gap-2"
+                            title="Clear flagged play"
+                          >
+                            <CheckCircle className="w-4 h-4" />
+                            Clear
+                          </button>
+                        </div>
+                      </td>
+                    </tr>
+                  ))}
+
+                  {flaggedPlays.length === 0 && (
+                    <tr>
+                      <td colSpan={5} className="py-8 text-center text-gray-500">
+                        No flagged plays.
                       </td>
                     </tr>
                   )}
