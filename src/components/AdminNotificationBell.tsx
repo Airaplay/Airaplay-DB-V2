@@ -1,5 +1,5 @@
-import React, { useState, useEffect } from 'react';
-import { Bell, X, Check, AlertTriangle, DollarSign, HelpCircle, TrendingUp } from 'lucide-react';
+import React, { useMemo, useState, useEffect } from 'react';
+import { Bell, X, Check, AlertTriangle, DollarSign, HelpCircle, TrendingUp, Trash2, Square, CheckSquare } from 'lucide-react';
 import { supabase } from '../lib/supabase';
 
 interface NotificationCounts {
@@ -21,7 +21,7 @@ interface Notification {
 }
 
 interface AdminNotificationBellProps {
-  onNavigateToSection?: (section: string) => void;
+  onNavigateToSection?: (_section: string) => void;
 }
 
 export const AdminNotificationBell: React.FC<AdminNotificationBellProps> = ({ onNavigateToSection }) => {
@@ -35,6 +35,8 @@ export const AdminNotificationBell: React.FC<AdminNotificationBellProps> = ({ on
   });
   const [recentNotifications, setRecentNotifications] = useState<Notification[]>([]);
   const [isLoading, setIsLoading] = useState(true);
+  const [isDeleting, setIsDeleting] = useState(false);
+  const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
 
   useEffect(() => {
     fetchNotificationCounts();
@@ -94,6 +96,7 @@ export const AdminNotificationBell: React.FC<AdminNotificationBellProps> = ({ on
       if (error) throw error;
 
       setRecentNotifications(data || []);
+      setSelectedIds(new Set());
     } catch (error) {
       console.error('Error fetching recent notifications:', error);
     } finally {
@@ -116,12 +119,70 @@ export const AdminNotificationBell: React.FC<AdminNotificationBellProps> = ({ on
 
   const handleMarkAllAsRead = async () => {
     try {
-      await supabase.rpc('mark_all_notifications_read');
+      await supabase.rpc('mark_all_admin_action_notifications_read');
 
       fetchNotificationCounts();
       fetchRecentNotifications();
     } catch (error) {
       console.error('Error marking all notifications as read:', error);
+    }
+  };
+
+  const handleDeleteNotification = async (notificationId: string) => {
+    try {
+      setIsDeleting(true);
+      const { error } = await supabase.rpc('delete_admin_action_notification', {
+        p_notification_id: notificationId
+      });
+      if (error) throw error;
+
+      fetchNotificationCounts();
+      fetchRecentNotifications();
+    } catch (error) {
+      console.error('Error deleting notification:', error);
+    } finally {
+      setIsDeleting(false);
+    }
+  };
+
+  const selectedCount = useMemo(() => selectedIds.size, [selectedIds]);
+  const allSelected = useMemo(() => {
+    if (recentNotifications.length === 0) return false;
+    return selectedIds.size === recentNotifications.length;
+  }, [recentNotifications.length, selectedIds]);
+
+  const toggleSelected = (id: string) => {
+    setSelectedIds(prev => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  };
+
+  const toggleSelectAll = () => {
+    setSelectedIds(prev => {
+      if (recentNotifications.length === 0) return prev;
+      if (prev.size === recentNotifications.length) return new Set();
+      return new Set(recentNotifications.map(n => n.id));
+    });
+  };
+
+  const handleDeleteSelected = async () => {
+    if (selectedIds.size === 0) return;
+    try {
+      setIsDeleting(true);
+      const { error } = await supabase.rpc('delete_admin_action_notifications', {
+        p_notification_ids: Array.from(selectedIds)
+      });
+      if (error) throw error;
+
+      fetchNotificationCounts();
+      fetchRecentNotifications();
+    } catch (error) {
+      console.error('Error deleting selected notifications:', error);
+    } finally {
+      setIsDeleting(false);
     }
   };
 
@@ -207,6 +268,31 @@ export const AdminNotificationBell: React.FC<AdminNotificationBellProps> = ({ on
             <div className="p-4 border-b border-gray-200 flex items-center justify-between">
               <h3 className="font-bold text-gray-900 text-lg">Notifications</h3>
               <div className="flex items-center gap-2">
+                {recentNotifications.length > 0 && (
+                  <>
+                    <button
+                      onClick={toggleSelectAll}
+                      className="p-1.5 hover:bg-gray-100 rounded-lg transition-colors"
+                      title={allSelected ? 'Unselect all' : 'Select all'}
+                      aria-label={allSelected ? 'Unselect all' : 'Select all'}
+                    >
+                      {allSelected ? (
+                        <CheckSquare className="w-4 h-4 text-gray-700" />
+                      ) : (
+                        <Square className="w-4 h-4 text-gray-700" />
+                      )}
+                    </button>
+                    <button
+                      onClick={handleDeleteSelected}
+                      disabled={isDeleting || selectedCount === 0}
+                      className="p-1.5 hover:bg-gray-100 rounded-lg transition-colors disabled:opacity-50 disabled:pointer-events-none"
+                      title={selectedCount > 0 ? `Delete selected (${selectedCount})` : 'Select notifications to delete'}
+                      aria-label="Delete selected notifications"
+                    >
+                      <Trash2 className="w-4 h-4 text-red-600" />
+                    </button>
+                  </>
+                )}
                 {counts.total > 0 && (
                   <button
                     onClick={handleMarkAllAsRead}
@@ -269,19 +355,43 @@ export const AdminNotificationBell: React.FC<AdminNotificationBellProps> = ({ on
                 <div className="flex flex-col items-center justify-center p-8 text-center">
                   <Bell className="w-12 h-12 text-gray-400 mb-3" />
                   <p className="text-gray-600 font-medium">No notifications</p>
-                  <p className="text-gray-500 text-sm mt-1">You're all caught up</p>
+                  <p className="text-gray-500 text-sm mt-1">You&apos;re all caught up</p>
                 </div>
               ) : (
                 <div>
                   {recentNotifications.map((notification) => (
-                    <button
+                    <div
                       key={notification.id}
                       onClick={() => handleNotificationClick(notification)}
                       className={`w-full p-4 border-b border-gray-200 hover:bg-gray-50 transition-colors text-left ${
                         !notification.is_read ? 'bg-blue-50' : ''
-                      }`}
+                      } cursor-pointer`}
+                      role="button"
+                      tabIndex={0}
+                      onKeyDown={(e) => {
+                        if (e.key === 'Enter' || e.key === ' ') {
+                          e.preventDefault();
+                          handleNotificationClick(notification);
+                        }
+                      }}
                     >
                       <div className="flex items-start gap-3">
+                        <button
+                          className="flex-shrink-0 mt-1 p-1 rounded hover:bg-white/70"
+                          onClick={(e) => {
+                            e.preventDefault();
+                            e.stopPropagation();
+                            toggleSelected(notification.id);
+                          }}
+                          aria-label={selectedIds.has(notification.id) ? 'Unselect notification' : 'Select notification'}
+                          title={selectedIds.has(notification.id) ? 'Unselect' : 'Select'}
+                        >
+                          {selectedIds.has(notification.id) ? (
+                            <CheckSquare className="w-4 h-4 text-gray-700" />
+                          ) : (
+                            <Square className="w-4 h-4 text-gray-700" />
+                          )}
+                        </button>
                         <div className="flex-shrink-0 w-8 h-8 bg-white rounded-lg flex items-center justify-center border border-gray-200">
                           {getNotificationIcon(notification.notification_type)}
                         </div>
@@ -304,8 +414,21 @@ export const AdminNotificationBell: React.FC<AdminNotificationBellProps> = ({ on
                         {!notification.is_read && (
                           <div className="flex-shrink-0 w-2 h-2 bg-blue-600 rounded-full mt-2"></div>
                         )}
+                        <button
+                          className="flex-shrink-0 p-1.5 rounded-lg hover:bg-white/70 disabled:opacity-50 disabled:pointer-events-none"
+                          onClick={(e) => {
+                            e.preventDefault();
+                            e.stopPropagation();
+                            handleDeleteNotification(notification.id);
+                          }}
+                          disabled={isDeleting}
+                          aria-label="Delete notification"
+                          title="Delete notification"
+                        >
+                          <Trash2 className="w-4 h-4 text-red-600" />
+                        </button>
                       </div>
-                    </button>
+                    </div>
                   ))}
                 </div>
               )}
