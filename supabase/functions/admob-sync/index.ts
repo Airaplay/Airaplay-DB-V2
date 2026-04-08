@@ -294,6 +294,29 @@ async function testAdMobConnection(config: AdMobConfig): Promise<{ success: bool
       return { success: false, error: "Failed to obtain access token" };
     }
 
+    try {
+      const tokenInfoResponse = await fetch(
+        `https://www.googleapis.com/oauth2/v1/tokeninfo?access_token=${encodeURIComponent(accessToken)}`
+      );
+      if (tokenInfoResponse.ok) {
+        const tokenInfo = await tokenInfoResponse.json();
+        console.log("[admob-sync][oauth2] tokeninfo", {
+          issued_to: tokenInfo?.issued_to ?? null,
+          audience: tokenInfo?.audience ?? null,
+          scope: tokenInfo?.scope ?? null,
+          expires_in: tokenInfo?.expires_in ?? null,
+        });
+      } else {
+        console.error("[admob-sync][oauth2] tokeninfo failed", {
+          status: tokenInfoResponse.status,
+          statusText: tokenInfoResponse.statusText,
+          body: await tokenInfoResponse.text(),
+        });
+      }
+    } catch (tokenInfoError) {
+      console.error("[admob-sync][oauth2] tokeninfo request threw", tokenInfoError);
+    }
+
     const accountsResponse = await fetch(
       `https://admob.googleapis.com/v1/accounts`,
       {
