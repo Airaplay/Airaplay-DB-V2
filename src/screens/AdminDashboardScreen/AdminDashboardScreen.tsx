@@ -282,9 +282,9 @@ export const AdminDashboardScreen = (): JSX.Element => {
         case 'blog': return <BlogManagementSection />;
         case 'analytics': return <AnalyticsOverviewSection />;
         case 'country_performance': return <CountryPerformanceSection />;
-        case 'earnings': return <EarningsPayoutSettingsSection />;
-        case 'withdrawal_requests': return <EarningsPayoutSettingsSection initialMainTab="withdrawal_requests" />;
-        case 'exchange_rates': return <EarningsPayoutSettingsSection initialMainTab="exchange_rates" />;
+        case 'earnings': return <EarningsPayoutSettingsSection visibleTabs={['withdrawal_settings', 'payout_settings']} />;
+        case 'withdrawal_requests': return <EarningsPayoutSettingsSection initialMainTab="withdrawal_requests" visibleTabs={['withdrawal_requests']} />;
+        case 'exchange_rates': return <EarningsPayoutSettingsSection initialMainTab="exchange_rates" visibleTabs={['exchange_rates']} />;
         case 'support': return <SupportTicketsSection />;
         case 'analysis': return <AnalysisSection />;
         case 'announcements': return <AnnouncementsSection />;

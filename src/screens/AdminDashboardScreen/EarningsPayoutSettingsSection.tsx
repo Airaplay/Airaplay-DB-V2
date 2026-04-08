@@ -36,7 +36,15 @@ interface PayoutSetting {
 
 type EarningsMainTab = 'withdrawal_settings' | 'withdrawal_requests' | 'payout_settings' | 'exchange_rates';
 
-export const EarningsPayoutSettingsSection = ({ initialMainTab }: { initialMainTab?: EarningsMainTab }): JSX.Element => {
+const DEFAULT_VISIBLE_TABS: readonly EarningsMainTab[] = ['withdrawal_settings', 'payout_settings'];
+
+export const EarningsPayoutSettingsSection = ({
+  initialMainTab,
+  visibleTabs = DEFAULT_VISIBLE_TABS,
+}: {
+  initialMainTab?: EarningsMainTab;
+  visibleTabs?: readonly EarningsMainTab[];
+}): JSX.Element => {
   // Payout settings state
   const [payoutSettings, setPayoutSettings] = useState<PayoutSetting[]>([]);
   const [isLoadingSettings, setIsLoadingSettings] = useState(true);
@@ -59,7 +67,13 @@ export const EarningsPayoutSettingsSection = ({ initialMainTab }: { initialMainT
   const [isDeletingSetting, setIsDeletingSetting] = useState<string | null>(null);
   
   // Main tab state
-  const [mainTab, setMainTab] = useState<EarningsMainTab>(initialMainTab ?? 'withdrawal_settings');
+  const resolveInitialTab = (): EarningsMainTab => {
+    const requested = initialMainTab ?? 'withdrawal_settings';
+    if (visibleTabs.includes(requested)) return requested;
+    return visibleTabs[0] ?? 'withdrawal_settings';
+  };
+
+  const [mainTab, setMainTab] = useState<EarningsMainTab>(resolveInitialTab);
 
   
   // Form data for editing/creating settings
@@ -420,7 +434,7 @@ export const EarningsPayoutSettingsSection = ({ initialMainTab }: { initialMainT
       <div className="bg-white rounded-xl border border-gray-100 shadow-sm">
         <div className="border-b border-gray-100">
           <nav className="flex gap-1 px-4 pt-1">
-            {(['withdrawal_settings', 'withdrawal_requests', 'payout_settings', 'exchange_rates'] as const).map((tab) => {
+            {visibleTabs.map((tab) => {
               const labels: Record<string, string> = {
                 withdrawal_settings: 'Withdrawal Settings',
                 withdrawal_requests: 'Withdrawal Requests',
