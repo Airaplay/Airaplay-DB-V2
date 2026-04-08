@@ -139,14 +139,12 @@ Deno.serve(async (req: Request) => {
     if (sync_type === "test") {
       const testResult = await testAdMobConnection(config);
 
-      await supabase
-        .from("admob_api_config")
-        .update({
-          connection_status: testResult.success ? "connected" : "error",
-          last_connection_test: new Date().toISOString(),
-          connection_error: testResult.success ? null : testResult.error,
-        })
-        .eq("id", config_id);
+      // Keep status updates aligned with DB function/schema (last_error/last_error_at).
+      await supabase.rpc("update_admob_connection_status", {
+        p_config_id: config_id,
+        p_status: testResult.success ? "connected" : "error",
+        p_error: testResult.success ? null : (testResult.error ?? null),
+      });
 
       return new Response(
         JSON.stringify(testResult),
