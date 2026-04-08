@@ -163,7 +163,7 @@ export const AdRevenueSection = (): JSX.Element => {
   const [showAdmobSetup, setShowAdmobSetup] = useState(false);
   const [isSavingAdmob, setIsSavingAdmob] = useState(false);
   const [isSyncing, setIsSyncing] = useState(false);
-  const [syncMode, setSyncMode] = useState<'range' | 'today'>('range');
+  const [syncMode, setSyncMode] = useState<'range' | 'today' | 'yesterday' | '7d' | '28d'>('range');
   const [admobFormData, setAdmobFormData] = useState({
     publisher_id: '',
     account_name: '',
@@ -615,7 +615,24 @@ export const AdRevenueSection = (): JSX.Element => {
     setError(null);
 
     try {
-      const todayDate = format(new Date(), 'yyyy-MM-dd');
+      const toDateOnly = (d: Date): string => format(d, 'yyyy-MM-dd');
+      const today = new Date();
+      today.setHours(0, 0, 0, 0);
+
+      const yesterday = new Date(today);
+      yesterday.setDate(yesterday.getDate() - 1);
+
+      const dateRange =
+        syncMode === 'today'
+          ? { date_from: toDateOnly(today), date_to: toDateOnly(today) }
+          : syncMode === 'yesterday'
+            ? { date_from: toDateOnly(yesterday), date_to: toDateOnly(yesterday) }
+            : syncMode === '7d'
+              ? { date_from: toDateOnly(new Date(today.getTime() - 6 * 24 * 60 * 60 * 1000)), date_to: toDateOnly(today) }
+              : syncMode === '28d'
+                ? { date_from: toDateOnly(new Date(today.getTime() - 27 * 24 * 60 * 60 * 1000)), date_to: toDateOnly(today) }
+                : null;
+
       // Edge function verifies the requester by validating a Supabase user JWT.
       const { data: { session }, error: sessionError } = await supabase.auth.getSession();
       if (sessionError || !session?.access_token) {
@@ -633,9 +650,7 @@ export const AdRevenueSection = (): JSX.Element => {
           body: JSON.stringify({
             config_id: admobConfig.id,
             sync_type: 'manual',
-            ...(syncMode === 'today'
-              ? { date_from: todayDate, date_to: todayDate }
-              : {})
+            ...(dateRange ? dateRange : {})
           })
         }
       );
@@ -646,11 +661,18 @@ export const AdRevenueSection = (): JSX.Element => {
         throw new Error(result.error || 'Sync failed');
       }
 
-      setSuccess(
+      const label =
         syncMode === 'today'
-          ? `Today-only sync completed! Fetched ${result.records_processed || 0} records.`
-          : `Sync completed! Fetched ${result.records_processed || 0} records.`
-      );
+          ? 'Today'
+          : syncMode === 'yesterday'
+            ? 'Yesterday'
+            : syncMode === '7d'
+              ? 'Last 7 days'
+              : syncMode === '28d'
+                ? 'Last 28 days'
+                : 'Default range';
+
+      setSuccess(`${label} sync completed! Fetched ${result.records_processed || 0} records.`);
       fetchAdmobConfig();
       fetchDailyRevenueInputs();
       fetchRevenueData();
@@ -1330,13 +1352,16 @@ export const AdRevenueSection = (): JSX.Element => {
                 <div className="flex items-center gap-2">
                   <select
                     value={syncMode}
-                    onChange={(e) => setSyncMode(e.target.value as 'range' | 'today')}
+                    onChange={(e) => setSyncMode(e.target.value as any)}
                     className="px-2 py-2 border border-gray-300 rounded-lg text-sm bg-white"
                     disabled={isSyncing}
                     title="Sync range"
                   >
                     <option value="range">Default range</option>
-                    <option value="today">Today only</option>
+                    <option value="today">Today</option>
+                    <option value="yesterday">Yesterday</option>
+                    <option value="7d">Last 7 days</option>
+                    <option value="28d">Last 28 days</option>
                   </select>
                   <button
                     onClick={handleSyncAdmobRevenue}
@@ -1348,7 +1373,7 @@ export const AdRevenueSection = (): JSX.Element => {
                     ) : (
                       <Play className="w-4 h-4" />
                     )}
-                    <span>{syncMode === 'today' ? 'Sync Today' : 'Sync Now'}</span>
+                    <span>Sync</span>
                   </button>
                 </div>
               )}
