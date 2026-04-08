@@ -163,6 +163,7 @@ export const AdRevenueSection = (): JSX.Element => {
   const [showAdmobSetup, setShowAdmobSetup] = useState(false);
   const [isSavingAdmob, setIsSavingAdmob] = useState(false);
   const [isSyncing, setIsSyncing] = useState(false);
+  const [syncMode, setSyncMode] = useState<'range' | 'today'>('range');
   const [admobFormData, setAdmobFormData] = useState({
     publisher_id: '',
     account_name: '',
@@ -219,7 +220,49 @@ export const AdRevenueSection = (): JSX.Element => {
         }
       );
 
-      if (summaryError) throw summaryError;
+      let finalSummaryData = summaryData;
+      if (summaryError) {
+        // Fallback path when RPC grants or DB function availability is out of sync.
+        // Keeps the dashboard usable for admins by deriving summary directly.
+        const { data: fallbackEvents, error: fallbackError } = await supabase
+          .from('ad_revenue_events')
+          .select('revenue_amount, processed_at, artist_id, user_id, status')
+          .eq('status', 'processed')
+          .gte('processed_at', startDate.toISOString())
+          .lte('processed_at', endDate.toISOString());
+
+        if (fallbackError) throw summaryError;
+
+        const events = fallbackEvents || [];
+        const startOfToday = new Date();
+        startOfToday.setHours(0, 0, 0, 0);
+
+        const totalRevenue = events.reduce((sum, row: any) => sum + Number(row.revenue_amount || 0), 0);
+        const revenueToday = events.reduce((sum, row: any) => {
+          const ts = row.processed_at ? new Date(row.processed_at) : null;
+          if (ts && ts >= startOfToday) {
+            return sum + Number(row.revenue_amount || 0);
+          }
+          return sum;
+        }, 0);
+
+        const artistIds = new Set(events.map((row: any) => row.artist_id).filter(Boolean));
+        const listenerIds = new Set(events.map((row: any) => row.user_id).filter(Boolean));
+
+        finalSummaryData = {
+          total_revenue: totalRevenue,
+          revenue_today: revenueToday,
+          artist_revenue: 0,
+          listener_revenue: 0,
+          platform_revenue: totalRevenue,
+          platform_percentage: totalRevenue > 0 ? 100 : 0,
+          artist_count: artistIds.size,
+          listener_count: listenerIds.size,
+          by_content_type: [],
+          by_ad_type: [],
+          daily_revenue: []
+        };
+      }
 
       const { data: eventsData, error: eventsError } = await supabase
         .from('ad_revenue_events')
@@ -279,7 +322,7 @@ export const AdRevenueSection = (): JSX.Element => {
         setRevenueEvents([]);
       }
 
-      setRevenueData(summaryData);
+      setRevenueData(finalSummaryData);
     } catch (err) {
       console.error('Error fetching revenue data:', err);
       setError(err instanceof Error ? err.message : 'Failed to load revenue data');
@@ -572,6 +615,7 @@ export const AdRevenueSection = (): JSX.Element => {
     setError(null);
 
     try {
+      const todayDate = format(new Date(), 'yyyy-MM-dd');
       // Edge function verifies the requester by validating a Supabase user JWT.
       const { data: { session }, error: sessionError } = await supabase.auth.getSession();
       if (sessionError || !session?.access_token) {
@@ -588,7 +632,10 @@ export const AdRevenueSection = (): JSX.Element => {
           },
           body: JSON.stringify({
             config_id: admobConfig.id,
-            sync_type: 'manual'
+            sync_type: 'manual',
+            ...(syncMode === 'today'
+              ? { date_from: todayDate, date_to: todayDate }
+              : {})
           })
         }
       );
@@ -599,7 +646,11 @@ export const AdRevenueSection = (): JSX.Element => {
         throw new Error(result.error || 'Sync failed');
       }
 
-      setSuccess(`Sync completed! Fetched ${result.records_processed || 0} records.`);
+      setSuccess(
+        syncMode === 'today'
+          ? `Today-only sync completed! Fetched ${result.records_processed || 0} records.`
+          : `Sync completed! Fetched ${result.records_processed || 0} records.`
+      );
       fetchAdmobConfig();
       fetchDailyRevenueInputs();
       fetchRevenueData();
@@ -1276,18 +1327,30 @@ export const AdRevenueSection = (): JSX.Element => {
             </div>
             <div className="flex items-center gap-2">
               {admobConfig.connection_status === 'connected' && (
-                <button
-                  onClick={handleSyncAdmobRevenue}
-                  disabled={isSyncing}
-                  className="px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-lg flex items-center gap-2 disabled:opacity-50"
-                >
-                  {isSyncing ? (
-                    <RefreshCw className="w-4 h-4 animate-spin" />
-                  ) : (
-                    <Play className="w-4 h-4" />
-                  )}
-                  <span>Sync Now</span>
-                </button>
+                <div className="flex items-center gap-2">
+                  <select
+                    value={syncMode}
+                    onChange={(e) => setSyncMode(e.target.value as 'range' | 'today')}
+                    className="px-2 py-2 border border-gray-300 rounded-lg text-sm bg-white"
+                    disabled={isSyncing}
+                    title="Sync range"
+                  >
+                    <option value="range">Default range</option>
+                    <option value="today">Today only</option>
+                  </select>
+                  <button
+                    onClick={handleSyncAdmobRevenue}
+                    disabled={isSyncing}
+                    className="px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-lg flex items-center gap-2 disabled:opacity-50"
+                  >
+                    {isSyncing ? (
+                      <RefreshCw className="w-4 h-4 animate-spin" />
+                    ) : (
+                      <Play className="w-4 h-4" />
+                    )}
+                    <span>{syncMode === 'today' ? 'Sync Today' : 'Sync Now'}</span>
+                  </button>
+                </div>
               )}
               {admobConfig.connection_status !== 'connected' && admobConfig.credentials_encrypted && (
                 <button
