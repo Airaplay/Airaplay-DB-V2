@@ -41,8 +41,9 @@ import { BlogManagementSection } from './BlogManagementSection';
 import { AccountingSection } from './AccountingSection';
 import { ArtistEarningsLedgerSection } from './ArtistEarningsLedgerSection';
 import { ListenerEarningsLedgerSection } from './ListenerEarningsLedgerSection';
+import { FlaggedManagementSection } from './FlaggedManagementSection';
 
-type SectionType = 'users' | 'content' | 'faqs' | 'analytics' | 'country_performance' | 'settings' | 'earnings' | 'analysis' | 'announcements' | 'admin_settings' | 'ad_management' | 'native_ads' | 'web_ads' | 'feature_banners' | 'treat_manager' | 'daily_checkin' | 'referral_management' | 'promotion_manager' | 'reports' | 'featured_artists' | 'mix_manager' | 'daily_mix_manager' | 'global_daily_mix_manager' | 'genre_manager' | 'payment_monitoring' | 'mood_analysis' | 'listener_curations' | 'contribution_rewards' | 'content_thresholds' | 'financial_controls' | 'promotional_credits' | 'support' | 'blog' | 'accounting' | 'artist_earnings_ledger' | 'listener_earnings_ledger';
+type SectionType = 'users' | 'content' | 'faqs' | 'analytics' | 'country_performance' | 'settings' | 'earnings' | 'analysis' | 'announcements' | 'admin_settings' | 'ad_management' | 'native_ads' | 'web_ads' | 'feature_banners' | 'treat_manager' | 'daily_checkin' | 'referral_management' | 'promotion_manager' | 'reports' | 'featured_artists' | 'mix_manager' | 'daily_mix_manager' | 'global_daily_mix_manager' | 'genre_manager' | 'payment_monitoring' | 'mood_analysis' | 'listener_curations' | 'contribution_rewards' | 'content_thresholds' | 'financial_controls' | 'promotional_credits' | 'support' | 'blog' | 'accounting' | 'artist_earnings_ledger' | 'listener_earnings_ledger' | 'flagged';
 
 const ADMIN_ROLES = ['admin', 'manager', 'editor', 'account'];
 
@@ -74,6 +75,7 @@ const getSectionLabel = (section: SectionType): string => {
     treat_manager: 'Treat Manager',
     daily_checkin: 'Daily Check-in',
     referral_management: 'Referral Management',
+    flagged: 'Flagged',
     promotion_manager: 'Promotions',
     featured_artists: 'Featured Artists',
     listener_curations: 'Listener Curations',
@@ -288,6 +290,7 @@ export const AdminDashboardScreen = (): JSX.Element => {
         case 'treat_manager': return <TreatManagerSection />;
         case 'daily_checkin': return <DailyCheckinSection />;
         case 'referral_management': return <ReferralManagementSection />;
+        case 'flagged': return <FlaggedManagementSection />;
         case 'promotion_manager': return <PromotionManagerSection />;
         case 'reports': return <ReportManagementSection />;
         case 'featured_artists': return <FeaturedArtistsSection />;
@@ -456,6 +459,7 @@ export const AdminDashboardScreen = (): JSX.Element => {
             <NavItem section="content_thresholds" icon={<Tags className="w-4 h-4" />} label="Section Thresholds" />
             <NavItem section="featured_artists" icon={<Star className="w-4 h-4" />} label="Featured Artists" />
             <NavItem section="reports" icon={<Flag className="w-4 h-4" />} label="Reports" />
+            <NavItem section="flagged" icon={<AlertTriangle className="w-4 h-4" />} label="Flagged" />
           </NavGroup>
 
           <NavGroup groupKey="monetization" label="Monetization">

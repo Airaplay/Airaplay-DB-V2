@@ -208,6 +208,8 @@ BEGIN
         UPDATE public.referrals
         SET
           flagged_for_abuse = true,
+          abuse_reason = v_abuse_reason,
+          abuse_flagged_at = COALESCE(public.referrals.abuse_flagged_at, now()),
           status = 'active',
           is_active = true,
           last_activity = now()
