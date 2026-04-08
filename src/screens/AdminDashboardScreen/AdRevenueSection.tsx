@@ -482,6 +482,12 @@ export const AdRevenueSection = (): JSX.Element => {
     setError(null);
 
     try {
+      // Edge function verifies the requester by validating a Supabase user JWT.
+      const { data: { session }, error: sessionError } = await supabase.auth.getSession();
+      if (sessionError || !session?.access_token) {
+        throw new Error('Not authenticated: please sign in as an admin and try again');
+      }
+
       await supabase.rpc('update_admob_connection_status', {
         p_config_id: admobConfig.id,
         p_status: 'syncing'
@@ -492,7 +498,7 @@ export const AdRevenueSection = (): JSX.Element => {
         {
           method: 'POST',
           headers: {
-            'Authorization': `Bearer ${import.meta.env.VITE_SUPABASE_ANON_KEY}`,
+            'Authorization': `Bearer ${session.access_token}`,
             'Content-Type': 'application/json',
           },
           body: JSON.stringify({
@@ -534,12 +540,18 @@ export const AdRevenueSection = (): JSX.Element => {
     setError(null);
 
     try {
+      // Edge function verifies the requester by validating a Supabase user JWT.
+      const { data: { session }, error: sessionError } = await supabase.auth.getSession();
+      if (sessionError || !session?.access_token) {
+        throw new Error('Not authenticated: please sign in as an admin and try again');
+      }
+
       const response = await fetch(
         `${import.meta.env.VITE_SUPABASE_URL}/functions/v1/admob-sync`,
         {
           method: 'POST',
           headers: {
-            'Authorization': `Bearer ${import.meta.env.VITE_SUPABASE_ANON_KEY}`,
+            'Authorization': `Bearer ${session.access_token}`,
             'Content-Type': 'application/json',
           },
           body: JSON.stringify({
