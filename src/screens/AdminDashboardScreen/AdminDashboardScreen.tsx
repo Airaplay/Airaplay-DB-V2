@@ -1,6 +1,6 @@
 import { useState, useEffect, useCallback, useRef } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { Users, FileText, HelpCircle, BarChart, Settings, LogOut, Home, DollarSign, BarChart2, Bell, UserCog, Zap, Image, Coins, Wallet, Calendar, UserPlus, Megaphone, Flag, Star, Music, Tags, Sparkles, ListMusic, Shield, Award, Trophy, TrendingUp, Activity, Gift, Globe, Monitor, ChevronDown, ChevronRight, Menu, X, BookOpen, ScrollText, Headphones } from 'lucide-react';
+import { Users, FileText, HelpCircle, BarChart, Settings, LogOut, Home, DollarSign, BarChart2, Bell, UserCog, Zap, Image, Coins, Wallet, Calendar, UserPlus, Megaphone, Flag, Star, Music, Tags, Sparkles, ListMusic, Shield, Award, Trophy, TrendingUp, Activity, Gift, Globe, Monitor, ChevronDown, ChevronRight, Menu, X, BookOpen, ScrollText, Headphones, AlertTriangle } from 'lucide-react';
 import { supabase, getUserRole } from '../../lib/supabase';
 import { cacheInvalidation } from '../../lib/enhancedDataFetching';
 import { performCompleteLogout } from '../../lib/logoutService';
