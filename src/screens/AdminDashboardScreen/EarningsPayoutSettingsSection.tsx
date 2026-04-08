@@ -34,7 +34,9 @@ interface PayoutSetting {
   updated_at: string;
 }
 
-export const EarningsPayoutSettingsSection = (): JSX.Element => {
+type EarningsMainTab = 'withdrawal_settings' | 'withdrawal_requests' | 'payout_settings' | 'exchange_rates';
+
+export const EarningsPayoutSettingsSection = ({ initialMainTab }: { initialMainTab?: EarningsMainTab }): JSX.Element => {
   // Payout settings state
   const [payoutSettings, setPayoutSettings] = useState<PayoutSetting[]>([]);
   const [isLoadingSettings, setIsLoadingSettings] = useState(true);
@@ -57,7 +59,7 @@ export const EarningsPayoutSettingsSection = (): JSX.Element => {
   const [isDeletingSetting, setIsDeletingSetting] = useState<string | null>(null);
   
   // Main tab state
-  const [mainTab, setMainTab] = useState<'withdrawal_settings' | 'withdrawal_requests' | 'payout_settings' | 'exchange_rates'>('withdrawal_settings');
+  const [mainTab, setMainTab] = useState<EarningsMainTab>(initialMainTab ?? 'withdrawal_settings');
 
   
   // Form data for editing/creating settings

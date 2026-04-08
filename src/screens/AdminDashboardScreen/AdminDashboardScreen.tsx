@@ -43,7 +43,7 @@ import { ArtistEarningsLedgerSection } from './ArtistEarningsLedgerSection';
 import { ListenerEarningsLedgerSection } from './ListenerEarningsLedgerSection';
 import { FlaggedManagementSection } from './FlaggedManagementSection';
 
-type SectionType = 'users' | 'content' | 'faqs' | 'analytics' | 'country_performance' | 'settings' | 'earnings' | 'analysis' | 'announcements' | 'admin_settings' | 'ad_management' | 'native_ads' | 'web_ads' | 'feature_banners' | 'treat_manager' | 'daily_checkin' | 'referral_management' | 'promotion_manager' | 'reports' | 'featured_artists' | 'mix_manager' | 'daily_mix_manager' | 'global_daily_mix_manager' | 'genre_manager' | 'payment_monitoring' | 'mood_analysis' | 'listener_curations' | 'contribution_rewards' | 'content_thresholds' | 'financial_controls' | 'promotional_credits' | 'support' | 'blog' | 'accounting' | 'artist_earnings_ledger' | 'listener_earnings_ledger' | 'flagged';
+type SectionType = 'users' | 'content' | 'faqs' | 'analytics' | 'country_performance' | 'settings' | 'earnings' | 'withdrawal_requests' | 'exchange_rates' | 'analysis' | 'announcements' | 'admin_settings' | 'ad_management' | 'native_ads' | 'web_ads' | 'feature_banners' | 'treat_manager' | 'daily_checkin' | 'referral_management' | 'promotion_manager' | 'reports' | 'featured_artists' | 'mix_manager' | 'daily_mix_manager' | 'global_daily_mix_manager' | 'genre_manager' | 'payment_monitoring' | 'mood_analysis' | 'listener_curations' | 'contribution_rewards' | 'content_thresholds' | 'financial_controls' | 'promotional_credits' | 'support' | 'blog' | 'accounting' | 'artist_earnings_ledger' | 'listener_earnings_ledger' | 'flagged';
 
 const ADMIN_ROLES = ['admin', 'manager', 'editor', 'account'];
 
@@ -62,6 +62,8 @@ const getSectionLabel = (section: SectionType): string => {
     users: 'User Management',
     content: 'Content Management',
     earnings: 'Earnings & Payouts',
+    withdrawal_requests: 'Withdrawal Requests',
+    exchange_rates: 'Exchange Rates',
     support: 'Support & Withdrawals',
     payment_monitoring: 'Payment Monitoring',
     reports: 'Reports',
@@ -256,13 +258,13 @@ export const AdminDashboardScreen = (): JSX.Element => {
   const hasAccessToSection = (section: SectionType): boolean => {
     if (userRole === 'admin') return true;
     if (userRole === 'manager') {
-      return section !== 'admin_settings' && section !== 'treat_manager' && section !== 'payment_monitoring' && section !== 'financial_controls' && section !== 'promotional_credits' && section !== 'country_performance';
+      return section !== 'admin_settings' && section !== 'treat_manager' && section !== 'payment_monitoring' && section !== 'financial_controls' && section !== 'promotional_credits' && section !== 'country_performance' && section !== 'withdrawal_requests' && section !== 'exchange_rates' && section !== 'accounting' && section !== 'artist_earnings_ledger' && section !== 'listener_earnings_ledger';
     }
     if (userRole === 'editor') {
       return ['content', 'faqs', 'blog'].includes(section);
     }
     if (userRole === 'account') {
-      return ['analytics', 'earnings', 'support', 'payment_monitoring', 'financial_controls', 'promotional_credits', 'treat_manager', 'country_performance', 'accounting', 'artist_earnings_ledger', 'listener_earnings_ledger'].includes(section);
+      return ['analytics', 'earnings', 'withdrawal_requests', 'exchange_rates', 'support', 'payment_monitoring', 'financial_controls', 'promotional_credits', 'treat_manager', 'country_performance', 'accounting', 'artist_earnings_ledger', 'listener_earnings_ledger'].includes(section);
     }
     return false;
   };
@@ -281,6 +283,8 @@ export const AdminDashboardScreen = (): JSX.Element => {
         case 'analytics': return <AnalyticsOverviewSection />;
         case 'country_performance': return <CountryPerformanceSection />;
         case 'earnings': return <EarningsPayoutSettingsSection />;
+        case 'withdrawal_requests': return <EarningsPayoutSettingsSection initialMainTab="withdrawal_requests" />;
+        case 'exchange_rates': return <EarningsPayoutSettingsSection initialMainTab="exchange_rates" />;
         case 'support': return <SupportTicketsSection />;
         case 'analysis': return <AnalysisSection />;
         case 'announcements': return <AnnouncementsSection />;
@@ -487,6 +491,8 @@ export const AdminDashboardScreen = (): JSX.Element => {
 
           <NavGroup groupKey="accountant" label="Accountant">
             <NavItem section="payment_monitoring" icon={<Activity className="w-4 h-4" />} label="Payment Monitoring" />
+            <NavItem section="withdrawal_requests" icon={<Wallet className="w-4 h-4" />} label="Withdrawal Requests" />
+            <NavItem section="exchange_rates" icon={<Globe className="w-4 h-4" />} label="Exchange Rates" />
             <NavItem section="financial_controls" icon={<Shield className="w-4 h-4" />} label="Financial Controls" />
             <NavItem section="accounting" icon={<BookOpen className="w-4 h-4" />} label="Accounting" />
             <NavItem section="artist_earnings_ledger" icon={<ScrollText className="w-4 h-4" />} label="Artist Earnings Ledger" />
@@ -517,11 +523,11 @@ export const AdminDashboardScreen = (): JSX.Element => {
             <NavItem section="mood_analysis" icon={<TrendingUp className="w-4 h-4" />} label="Mood Analysis" />
             <NavItem section="faqs" icon={<HelpCircle className="w-4 h-4" />} label="FAQs" />
             <NavItem section="blog" icon={<BookOpen className="w-4 h-4" />} label="Blog" />
-            <NavItem section="admin_settings" icon={<UserCog className="w-4 h-4" />} label="Admin Settings" />
           </NavGroup>
 
           <NavGroup groupKey="account" label="Account">
             <NavItem section="settings" icon={<Settings className="w-4 h-4" />} label="Settings" />
+            <NavItem section="admin_settings" icon={<UserCog className="w-4 h-4" />} label="Admin Settings & Roles" />
             <NavActionItem onClick={() => navigate('/')} icon={<Home className="w-4 h-4" />} label="Back to App" />
             <NavActionItem onClick={handleSignOut} icon={<LogOut className="w-4 h-4" />} label="Sign Out" variant="danger" />
           </NavGroup>
