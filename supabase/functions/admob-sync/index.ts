@@ -251,6 +251,15 @@ async function testAdMobConnection(config: AdMobConfig): Promise<{ success: bool
   try {
     const authType = config.auth_type ?? "service_account";
     let accessToken: string | null = null;
+    console.log("[admob-sync][test] Starting connection test", {
+      config_id: config.id,
+      auth_type: authType,
+      has_service_account_payload: Boolean(config.credentials_encrypted),
+      has_oauth_client_id: Boolean(config.oauth_client_id),
+      has_oauth_client_secret: Boolean(config.oauth_client_secret_encrypted),
+      has_oauth_refresh_token: Boolean(config.oauth_refresh_token_encrypted),
+      publisher_id: config.publisher_id,
+    });
 
     if (authType === "oauth2") {
       const clientId = config.oauth_client_id ?? null;
@@ -281,6 +290,7 @@ async function testAdMobConnection(config: AdMobConfig): Promise<{ success: bool
     }
 
     if (!accessToken) {
+      console.error("[admob-sync][test] Failed to obtain access token");
       return { success: false, error: "Failed to obtain access token" };
     }
 
@@ -296,6 +306,11 @@ async function testAdMobConnection(config: AdMobConfig): Promise<{ success: bool
 
     if (!accountsResponse.ok) {
       const errorData = await accountsResponse.json();
+      console.error("[admob-sync][test] AdMob accounts call failed", {
+        status: accountsResponse.status,
+        statusText: accountsResponse.statusText,
+        google_error: errorData?.error ?? null,
+      });
       return {
         success: false,
         error: `AdMob API error: ${errorData.error?.message || accountsResponse.statusText}`
@@ -303,6 +318,9 @@ async function testAdMobConnection(config: AdMobConfig): Promise<{ success: bool
     }
 
     const accountsData = await accountsResponse.json();
+    console.log("[admob-sync][test] AdMob accounts call succeeded", {
+      account_count: Array.isArray(accountsData?.account) ? accountsData.account.length : 0,
+    });
 
     return {
       success: true,
@@ -574,6 +592,12 @@ async function getOAuth2AccessToken(params: {
   refreshToken: string;
 }): Promise<string | null> {
   try {
+    console.log("[admob-sync][oauth2] Refreshing OAuth2 access token", {
+      client_id_suffix: params.clientId.slice(-8),
+      has_client_secret: Boolean(params.clientSecret),
+      has_refresh_token: Boolean(params.refreshToken),
+    });
+
     const body = new URLSearchParams();
     body.set("client_id", params.clientId);
     body.set("client_secret", params.clientSecret);
@@ -587,14 +611,23 @@ async function getOAuth2AccessToken(params: {
     });
 
     if (!tokenResponse.ok) {
-      console.error("OAuth2 refresh token request failed:", await tokenResponse.text());
+      console.error("[admob-sync][oauth2] Refresh token request failed", {
+        status: tokenResponse.status,
+        statusText: tokenResponse.statusText,
+        body: await tokenResponse.text(),
+      });
       return null;
     }
 
     const tokenData: GoogleTokenResponse = await tokenResponse.json();
+    console.log("[admob-sync][oauth2] Access token refresh succeeded", {
+      token_type: tokenData.token_type,
+      expires_in: tokenData.expires_in,
+      has_access_token: Boolean(tokenData.access_token),
+    });
     return tokenData.access_token;
   } catch (error) {
-    console.error("Failed to refresh OAuth2 access token:", error);
+    console.error("[admob-sync][oauth2] Failed to refresh OAuth2 access token", error);
     return null;
   }
 }
