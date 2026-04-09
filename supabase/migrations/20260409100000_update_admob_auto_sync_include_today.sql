@@ -12,7 +12,8 @@
   `date_from` and `date_to` (today) to the `admob-sync` edge function.
 */
 
-CREATE EXTENSION IF NOT EXISTS pg_net;
+-- NOTE: `pg_net` is already enabled on Supabase projects (used elsewhere in this repo).
+-- Avoid creating extensions inside migrations when possible.
 
 CREATE OR REPLACE FUNCTION public.trigger_admob_auto_sync()
 RETURNS integer

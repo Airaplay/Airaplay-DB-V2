@@ -13,7 +13,9 @@
   - Uses a per-date advisory lock to avoid concurrent runs
 */
 
-CREATE EXTENSION IF NOT EXISTS pg_cron;
+-- NOTE: `pg_cron` is already enabled on Supabase projects.
+-- Avoid `CREATE EXTENSION pg_cron` here because it can trigger privilege rewrite scripts that fail
+-- when dependent grants exist. If `cron.*` objects are missing, enable `pg_cron` from the Supabase dashboard.
 
 CREATE OR REPLACE FUNCTION public.system_lock_and_distribute_creator_pool()
 RETURNS integer

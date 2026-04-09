@@ -18,7 +18,8 @@
   - For any active config with auto sync enabled + due `next_sync_at`, it calls the edge function.
 */
 
-CREATE EXTENSION IF NOT EXISTS pg_net;
+-- NOTE: `pg_net` is already enabled on Supabase projects (used elsewhere in this repo).
+-- Avoid creating extensions inside migrations when possible.
 
 -- Reuse helper (safe if it already exists)
 CREATE OR REPLACE FUNCTION get_supabase_url()
