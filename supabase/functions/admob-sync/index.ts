@@ -66,27 +66,8 @@ Deno.serve(async (req: Request) => {
     }
 
     const token = authHeader.replace("Bearer ", "");
-    const { data: { user }, error: authError } = await supabase.auth.getUser(token);
-
-    if (authError || !user) {
-      return new Response(
-        JSON.stringify({ error: "Invalid authentication" }),
-        { status: 401, headers: { ...corsHeaders, "Content-Type": "application/json" } }
-      );
-    }
-
-    const { data: userData, error: userError } = await supabase
-      .from("users")
-      .select("role")
-      .eq("id", user.id)
-      .maybeSingle();
-
-    if (userError || !userData || userData.role !== "admin") {
-      return new Response(
-        JSON.stringify({ error: "Admin access required" }),
-        { status: 403, headers: { ...corsHeaders, "Content-Type": "application/json" } }
-      );
-    }
+    const serviceKey = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY") ?? "";
+    const isServiceRole = Boolean(serviceKey) && token === serviceKey;
 
     const requestData: SyncRequest = await req.json();
     const { config_id, sync_type, date_from, date_to } = requestData;
@@ -96,6 +77,32 @@ Deno.serve(async (req: Request) => {
         JSON.stringify({ error: "config_id is required" }),
         { status: 400, headers: { ...corsHeaders, "Content-Type": "application/json" } }
       );
+    }
+
+    // Auth:
+    // - manual/test: require an authenticated admin user JWT
+    // - scheduled: allow either admin JWT or service-role (pg_cron/pg_net)
+    if (!(isServiceRole && sync_type === "scheduled")) {
+      const { data: { user }, error: authError } = await supabase.auth.getUser(token);
+      if (authError || !user) {
+        return new Response(
+          JSON.stringify({ error: "Invalid authentication" }),
+          { status: 401, headers: { ...corsHeaders, "Content-Type": "application/json" } }
+        );
+      }
+
+      const { data: userData, error: userError } = await supabase
+        .from("users")
+        .select("role")
+        .eq("id", user.id)
+        .maybeSingle();
+
+      if (userError || !userData || userData.role !== "admin") {
+        return new Response(
+          JSON.stringify({ error: "Admin access required" }),
+          { status: 403, headers: { ...corsHeaders, "Content-Type": "application/json" } }
+        );
+      }
     }
 
     // Check rate limit for non-test operations
@@ -160,6 +167,7 @@ Deno.serve(async (req: Request) => {
         sync_status: "in_progress",
         date_range_start: date_from || getDateNDaysAgo(config.sync_days_back || 7),
         date_range_end: date_to || getYesterday(),
+        started_at: new Date().toISOString(),
       })
       .select()
       .single();
@@ -186,9 +194,23 @@ Deno.serve(async (req: Request) => {
           completed_at: new Date().toISOString(),
           total_revenue_fetched: syncResult.totalRevenue,
           records_processed: syncResult.recordsProcessed,
+          records_fetched: syncResult.recordsProcessed,
           error_message: null,
         })
         .eq("id", syncRecord.id);
+
+      // Update config sync timestamps for UI + automation.
+      await supabase
+        .from("admob_api_config")
+        .update({
+          last_sync_at: new Date().toISOString(),
+          next_sync_at: new Date(Date.now() + (Number(configData.sync_frequency_hours || 24) * 60 * 60 * 1000)).toISOString(),
+          connection_status: "connected",
+          last_error: null,
+          last_error_at: null,
+          updated_at: new Date().toISOString(),
+        })
+        .eq("id", config_id);
 
       // Record successful sync with quota tracking
       await supabase.rpc("record_admob_sync_success", {
@@ -220,6 +242,16 @@ Deno.serve(async (req: Request) => {
           error_message: errorMessage,
         })
         .eq("id", syncRecord.id);
+
+      await supabase
+        .from("admob_api_config")
+        .update({
+          connection_status: "error",
+          last_error: errorMessage,
+          last_error_at: new Date().toISOString(),
+          updated_at: new Date().toISOString(),
+        })
+        .eq("id", config_id);
 
       // Log the error with enhanced tracking
       await supabase.rpc("log_admob_error", {
@@ -506,9 +538,19 @@ async function syncAdMobRevenue(
 
   let totalRevenue = 0;
   let recordsProcessed = 0;
-  const safetyMultiplier = (100 - options.safetyBuffer) / 100;
+  // In this system, safety_buffer_percentage represents the USABLE percentage (e.g. 75 => usable = total * 0.75).
+  const usableMultiplier = Math.max(0, Math.min(1, options.safetyBuffer / 100));
 
-  const dailyRevenues: Record<string, { gross: number; net: number; impressions: number; clicks: number }> = {};
+  const dailyRevenues: Record<string, {
+    gross: number;
+    usable: number;
+    impressions: number;
+    clicks: number;
+    banner: number;
+    interstitial: number;
+    rewarded: number;
+    native: number;
+  }> = {};
 
   if (reportData && Array.isArray(reportData)) {
     for (const row of reportData) {
@@ -517,21 +559,39 @@ async function syncAdMobRevenue(
         const earnings = row.row.metricValues?.ESTIMATED_EARNINGS?.microsValue;
         const impressions = row.row.metricValues?.IMPRESSIONS?.integerValue || "0";
         const clicks = row.row.metricValues?.CLICKS?.integerValue || "0";
+        const adUnitName = (row.row.dimensionValues?.AD_UNIT?.displayLabel || row.row.dimensionValues?.AD_UNIT?.value || "")
+          .toString()
+          .toLowerCase();
 
         if (dateValue && earnings) {
           const grossRevenue = parseInt(earnings, 10) / 1000000;
-          const netRevenue = grossRevenue * safetyMultiplier;
+          const usableRevenue = grossRevenue * usableMultiplier;
 
           if (!dailyRevenues[dateValue]) {
-            dailyRevenues[dateValue] = { gross: 0, net: 0, impressions: 0, clicks: 0 };
+            dailyRevenues[dateValue] = {
+              gross: 0,
+              usable: 0,
+              impressions: 0,
+              clicks: 0,
+              banner: 0,
+              interstitial: 0,
+              rewarded: 0,
+              native: 0,
+            };
           }
 
           dailyRevenues[dateValue].gross += grossRevenue;
-          dailyRevenues[dateValue].net += netRevenue;
+          dailyRevenues[dateValue].usable += usableRevenue;
           dailyRevenues[dateValue].impressions += parseInt(impressions, 10);
           dailyRevenues[dateValue].clicks += parseInt(clicks, 10);
 
-          totalRevenue += netRevenue;
+          // Best-effort ad type breakdown based on ad unit name.
+          if (adUnitName.includes("reward")) dailyRevenues[dateValue].rewarded += grossRevenue;
+          else if (adUnitName.includes("interstitial")) dailyRevenues[dateValue].interstitial += grossRevenue;
+          else if (adUnitName.includes("native")) dailyRevenues[dateValue].native += grossRevenue;
+          else if (adUnitName.includes("banner")) dailyRevenues[dateValue].banner += grossRevenue;
+
+          totalRevenue += usableRevenue;
           recordsProcessed++;
         }
       }
@@ -541,40 +601,40 @@ async function syncAdMobRevenue(
   for (const [date, revenue] of Object.entries(dailyRevenues)) {
     const formattedDate = formatDateForDb(date);
 
+    // Don't overwrite locked entries.
+    const { data: existing, error: existingError } = await supabase
+      .from("ad_daily_revenue_input")
+      .select("id, is_locked")
+      .eq("revenue_date", formattedDate)
+      .maybeSingle();
+
+    if (existingError) {
+      console.error(`Failed to check existing revenue for ${formattedDate}:`, existingError);
+    }
+
+    if (existing?.is_locked) {
+      continue;
+    }
+
     const { error: upsertError } = await supabase
       .from("ad_daily_revenue_input")
       .upsert({
-        date: formattedDate,
-        gross_revenue: revenue.gross,
-        net_revenue: revenue.net,
-        impressions: revenue.impressions,
-        clicks: revenue.clicks,
-        source: "admob_api",
-        sync_id: syncId,
-        safety_buffer_applied: options.safetyBuffer,
+        revenue_date: formattedDate,
+        total_revenue_usd: revenue.gross,
+        banner_revenue: revenue.banner,
+        interstitial_revenue: revenue.interstitial,
+        rewarded_revenue: revenue.rewarded,
+        native_revenue: revenue.native,
+        safety_buffer_percentage: options.safetyBuffer,
+        notes: `Synced from AdMob API (sync_id=${syncId}).`,
         updated_at: new Date().toISOString(),
       }, {
-        onConflict: "date",
+        onConflict: "revenue_date",
       });
 
     if (upsertError) {
       console.error(`Failed to upsert revenue for ${date}:`, upsertError);
     }
-  }
-
-  const { error: reconcileError } = await supabase
-    .from("ad_reconciliation_log")
-    .insert({
-      period_start: options.dateFrom,
-      period_end: options.dateTo,
-      actual_admob_revenue: totalRevenue / safetyMultiplier,
-      estimated_payouts: totalRevenue,
-      reconciliation_status: "synced",
-      notes: `Automated sync via AdMob API. Safety buffer: ${options.safetyBuffer}%`,
-    });
-
-  if (reconcileError) {
-    console.error("Failed to create reconciliation log:", reconcileError);
   }
 
   return { totalRevenue, recordsProcessed };

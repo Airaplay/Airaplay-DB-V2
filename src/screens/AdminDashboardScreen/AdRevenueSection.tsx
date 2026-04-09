@@ -264,6 +264,38 @@ export const AdRevenueSection = (): JSX.Element => {
         };
       }
 
+      // Override "Total Revenue" with AdMob daily totals when available.
+      // This makes the dashboard reflect what we actually have in AdMob immediately after sync/import,
+      // even if impression-level processing/payout distribution hasn’t run yet.
+      try {
+        const toDateOnly = (d: Date): string => format(d, 'yyyy-MM-dd');
+        const startDateOnly = toDateOnly(startDate);
+        const endDateOnly = toDateOnly(endDate);
+        const todayOnly = toDateOnly(new Date());
+
+        const { data: admobRows, error: admobError } = await supabase
+          .from('ad_daily_revenue_input')
+          .select('revenue_date,total_revenue_usd')
+          .gte('revenue_date', startDateOnly)
+          .lte('revenue_date', endDateOnly);
+
+        if (!admobError && Array.isArray(admobRows) && admobRows.length > 0) {
+          const admobTotal = admobRows.reduce((sum, row: any) => sum + Number(row.total_revenue_usd || 0), 0);
+          const admobToday = admobRows
+            .filter((row: any) => row.revenue_date === todayOnly)
+            .reduce((sum, row: any) => sum + Number(row.total_revenue_usd || 0), 0);
+
+          finalSummaryData = {
+            ...(finalSummaryData || {}),
+            total_revenue: admobTotal,
+            revenue_today: admobToday,
+          };
+        }
+      } catch (admobTotalsErr) {
+        // Non-blocking: keep the rest of the revenue dashboard usable.
+        console.warn('Failed to load AdMob daily totals:', admobTotalsErr);
+      }
+
       const { data: eventsData, error: eventsError } = await supabase
         .from('ad_revenue_events')
         .select(`
