@@ -626,6 +626,8 @@ async function syncAdMobRevenue(
         rewarded_revenue: revenue.rewarded,
         native_revenue: revenue.native,
         safety_buffer_percentage: options.safetyBuffer,
+        source: "admob_api",
+        sync_id: syncId,
         notes: `Synced from AdMob API (sync_id=${syncId}).`,
         updated_at: new Date().toISOString(),
       }, {

@@ -264,31 +264,69 @@ export const AdRevenueSection = (): JSX.Element => {
         };
       }
 
-      // Override "Total Revenue" with AdMob daily totals when available.
-      // This makes the dashboard reflect what we actually have in AdMob immediately after sync/import,
-      // even if impression-level processing/payout distribution hasn’t run yet.
+      // Override "Total Revenue" with AdMob daily totals (source = admob_api) when available.
+      // This makes the dashboard reflect what we actually have in AdMob (and avoids manual/incorrect inputs).
       try {
         const toDateOnly = (d: Date): string => format(d, 'yyyy-MM-dd');
         const startDateOnly = toDateOnly(startDate);
         const endDateOnly = toDateOnly(endDate);
-        const todayOnly = toDateOnly(new Date());
+        const today = new Date();
+        const todayOnly = toDateOnly(today);
+        const yesterday = new Date(today);
+        yesterday.setDate(yesterday.getDate() - 1);
+        const yesterdayOnly = toDateOnly(yesterday);
+
+        const startOfThisMonth = new Date(today.getFullYear(), today.getMonth(), 1);
+        const startOfThisMonthOnly = toDateOnly(startOfThisMonth);
+        const startOfLastMonth = new Date(today.getFullYear(), today.getMonth() - 1, 1);
+        const startOfLastMonthOnly = toDateOnly(startOfLastMonth);
+        const startOfNextMonth = new Date(today.getFullYear(), today.getMonth() + 1, 1);
+        const startOfNextMonthOnly = toDateOnly(startOfNextMonth);
 
         const { data: admobRows, error: admobError } = await supabase
           .from('ad_daily_revenue_input')
-          .select('revenue_date,total_revenue_usd')
+          .select('revenue_date,total_revenue_usd,source')
+          .eq('source', 'admob_api')
           .gte('revenue_date', startDateOnly)
           .lte('revenue_date', endDateOnly);
 
         if (!admobError && Array.isArray(admobRows) && admobRows.length > 0) {
           const admobTotal = admobRows.reduce((sum, row: any) => sum + Number(row.total_revenue_usd || 0), 0);
-          const admobToday = admobRows
-            .filter((row: any) => row.revenue_date === todayOnly)
+          const admobToday = admobRows.filter((row: any) => row.revenue_date === todayOnly)
             .reduce((sum, row: any) => sum + Number(row.total_revenue_usd || 0), 0);
+          const admobYesterday = admobRows.filter((row: any) => row.revenue_date === yesterdayOnly)
+            .reduce((sum, row: any) => sum + Number(row.total_revenue_usd || 0), 0);
+
+          // Calendar-based periods (requested by admin): this month so far + last month (full month).
+          // Note: We compute from table rows; accuracy depends on AdMob sync coverage for those days.
+          const { data: monthRows, error: monthErr } = await supabase
+            .from('ad_daily_revenue_input')
+            .select('revenue_date,total_revenue_usd,source')
+            .eq('source', 'admob_api')
+            .gte('revenue_date', startOfLastMonthOnly)
+            .lt('revenue_date', startOfNextMonthOnly);
+
+          const safeMonthRows = !monthErr && Array.isArray(monthRows) ? monthRows : [];
+          const thisMonthSoFar = safeMonthRows
+            .filter((row: any) => row.revenue_date >= startOfThisMonthOnly && row.revenue_date <= todayOnly)
+            .reduce((sum: number, row: any) => sum + Number(row.total_revenue_usd || 0), 0);
+          const lastMonthTotal = safeMonthRows
+            .filter((row: any) => row.revenue_date >= startOfLastMonthOnly && row.revenue_date < startOfThisMonthOnly)
+            .reduce((sum: number, row: any) => sum + Number(row.total_revenue_usd || 0), 0);
 
           finalSummaryData = {
             ...(finalSummaryData || {}),
-            total_revenue: admobTotal,
+            // Keep the timeRange-based total available for charts/period UI if needed.
+            // The "Total Revenue" card is intended to reflect AdMob calendar totals (this month + last month)
+            // without being polluted by manual entries.
+            total_revenue: thisMonthSoFar + lastMonthTotal,
             revenue_today: admobToday,
+            // Extra fields used for display/debug (non-breaking; UI reads unknown keys safely)
+            admob_range_total: admobTotal,
+            admob_today: admobToday,
+            admob_yesterday: admobYesterday,
+            admob_this_month_so_far: thisMonthSoFar,
+            admob_last_month: lastMonthTotal,
           };
         }
       } catch (admobTotalsErr) {
