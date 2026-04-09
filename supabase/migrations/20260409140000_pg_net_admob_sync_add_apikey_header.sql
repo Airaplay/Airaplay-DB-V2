@@ -1,11 +1,11 @@
 /*
   # pg_net: add apikey header for admob-sync
 
-  Supabase API gateway often expects both `Authorization: Bearer …` and `apikey`
-  for `/functions/v1/*`. Missing `apikey` can yield 401 with
+  Supabase API gateway often expects both Authorization Bearer and apikey
+  for Edge Function routes under /functions/v1/. Missing apikey can yield 401 with
   "Invalid Token or Protected Header formatting" before the Edge Function runs.
 
-  Re-applies `public.trigger_admob_auto_sync()` with the extra header.
+  Re-applies public.trigger_admob_auto_sync() with the extra header.
 */
 
 CREATE OR REPLACE FUNCTION public.trigger_admob_auto_sync()
