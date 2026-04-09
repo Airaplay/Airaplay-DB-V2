@@ -43,6 +43,47 @@ interface AdMobReportRow {
   };
 }
 
+/** Decode JWT payload (no signature verify). Used only with sync_type=scheduled + role check; gateway still validates JWT on hosted Supabase. */
+function decodeJwtPayloadUnsafe(
+  token: string,
+): { role?: string; iss?: string; ref?: string } | null {
+  try {
+    const parts = token.split(".");
+    if (parts.length !== 3) return null;
+    const base64 = parts[1].replace(/-/g, "+").replace(/_/g, "/");
+    const pad = base64.length % 4;
+    const padded = base64 + (pad === 0 ? "" : "=".repeat(4 - pad));
+    const json = new TextDecoder().decode(
+      Uint8Array.from(atob(padded), (c) => c.charCodeAt(0)),
+    );
+    return JSON.parse(json) as { role?: string; iss?: string; ref?: string };
+  } catch {
+    return null;
+  }
+}
+
+function projectRefFromSupabaseUrl(url: string): string {
+  try {
+    const host = new URL(url).hostname;
+    return host.split(".")[0] ?? "";
+  } catch {
+    return "";
+  }
+}
+
+/** True if JWT is a Supabase service_role for this project (iss/ref match). */
+function isServiceRoleJwtForThisProject(
+  jwtPayload: { role?: string; iss?: string; ref?: string } | null,
+  supabaseUrl: string,
+): boolean {
+  if (!jwtPayload || jwtPayload.role !== "service_role") return false;
+  const ref = projectRefFromSupabaseUrl(supabaseUrl);
+  if (!ref) return false;
+  if (typeof jwtPayload.iss === "string" && jwtPayload.iss.includes(ref)) return true;
+  if (jwtPayload.ref === ref) return true;
+  return false;
+}
+
 Deno.serve(async (req: Request) => {
   if (req.method === "OPTIONS") {
     return new Response(null, {
@@ -81,10 +122,18 @@ Deno.serve(async (req: Request) => {
       );
     }
 
+    const supabaseUrl = Deno.env.get("SUPABASE_URL") ?? "";
+    const jwtPayload = decodeJwtPayloadUnsafe(token);
+    const allowScheduledPgNet =
+      sync_type === "scheduled" &&
+      (isServiceRole ||
+        isServiceRoleJwtForThisProject(jwtPayload, supabaseUrl));
+
     // Auth:
     // - manual/test: require an authenticated admin user JWT
-    // - scheduled: allow either admin JWT or service-role (pg_cron/pg_net)
-    if (!(isServiceRole && sync_type === "scheduled")) {
+    // - scheduled: allow service-role from pg_net (exact env match OR JWT role=service_role for this project)
+    // - scheduled: also allow admin user JWT (manual trigger with scheduled type)
+    if (!allowScheduledPgNet) {
       const { data: { user }, error: authError } = await supabase.auth.getUser(token);
       if (authError || !user) {
         return new Response(
