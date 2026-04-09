@@ -65,9 +65,11 @@ Deno.serve(async (req: Request) => {
       );
     }
 
-    const token = authHeader.replace("Bearer ", "");
-    const serviceKey = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY") ?? "";
-    const isServiceRole = Boolean(serviceKey) && token === serviceKey;
+    // Match scheduled pg_net calls: trim + case-insensitive "Bearer" (copy/paste safe)
+    const token = authHeader.replace(/^Bearer\s+/i, "").trim();
+    const serviceKey = (Deno.env.get("SUPABASE_SERVICE_ROLE_KEY") ?? "").trim();
+    const isServiceRole =
+      serviceKey.length > 0 && token.length > 0 && token === serviceKey;
 
     const requestData: SyncRequest = await req.json();
     const { config_id, sync_type, date_from, date_to } = requestData;
