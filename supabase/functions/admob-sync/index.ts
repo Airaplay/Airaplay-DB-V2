@@ -44,9 +44,7 @@ interface AdMobReportRow {
 }
 
 /** Decode JWT payload (no signature verify). Used only with sync_type=scheduled + role check; gateway still validates JWT on hosted Supabase. */
-function decodeJwtPayloadUnsafe(
-  token: string,
-): { role?: string; iss?: string; ref?: string } | null {
+function decodeJwtPayloadUnsafe(token: string): Record<string, unknown> | null {
   try {
     const parts = token.split(".");
     if (parts.length !== 3) return null;
@@ -56,7 +54,7 @@ function decodeJwtPayloadUnsafe(
     const json = new TextDecoder().decode(
       Uint8Array.from(atob(padded), (c) => c.charCodeAt(0)),
     );
-    return JSON.parse(json) as { role?: string; iss?: string; ref?: string };
+    return JSON.parse(json) as Record<string, unknown>;
   } catch {
     return null;
   }
@@ -71,16 +69,43 @@ function projectRefFromSupabaseUrl(url: string): string {
   }
 }
 
-/** True if JWT is a Supabase service_role for this project (iss/ref match). */
+function strClaim(payload: Record<string, unknown>, key: string): string {
+  const v = payload[key];
+  if (typeof v === "string") return v.trim();
+  return "";
+}
+
+/**
+ * True if JWT is a Supabase service_role for this project.
+ * Legacy JWTs often use iss "supabase" + ref "<project_ref>"; others use iss URL with ref in hostname.
+ */
 function isServiceRoleJwtForThisProject(
-  jwtPayload: { role?: string; iss?: string; ref?: string } | null,
+  jwtPayload: Record<string, unknown> | null,
   supabaseUrl: string,
 ): boolean {
-  if (!jwtPayload || jwtPayload.role !== "service_role") return false;
+  if (!jwtPayload) return false;
+  if (strClaim(jwtPayload, "role") !== "service_role") return false;
+
   const ref = projectRefFromSupabaseUrl(supabaseUrl);
   if (!ref) return false;
-  if (typeof jwtPayload.iss === "string" && jwtPayload.iss.includes(ref)) return true;
-  if (jwtPayload.ref === ref) return true;
+
+  const jwtRef =
+    strClaim(jwtPayload, "ref") ||
+    strClaim(jwtPayload, "project_id") ||
+    strClaim(jwtPayload, "project_ref");
+  if (jwtRef !== "" && jwtRef === ref) return true;
+
+  const iss = strClaim(jwtPayload, "iss");
+  if (iss.includes(ref)) return true;
+
+  try {
+    const u = new URL(iss);
+    const hostFirst = u.hostname.split(".")[0];
+    if (hostFirst === ref) return true;
+  } catch {
+    /* iss may not be a URL (e.g. "supabase") */
+  }
+
   return false;
 }
 
@@ -122,10 +147,13 @@ Deno.serve(async (req: Request) => {
       );
     }
 
+    const syncTypeNorm =
+      typeof sync_type === "string" ? sync_type.trim().toLowerCase() : "";
+
     const supabaseUrl = Deno.env.get("SUPABASE_URL") ?? "";
     const jwtPayload = decodeJwtPayloadUnsafe(token);
     const allowScheduledPgNet =
-      sync_type === "scheduled" &&
+      syncTypeNorm === "scheduled" &&
       (isServiceRole ||
         isServiceRoleJwtForThisProject(jwtPayload, supabaseUrl));
 
