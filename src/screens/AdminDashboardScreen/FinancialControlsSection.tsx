@@ -176,7 +176,7 @@ export const FinancialControlsSection = () => {
       setMessage(null);
       setFullResetResult(null);
 
-      const { data, error } = await supabase.rpc('admin_reset_all_financial_data', {
+      const { data, error } = await supabase.rpc('admin_reset_all_financial_data_v2', {
         p_confirm: confirmText,
         p_include_ad_impressions: includeImpressions,
       });
