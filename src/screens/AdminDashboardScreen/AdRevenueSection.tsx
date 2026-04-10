@@ -51,6 +51,8 @@ interface DailyRevenueInput {
   is_locked: boolean;
   notes: string | null;
   created_at: string;
+  /** admob_api | manual — when present, shows how the row was created */
+  source?: string;
 }
 
 interface ReconciliationLog {
@@ -296,7 +298,9 @@ export const AdRevenueSection = (): JSX.Element => {
         const [{ data: admobRows, error: admobErr }, { data: capsRow }] = await Promise.all([
           supabase
             .from('ad_daily_revenue_input')
-            .select('revenue_date,total_revenue_usd,safety_buffer_percentage')
+            .select(
+              'revenue_date,total_revenue_usd,safety_buffer_percentage,banner_revenue,interstitial_revenue,rewarded_revenue,native_revenue'
+            )
             .eq('source', 'admob_api')
             .gte('revenue_date', windowStartStr)
             .lte('revenue_date', windowEndStr),
@@ -334,6 +338,32 @@ export const AdRevenueSection = (): JSX.Element => {
           const platformPctDisplay =
             netSum > 0 ? Math.round((platformRevenue / netSum) * 1000) / 10 : 0;
 
+          const sortedByDate = [...rows].sort((a: any, b: any) =>
+            String(a.revenue_date).localeCompare(String(b.revenue_date))
+          );
+          const daily_revenue = sortedByDate.map((r: any) => ({
+            date: `${r.revenue_date}T12:00:00.000Z`,
+            revenue: Number(r.total_revenue_usd || 0),
+          }));
+
+          let sumBanner = 0;
+          let sumInterstitial = 0;
+          let sumRewarded = 0;
+          let sumNative = 0;
+          for (const row of rows) {
+            const r = row as any;
+            sumBanner += Number(r.banner_revenue || 0);
+            sumInterstitial += Number(r.interstitial_revenue || 0);
+            sumRewarded += Number(r.rewarded_revenue || 0);
+            sumNative += Number(r.native_revenue || 0);
+          }
+          const by_ad_type = [
+            { ad_type: 'banner', revenue: sumBanner },
+            { ad_type: 'interstitial', revenue: sumInterstitial },
+            { ad_type: 'rewarded', revenue: sumRewarded },
+            { ad_type: 'native', revenue: sumNative },
+          ].filter((x) => x.revenue > 1e-9);
+
           finalSummaryData = {
             ...(finalSummaryData || {}),
             revenue_source: 'admob_api',
@@ -349,6 +379,9 @@ export const AdRevenueSection = (): JSX.Element => {
             admob_gross_total: grossSum,
             admob_yesterday: grossYesterday,
             payout_split_label: `${artistPct}/${listenerPct}/${platformPct} (artist/listener/platform · % of usable net)`,
+            // Revenue Overview charts: same AdMob window as top cards (not impression-event aggregates).
+            daily_revenue,
+            by_ad_type,
           };
         }
       } catch (admobTotalsErr) {
@@ -1835,6 +1868,7 @@ export const AdRevenueSection = (): JSX.Element => {
                     <thead>
                       <tr className="bg-gray-100 text-left">
                         <th className="p-3 text-gray-700 font-medium">Date</th>
+                        <th className="p-3 text-gray-700 font-medium">Source</th>
                         <th className="p-3 text-gray-700 font-medium">Total Revenue</th>
                         <th className="p-3 text-gray-700 font-medium">Safety Buffer</th>
                         <th className="p-3 text-gray-700 font-medium">Usable Revenue</th>
@@ -1846,6 +1880,17 @@ export const AdRevenueSection = (): JSX.Element => {
                       {dailyRevenueInputs.map((input) => (
                         <tr key={input.id} className="border-b border-gray-200 hover:bg-gray-50">
                           <td className="p-3 text-gray-700 font-medium">{formatDate(input.revenue_date)}</td>
+                          <td className="p-3 text-gray-700">
+                            <span
+                              className={`text-xs px-2 py-0.5 rounded-full ${
+                                input.source === 'admob_api'
+                                  ? 'bg-green-100 text-green-800'
+                                  : 'bg-amber-100 text-amber-800'
+                              }`}
+                            >
+                              {input.source === 'admob_api' ? 'AdMob API' : input.source === 'manual' ? 'Manual' : '—'}
+                            </span>
+                          </td>
                           <td className="p-3 text-gray-900">{formatCurrency(input.total_revenue_usd)}</td>
                           <td className="p-3 text-gray-700">{input.safety_buffer_percentage}%</td>
                           <td className="p-3 text-green-600 font-medium">
@@ -1970,13 +2015,20 @@ export const AdRevenueSection = (): JSX.Element => {
 
         <div className="bg-white rounded-lg shadow overflow-hidden">
           <div
-            className="flex items-center justify-between p-6 cursor-pointer"
+            className="flex items-start justify-between gap-4 p-6 cursor-pointer"
             onClick={() => setExpandedSection(expandedSection === 'creator_payouts' ? null : 'creator_payouts')}
           >
-            <h3 className="text-lg font-semibold text-gray-900 flex items-center">
-              <DollarSign className="w-5 h-5 mr-2 text-purple-600" />
-              Creator Pool Payout History
-            </h3>
+            <div className="min-w-0 flex-1">
+              <h3 className="text-lg font-semibold text-gray-900 flex items-center">
+                <DollarSign className="w-5 h-5 mr-2 text-purple-600" />
+                Creator Pool Payout History
+              </h3>
+              <p className="text-xs text-gray-500 mt-1 pl-8 max-w-3xl">
+                Ledger from <code className="text-[11px] bg-gray-100 px-1 rounded">admin_distribute_creator_pool_for_date</code>
+                after a day is locked. Amounts follow that day&apos;s AdMob gross × safety buffer × creator %, split pro‑rata by
+                weighted impressions — not a second pull from Google.
+              </p>
+            </div>
             <div className="flex items-center gap-3">
               <div className="flex bg-white rounded-lg shadow-sm p-1 border border-gray-200">
                 <button
@@ -2075,14 +2127,21 @@ export const AdRevenueSection = (): JSX.Element => {
 
         <div className="bg-white rounded-lg shadow overflow-hidden">
           <div
-            className="flex items-center justify-between p-6 cursor-pointer"
+            className="flex items-start justify-between gap-4 p-6 cursor-pointer"
             onClick={() => setExpandedSection(expandedSection === 'reconciliation' ? null : 'reconciliation')}
           >
-            <h3 className="text-lg font-semibold text-gray-900 flex items-center">
-              <Activity className="w-5 h-5 mr-2 text-green-600" />
-              Reconciliation Log
-            </h3>
-            <div className="flex items-center gap-3">
+            <div className="min-w-0 flex-1">
+              <h3 className="text-lg font-semibold text-gray-900 flex items-center">
+                <Activity className="w-5 h-5 mr-2 text-green-600" />
+                Reconciliation Log
+              </h3>
+              <p className="text-xs text-gray-500 mt-1 pl-8 max-w-3xl">
+                Rows in <code className="text-[11px] bg-gray-100 px-1 rounded">ad_reconciliation_log</code> from{' '}
+                <strong>Run AdMob Reconciliation</strong> (RPC). Compares estimated payouts vs actual AdMob totals for
+                that date — not a live Google API call when you only open this tab.
+              </p>
+            </div>
+            <div className="flex items-center gap-3 flex-shrink-0">
               <button
                 type="button"
                 onClick={(e) => {
@@ -2125,20 +2184,30 @@ export const AdRevenueSection = (): JSX.Element => {
                       {reconciliationLogs.map((log) => (
                         <tr key={log.id} className="border-b border-gray-200 hover:bg-gray-50">
                           <td className="p-3 text-gray-700 font-medium">{formatDate(log.reconciliation_date)}</td>
-                          <td className="p-3 text-gray-900">{formatCurrency(log.estimated_total_payout_usd)}</td>
-                          <td className="p-3 text-gray-900">{formatCurrency(log.actual_admob_revenue_usd)}</td>
+                          <td className="p-3 text-gray-900">
+                            {formatCurrency(Number(log.estimated_total_payout_usd ?? 0))}
+                          </td>
+                          <td className="p-3 text-gray-900">
+                            {formatCurrency(Number(log.actual_admob_revenue_usd ?? 0))}
+                          </td>
                           <td className="p-3">
-                            <div className={`flex items-center gap-1 ${getVarianceColor(log.variance_percentage)}`}>
-                              {log.variance_usd >= 0 ? (
+                            <div
+                              className={`flex items-center gap-1 ${getVarianceColor(Number(log.variance_percentage ?? 0))}`}
+                            >
+                              {Number(log.variance_usd ?? 0) >= 0 ? (
                                 <TrendingUp className="w-4 h-4" />
                               ) : (
                                 <TrendingDown className="w-4 h-4" />
                               )}
-                              <span>{formatCurrency(log.variance_usd)}</span>
-                              <span className="text-xs">({log.variance_percentage.toFixed(2)}%)</span>
+                              <span>{formatCurrency(Number(log.variance_usd ?? 0))}</span>
+                              <span className="text-xs">
+                                ({Number(log.variance_percentage ?? 0).toFixed(2)}%)
+                              </span>
                             </div>
                           </td>
-                          <td className="p-3 text-gray-700">{log.adjustment_factor.toFixed(4)}</td>
+                          <td className="p-3 text-gray-700">
+                            {Number(log.adjustment_factor ?? 0).toFixed(4)}
+                          </td>
                           <td className="p-3">
                             <span className={`px-2 py-1 rounded-full text-xs font-medium ${getStatusColor(log.reconciliation_status)}`}>
                               {log.reconciliation_status}
@@ -2176,9 +2245,24 @@ export const AdRevenueSection = (): JSX.Element => {
 
           {expandedSection === 'overview' && revenueData && (
             <div className="p-6 pt-0 border-t border-gray-100">
+              {revenueData.revenue_source === 'admob_api' && (
+                <p className="text-sm text-gray-600 mb-4 p-3 bg-blue-50 border border-blue-100 rounded-lg">
+                  <strong>AdMob-synced window:</strong> charts below use the same calendar range as{' '}
+                  <strong>{timeRange}</strong> (top selector). Daily trend and ad-format bars sum{' '}
+                  <code className="text-xs bg-white px-1 rounded">ad_daily_revenue_input</code> rows with{' '}
+                  <code className="text-xs bg-white px-1 rounded">source = admob_api</code>. Content-type bars
+                  still reflect <strong>processed impression events</strong> (in-app attribution), not the AdMob
+                  network report.
+                </p>
+              )}
               <div className="grid grid-cols-2 gap-6">
                 <div>
-                  <h4 className="font-medium text-gray-900 mb-4">Revenue by Content Type</h4>
+                  <h4 className="font-medium text-gray-900 mb-1">Revenue by Content Type</h4>
+                  <p className="text-xs text-gray-500 mb-3">
+                    {revenueData.revenue_source === 'admob_api'
+                      ? 'From ad_revenue_events metadata (per impression). AdMob API does not provide this breakdown.'
+                      : 'From processed ad revenue events in the selected period.'}
+                  </p>
                   {revenueData.by_content_type && revenueData.by_content_type.length > 0 ? (
                     <div className="h-80">
                       <ResponsiveContainer width="100%" height="100%">
@@ -2227,7 +2311,12 @@ export const AdRevenueSection = (): JSX.Element => {
                 </div>
 
                 <div>
-                  <h4 className="font-medium text-gray-900 mb-4">Revenue by Ad Type</h4>
+                  <h4 className="font-medium text-gray-900 mb-1">Revenue by Ad Type</h4>
+                  <p className="text-xs text-gray-500 mb-3">
+                    {revenueData.revenue_source === 'admob_api'
+                      ? 'Sums banner/interstitial/rewarded/native from AdMob sync (best-effort from ad unit names).'
+                      : 'From processed ad revenue events in the selected period.'}
+                  </p>
                   {revenueData.by_ad_type && revenueData.by_ad_type.length > 0 ? (
                     <div className="h-80">
                       <ResponsiveContainer width="100%" height="100%">
@@ -2270,7 +2359,11 @@ export const AdRevenueSection = (): JSX.Element => {
                     </div>
                   ) : (
                     <div className="p-4 bg-gray-100 rounded-lg text-center h-80 flex items-center justify-center">
-                      <p className="text-gray-700">No ad type data available</p>
+                      <p className="text-gray-700 text-sm max-w-sm">
+                        {revenueData.revenue_source === 'admob_api'
+                          ? 'No per-format breakdown in synced rows (banner/interstitial/rewarded/native are zero). Sync may not classify ad units by name yet.'
+                          : 'No ad type data available'}
+                      </p>
                     </div>
                   )}
                 </div>
@@ -2278,7 +2371,12 @@ export const AdRevenueSection = (): JSX.Element => {
 
               {revenueData.daily_revenue && revenueData.daily_revenue.length > 0 && (
                 <div className="mt-8">
-                  <h4 className="font-medium text-gray-900 mb-4">Daily Revenue Trend</h4>
+                  <h4 className="font-medium text-gray-900 mb-1">Daily Revenue Trend</h4>
+                  <p className="text-xs text-gray-500 mb-3">
+                    {revenueData.revenue_source === 'admob_api'
+                      ? 'Gross estimated earnings (USD) per day from AdMob sync — same values as Total column in daily inputs.'
+                      : 'Sum of processed ad_revenue_events revenue_amount per day.'}
+                  </p>
                   <div className="h-64">
                     <ResponsiveContainer width="100%" height="100%">
                       <LineChart data={revenueData.daily_revenue}>
@@ -2321,17 +2419,24 @@ export const AdRevenueSection = (): JSX.Element => {
 
         <div className="bg-white rounded-lg shadow overflow-hidden">
           <div
-            className="flex items-center justify-between p-6 cursor-pointer"
+            className="flex items-start justify-between gap-4 p-6 cursor-pointer"
             onClick={() => setExpandedSection(expandedSection === 'events' ? null : 'events')}
           >
-            <h3 className="text-lg font-semibold text-gray-900 flex items-center">
-              <Clock className="w-5 h-5 mr-2 text-teal-600" />
-              Recent Revenue Events
-            </h3>
+            <div className="min-w-0 flex-1">
+              <h3 className="text-lg font-semibold text-gray-900 flex items-center">
+                <Clock className="w-5 h-5 mr-2 text-teal-600" />
+                Recent Revenue Events
+              </h3>
+              <p className="text-xs text-gray-500 mt-1 pl-8 max-w-3xl">
+                Last 10 processed rows from <code className="text-[11px] bg-gray-100 px-1 rounded">ad_revenue_events</code>
+                (per-impression pipeline). For day-level totals that match AdMob, use <strong>Daily AdMob Revenue Inputs</strong>{' '}
+                and the <strong>Revenue Overview</strong> trend when AdMob sync is active.
+              </p>
+            </div>
             {expandedSection === 'events' ? (
-              <ChevronUp className="w-5 h-5 text-gray-500" />
+              <ChevronUp className="w-5 h-5 text-gray-500 flex-shrink-0" />
             ) : (
-              <ChevronDown className="w-5 h-5 text-gray-500" />
+              <ChevronDown className="w-5 h-5 text-gray-500 flex-shrink-0" />
             )}
           </div>
 
