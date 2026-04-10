@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from 'react';
-import { BookOpen, DollarSign, RefreshCw } from 'lucide-react';
+import { AlertTriangle, BookOpen, DollarSign, RefreshCw } from 'lucide-react';
 import { supabase } from '../../lib/supabase';
 import { format } from 'date-fns';
 
@@ -34,6 +34,14 @@ type JournalEntryRow = {
   posted_at: string;
 };
 
+type AdmobPostResult = {
+  ok?: boolean;
+  status?: string;
+  error?: string;
+  entry_id?: string;
+  [key: string]: unknown;
+};
+
 export const AccountingSection = (): JSX.Element => {
   const [tab, setTab] = useState<ViewTab>('dashboard');
   const [error, setError] = useState<string | null>(null);
@@ -46,12 +54,21 @@ export const AccountingSection = (): JSX.Element => {
 
   const [postDate, setPostDate] = useState<string>(format(new Date(), 'yyyy-MM-dd'));
   const [isPostingAdmob, setIsPostingAdmob] = useState(false);
-  const [postResult, setPostResult] = useState<any>(null);
+  const [postResult, setPostResult] = useState<AdmobPostResult | null>(null);
 
   const formatCurrency = (amount: number): string =>
     new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD', minimumFractionDigits: 2, maximumFractionDigits: 6 }).format(
       Number(amount || 0)
     );
+  const formatDate = (value: string): string => {
+    const dt = new Date(value);
+    return Number.isNaN(dt.getTime()) ? value : format(dt, 'yyyy-MM-dd');
+  };
+
+  const formatDateTime = (value: string): string => {
+    const dt = new Date(value);
+    return Number.isNaN(dt.getTime()) ? value : format(dt, 'yyyy-MM-dd HH:mm:ss');
+  };
 
   const refreshAll = async () => {
     setIsLoading(true);
@@ -98,7 +115,23 @@ export const AccountingSection = (): JSX.Element => {
     };
   }, [trialBalance]);
 
+  const trialBalanceTotals = useMemo(() => {
+    const debitTotal = trialBalance.reduce((sum, row) => sum + Number(row.debit_total || 0), 0);
+    const creditTotal = trialBalance.reduce((sum, row) => sum + Number(row.credit_total || 0), 0);
+    const imbalance = debitTotal - creditTotal;
+    return {
+      debitTotal,
+      creditTotal,
+      imbalance,
+      isBalanced: Math.abs(imbalance) < 0.005,
+    };
+  }, [trialBalance]);
+
   const handlePostAdmobDay = async () => {
+    if (!postDate) {
+      setError('Please select a valid posting date.');
+      return;
+    }
     if (!confirm(`Post AdMob cash journal entry for ${postDate}? This is cash-basis and idempotent (won't double-post).`)) return;
 
     setIsPostingAdmob(true);
@@ -235,7 +268,23 @@ export const AccountingSection = (): JSX.Element => {
           </div>
 
           <div className="bg-white rounded-lg shadow border border-gray-200 p-5">
-            <p className="font-semibold text-gray-900 mb-3">Trial Balance</p>
+            <div className="flex items-center justify-between gap-3 mb-3 flex-wrap">
+              <p className="font-semibold text-gray-900">Trial Balance</p>
+              <div
+                className={`inline-flex items-center gap-2 text-xs px-2.5 py-1.5 rounded-full border ${
+                  trialBalanceTotals.isBalanced
+                    ? 'bg-green-50 text-green-700 border-green-200'
+                    : 'bg-red-50 text-red-700 border-red-200'
+                }`}
+              >
+                {!trialBalanceTotals.isBalanced && <AlertTriangle className="w-3.5 h-3.5" />}
+                <span>
+                  {trialBalanceTotals.isBalanced
+                    ? 'Debits and credits are balanced'
+                    : `Out of balance by ${formatCurrency(trialBalanceTotals.imbalance)}`}
+                </span>
+              </div>
+            </div>
             <div className="overflow-x-auto">
               <table className="w-full border-collapse">
                 <thead>
@@ -256,9 +305,19 @@ export const AccountingSection = (): JSX.Element => {
                       <td className="p-2 text-sm text-gray-600 capitalize">{r.account_type}</td>
                       <td className="p-2 text-sm text-gray-700 text-right">{formatCurrency(Number(r.debit_total || 0))}</td>
                       <td className="p-2 text-sm text-gray-700 text-right">{formatCurrency(Number(r.credit_total || 0))}</td>
-                      <td className="p-2 text-sm text-gray-900 text-right font-medium">{formatCurrency(Number(r.net_balance || 0))}</td>
+                      <td className="p-2 text-sm text-gray-900 text-right font-medium">
+                        {formatCurrency(Math.abs(Number(r.net_balance || 0)))} {Number(r.net_balance || 0) >= 0 ? 'Dr' : 'Cr'}
+                      </td>
                     </tr>
                   ))}
+                  <tr className="bg-gray-50 border-t-2 border-gray-300">
+                    <td className="p-2 text-sm text-gray-900 font-semibold" colSpan={3}>Totals</td>
+                    <td className="p-2 text-sm text-gray-900 text-right font-semibold">{formatCurrency(trialBalanceTotals.debitTotal)}</td>
+                    <td className="p-2 text-sm text-gray-900 text-right font-semibold">{formatCurrency(trialBalanceTotals.creditTotal)}</td>
+                    <td className="p-2 text-sm text-gray-900 text-right font-semibold">
+                      {formatCurrency(Math.abs(trialBalanceTotals.imbalance))} {trialBalanceTotals.imbalance >= 0 ? 'Dr' : 'Cr'}
+                    </td>
+                  </tr>
                 </tbody>
               </table>
             </div>
@@ -313,11 +372,11 @@ export const AccountingSection = (): JSX.Element => {
               <tbody>
                 {journalEntries.map(e => (
                   <tr key={e.id} className="border-b border-gray-200">
-                    <td className="p-2 text-sm text-gray-700 font-medium">{e.entry_date}</td>
+                    <td className="p-2 text-sm text-gray-700 font-medium">{formatDate(e.entry_date)}</td>
                     <td className="p-2 text-sm text-gray-700">{e.source_type}</td>
                     <td className="p-2 text-sm text-gray-700 font-mono">{e.source_id}</td>
                     <td className="p-2 text-sm text-gray-700">{e.memo || '—'}</td>
-                    <td className="p-2 text-sm text-gray-500">{e.posted_at}</td>
+                    <td className="p-2 text-sm text-gray-500">{formatDateTime(e.posted_at)}</td>
                   </tr>
                 ))}
               </tbody>
