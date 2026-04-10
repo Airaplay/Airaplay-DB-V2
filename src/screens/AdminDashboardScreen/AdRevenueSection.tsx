@@ -310,13 +310,13 @@ export const AdRevenueSection = (): JSX.Element => {
       // AdMob API rows (source = admob_api): align Total + split cards with synced daily data.
       // gross = total_revenue_usd (matches AdMob estimated earnings stored by admob-sync).
       // usable net per row = gross * safety_buffer_percentage/100 (same basis as creator pool distribution).
-      // Artist / Listener / Platform $ = usable net × ad_safety_caps percentages (defaults 60/0/40).
+      // Artist / Listener / Platform $ = usable net × active ad_safety_caps row only (Ad Safety Caps tab — no hardcoded defaults).
       try {
         const yesterdayCal = new Date(todayCalForWindow);
         yesterdayCal.setDate(yesterdayCal.getDate() - 1);
         const yesterdayOnly = toDateOnlyCal(yesterdayCal);
 
-        const [{ data: admobRows, error: admobErr }, { data: capsRow }] = await Promise.all([
+        const [{ data: admobRows, error: admobErr }, { data: capsRow, error: capsErr }] = await Promise.all([
           supabase
             .from('ad_daily_revenue_input')
             .select(
@@ -332,11 +332,23 @@ export const AdRevenueSection = (): JSX.Element => {
             .maybeSingle(),
         ]);
 
+        if (capsErr) {
+          console.warn('Failed to load ad_safety_caps for AdMob split:', capsErr);
+        }
+
         const rows = !admobErr && Array.isArray(admobRows) ? admobRows : [];
         if (rows.length > 0) {
-          const artistPct = Number(capsRow?.artist_revenue_percentage ?? 60);
-          const listenerPct = Number(capsRow?.listener_revenue_percentage ?? 0);
-          const platformPct = Number(capsRow?.platform_revenue_percentage ?? 40);
+          const artistPctRaw = capsRow != null ? Number(capsRow.artist_revenue_percentage) : NaN;
+          const listenerPctRaw = capsRow != null ? Number(capsRow.listener_revenue_percentage) : NaN;
+          const platformPctRaw = capsRow != null ? Number(capsRow.platform_revenue_percentage) : NaN;
+          const splitFromCaps =
+            capsRow != null &&
+            Number.isFinite(artistPctRaw) &&
+            Number.isFinite(listenerPctRaw) &&
+            Number.isFinite(platformPctRaw);
+          const artistPct = splitFromCaps ? Math.max(0, Math.min(100, artistPctRaw)) : 0;
+          const listenerPct = splitFromCaps ? Math.max(0, Math.min(100, listenerPctRaw)) : 0;
+          const platformPct = splitFromCaps ? Math.max(0, Math.min(100, platformPctRaw)) : 0;
 
           let grossSum = 0;
           let netSum = 0;
@@ -352,12 +364,23 @@ export const AdRevenueSection = (): JSX.Element => {
           const yesterdayRow = rows.find((r: any) => r.revenue_date === yesterdayOnly);
           const grossYesterday = yesterdayRow ? Number(yesterdayRow.total_revenue_usd || 0) : 0;
 
-          const artistRevenue = netSum * (artistPct / 100);
-          const listenerRevenue = netSum * (listenerPct / 100);
-          // Residual to platform avoids float drift when caps should sum to 100%.
-          const platformRevenue = netSum - artistRevenue - listenerRevenue;
-          const platformPctDisplay =
-            netSum > 0 ? Math.round((platformRevenue / netSum) * 1000) / 10 : 0;
+          let artistRevenue = 0;
+          let listenerRevenue = 0;
+          let platformRevenue = 0;
+          let platformPctDisplay = 0;
+          let payoutSplitLabel: string;
+          if (splitFromCaps) {
+            artistRevenue = netSum * (artistPct / 100);
+            listenerRevenue = netSum * (listenerPct / 100);
+            // Residual to platform avoids float drift when caps should sum to 100%.
+            platformRevenue = netSum - artistRevenue - listenerRevenue;
+            platformPctDisplay =
+              netSum > 0 ? Math.round((platformRevenue / netSum) * 1000) / 10 : 0;
+            payoutSplitLabel = `${artistPct}/${listenerPct}/${platformPct} (artist/listener/platform · % of usable net · Ad Safety Caps)`;
+          } else {
+            payoutSplitLabel =
+              'No active Ad Safety Caps row — open Ad Management → Ad Safety Caps and ensure one active configuration.';
+          }
 
           const sortedByDate = [...rows].sort((a: any, b: any) =>
             String(a.revenue_date).localeCompare(String(b.revenue_date))
@@ -399,7 +422,8 @@ export const AdRevenueSection = (): JSX.Element => {
             admob_usable_net_total: netSum,
             admob_gross_total: grossSum,
             admob_yesterday: grossYesterday,
-            payout_split_label: `${artistPct}/${listenerPct}/${platformPct} (artist/listener/platform · % of usable net)`,
+            payout_split_label: payoutSplitLabel,
+            admob_split_from_caps: splitFromCaps,
             // Revenue Overview charts: same AdMob window as top cards (not impression-event aggregates).
             daily_revenue,
             by_ad_type,
@@ -1183,6 +1207,7 @@ export const AdRevenueSection = (): JSX.Element => {
           <p className="ml-4 text-gray-700">Loading revenue data...</p>
         </div>
       ) : revenueData ? (
+        <>
         <div className="grid grid-cols-2 md:grid-cols-4 xl:grid-cols-6 gap-4">
           <div className="bg-white rounded-lg shadow p-6">
             <div className="flex items-center justify-between mb-4">
@@ -1217,7 +1242,9 @@ export const AdRevenueSection = (): JSX.Element => {
                 <p className="text-2xl font-bold text-gray-900">{formatCurrency(revenueData.artist_revenue || 0)}</p>
                 {revenueData.revenue_source === 'admob_api' ? (
                   <p className="text-blue-600 text-sm leading-snug" title={revenueData.payout_split_label}>
-                    Share of usable net (payout settings)
+                    {revenueData.admob_split_from_caps === false
+                      ? 'Split unavailable until Ad Safety Caps is active'
+                      : 'Share of usable net (Ad Safety Caps)'}
                   </p>
                 ) : (
                   <p className="text-blue-600 text-sm">{revenueData.artist_count ?? 0} artists (from events)</p>
@@ -1237,7 +1264,11 @@ export const AdRevenueSection = (): JSX.Element => {
               <div>
                 <p className="text-2xl font-bold text-gray-900">{formatCurrency(revenueData.listener_revenue || 0)}</p>
                 {revenueData.revenue_source === 'admob_api' ? (
-                  <p className="text-teal-600 text-sm">Share of usable net (payout settings)</p>
+                  <p className="text-teal-600 text-sm">
+                    {revenueData.admob_split_from_caps === false
+                      ? 'Split unavailable until Ad Safety Caps is active'
+                      : 'Share of usable net (Ad Safety Caps)'}
+                  </p>
                 ) : (
                   <p className="text-teal-600 text-sm">{revenueData.listener_count ?? 0} listeners (from events)</p>
                 )}
@@ -1257,13 +1288,23 @@ export const AdRevenueSection = (): JSX.Element => {
                 <p className="text-2xl font-bold text-gray-900">{formatCurrency(revenueData.platform_revenue || 0)}</p>
                 <p className="text-orange-600 text-sm">
                   {revenueData.revenue_source === 'admob_api'
-                    ? `${Math.round((revenueData.platform_percentage as number) || 0)}% of usable net`
+                    ? revenueData.admob_split_from_caps === false
+                      ? 'Ad Safety Caps required'
+                      : `${Math.round((revenueData.platform_percentage as number) || 0)}% of usable net (Ad Safety Caps)`
                     : `${Math.round(revenueData.platform_percentage || 0)}% of total (events)`}
                 </p>
               </div>
             </div>
           </div>
         </div>
+        {revenueData.revenue_source === 'admob_api' && revenueData.admob_split_from_caps === false && (
+          <div className="mt-4 p-4 bg-amber-50 border border-amber-200 rounded-lg text-sm text-amber-900">
+            <strong>Ad Safety Caps required:</strong> Artist / listener / platform amounts are not shown until there is an
+            active row in <strong>Ad Management → Ad Safety Caps</strong>. Gross totals and charts above still reflect
+            synced AdMob data.
+          </div>
+        )}
+        </>
       ) : (
         <div className="p-6 bg-gray-100 rounded-lg text-center">
           <p className="text-gray-700">No revenue data available</p>
