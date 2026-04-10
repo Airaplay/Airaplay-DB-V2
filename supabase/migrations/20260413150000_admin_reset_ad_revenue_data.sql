@@ -30,6 +30,7 @@ DECLARE
   n_sync_history bigint := 0;
   n_daily_inputs bigint := 0;
   n_revenue_events bigint := 0;
+  n_reconciliation bigint := 0;
   n_ledger bigint := 0;
   n_daily_payouts bigint := 0;
   n_distributions bigint := 0;
@@ -66,6 +67,10 @@ BEGIN
   DELETE FROM public.ad_revenue_events;
   GET DIAGNOSTICS n_revenue_events = ROW_COUNT;
 
+  -- Reconciliation Log
+  DELETE FROM public.ad_reconciliation_log;
+  GET DIAGNOSTICS n_reconciliation = ROW_COUNT;
+
   -- AdMob sync history + daily inputs
   DELETE FROM public.admob_sync_history;
   GET DIAGNOSTICS n_sync_history = ROW_COUNT;
@@ -84,6 +89,7 @@ BEGIN
       'admob_sync_history', n_sync_history,
       'ad_daily_revenue_input', n_daily_inputs,
       'ad_revenue_events', n_revenue_events,
+      'ad_reconciliation_log', n_reconciliation,
       'ad_creator_payout_ledger', n_ledger,
       'ad_creator_daily_payouts', n_daily_payouts,
       'ad_creator_pool_distributions', n_distributions,
