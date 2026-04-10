@@ -9,7 +9,21 @@ interface ConversionSettings {
   is_active: boolean;
   max_payout_per_user_usd: number | null;
   minimum_points_for_payout: number;
+  /** % of platform ad-revenue share suggested for this reward pool (default 15) */
+  platform_to_pool_percentage?: number;
   updated_at: string;
+}
+
+interface PoolSuggestion {
+  error?: string;
+  period_start?: string;
+  period_end?: string;
+  usable_net_total_usd?: number;
+  platform_revenue_usd?: number;
+  pool_percentage?: number;
+  suggested_pool_usd?: number;
+  admob_days_count?: number;
+  caps_missing?: boolean;
 }
 
 interface ConversionHistory {
@@ -53,6 +67,10 @@ export const MonthlyConversionSection: React.FC = () => {
   const [editingSettings, setEditingSettings] = useState(false);
   const [newConversionRate, setNewConversionRate] = useState<string>('');
   const [rateDescription, setRateDescription] = useState<string>('');
+  const [newPlatformPoolPct, setNewPlatformPoolPct] = useState<string>('15');
+
+  const [poolSuggestion, setPoolSuggestion] = useState<PoolSuggestion | null>(null);
+  const [poolSuggestionLoading, setPoolSuggestionLoading] = useState(false);
 
   useEffect(() => {
     loadData();
@@ -71,6 +89,31 @@ export const MonthlyConversionSection: React.FC = () => {
       return () => clearTimeout(timer);
     }
   }, [error]);
+
+  useEffect(() => {
+    let cancelled = false;
+    const run = async () => {
+      if (!conversionDate) return;
+      setPoolSuggestionLoading(true);
+      setPoolSuggestion(null);
+      const { data, error: rpcErr } = await supabase.rpc(
+        'admin_suggest_contribution_pool_from_platform_revenue',
+        { p_period_date: conversionDate }
+      );
+      if (cancelled) return;
+      setPoolSuggestionLoading(false);
+      if (rpcErr) {
+        console.warn('Pool suggestion RPC:', rpcErr);
+        setPoolSuggestion({ error: rpcErr.message });
+        return;
+      }
+      setPoolSuggestion((data as PoolSuggestion) || null);
+    };
+    void run();
+    return () => {
+      cancelled = true;
+    };
+  }, [conversionDate, settings?.platform_to_pool_percentage]);
 
   const loadData = async () => {
     try {
@@ -92,6 +135,11 @@ export const MonthlyConversionSection: React.FC = () => {
       if (settingsData) {
         setNewConversionRate(settingsData.conversion_rate.toString());
         setRateDescription(settingsData.conversion_rate_description || '');
+        const poolPct =
+          typeof settingsData.platform_to_pool_percentage === 'number'
+            ? settingsData.platform_to_pool_percentage
+            : 15;
+        setNewPlatformPoolPct(String(poolPct));
       }
 
       // Load conversion preview
@@ -127,6 +175,12 @@ export const MonthlyConversionSection: React.FC = () => {
       return;
     }
 
+    const poolPct = parseFloat(newPlatformPoolPct);
+    if (!Number.isFinite(poolPct) || poolPct < 0 || poolPct > 100) {
+      setError('Platform → pool % must be between 0 and 100');
+      return;
+    }
+
     try {
       setProcessing(true);
       setError(null);
@@ -144,7 +198,16 @@ export const MonthlyConversionSection: React.FC = () => {
 
       if (updateError) throw updateError;
 
-      setSuccess('Conversion rate updated successfully');
+      const { data: poolRes, error: poolErr } = await supabase.rpc(
+        'admin_set_platform_to_pool_percentage',
+        { p_percentage: poolPct }
+      );
+      if (poolErr) throw poolErr;
+      if (poolRes && typeof poolRes === 'object' && 'success' in poolRes && poolRes.success === false) {
+        throw new Error((poolRes as { error?: string }).error || 'Failed to save platform pool percentage');
+      }
+
+      setSuccess('Conversion settings updated successfully');
       setEditingSettings(false);
       await loadData();
 
@@ -312,7 +375,7 @@ export const MonthlyConversionSection: React.FC = () => {
         </div>
 
         {settings && !editingSettings && (
-          <div className="grid grid-cols-2 gap-4">
+          <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
             <div className="p-4 bg-blue-50 border border-blue-200 rounded-lg">
               <p className="text-xs text-blue-600 uppercase tracking-wider mb-1">Conversion Rate</p>
               <p className="text-2xl font-bold text-gray-900">{settings.conversion_rate}</p>
@@ -322,6 +385,16 @@ export const MonthlyConversionSection: React.FC = () => {
               <p className="text-xs text-[#309605] uppercase tracking-wider mb-1">Minimum Points</p>
               <p className="text-2xl font-bold text-gray-900">{settings.minimum_points_for_payout}</p>
               <p className="text-xs text-gray-600 mt-1">Required for payout</p>
+            </div>
+            <div className="p-4 bg-orange-50 border border-orange-200 rounded-lg">
+              <p className="text-xs text-orange-700 uppercase tracking-wider mb-1">Platform → pool</p>
+              <p className="text-2xl font-bold text-gray-900">
+                {typeof settings.platform_to_pool_percentage === 'number'
+                  ? settings.platform_to_pool_percentage
+                  : 15}
+                %
+              </p>
+              <p className="text-xs text-gray-600 mt-1">Of platform ad share → reward pool</p>
             </div>
           </div>
         )}
@@ -358,13 +431,31 @@ export const MonthlyConversionSection: React.FC = () => {
               />
             </div>
 
+            <div>
+              <label className="block text-sm font-medium text-gray-700 mb-1.5">
+                Platform revenue → contribution pool (%)
+              </label>
+              <input
+                type="number"
+                step="0.01"
+                min={0}
+                max={100}
+                value={newPlatformPoolPct}
+                onChange={(e) => setNewPlatformPoolPct(e.target.value)}
+                className="w-full px-3 py-2 bg-white border border-gray-300 rounded-lg text-gray-900 text-sm focus:outline-none focus:border-green-600 focus:ring-2 focus:ring-green-600 focus:ring-opacity-20"
+              />
+              <p className="text-xs text-gray-500 mt-1">
+                Suggested reward pool = this % × platform share of AdMob usable net for the conversion month (see below).
+              </p>
+            </div>
+
             <div className="flex items-center gap-2 pt-2">
               <button
                 onClick={handleUpdateConversionRate}
                 disabled={processing}
                 className="flex-1 px-4 py-2 bg-green-600 hover:bg-green-700 disabled:opacity-50 rounded-lg text-white text-sm font-medium transition-colors"
               >
-                {processing ? 'Updating...' : 'Save Settings'}
+                {processing ? 'Updating...' : 'Save conversion settings'}
               </button>
               <button
                 onClick={() => {
@@ -372,6 +463,13 @@ export const MonthlyConversionSection: React.FC = () => {
                   if (settings) {
                     setNewConversionRate(settings.conversion_rate.toString());
                     setRateDescription(settings.conversion_rate_description || '');
+                    setNewPlatformPoolPct(
+                      String(
+                        typeof settings.platform_to_pool_percentage === 'number'
+                          ? settings.platform_to_pool_percentage
+                          : 15
+                      )
+                    );
                   }
                 }}
                 disabled={processing}
@@ -485,6 +583,77 @@ export const MonthlyConversionSection: React.FC = () => {
                 className="w-full px-3 py-2 bg-white border border-gray-300 rounded-lg text-gray-900 text-sm focus:outline-none focus:border-green-600 focus:ring-2 focus:ring-green-600 focus:ring-opacity-20"
               />
             </div>
+          </div>
+
+          <div className="p-4 bg-slate-50 border border-slate-200 rounded-lg space-y-3">
+            <div className="flex items-center justify-between gap-2">
+              <p className="text-sm font-medium text-gray-900">Suggested pool (from AdMob platform share)</p>
+              {poolSuggestionLoading && (
+                <RefreshCw className="w-4 h-4 text-gray-500 animate-spin shrink-0" />
+              )}
+            </div>
+            {poolSuggestion?.error && (
+              <p className="text-sm text-red-600">{poolSuggestion.error}</p>
+            )}
+            {!poolSuggestionLoading && poolSuggestion && !poolSuggestion.error && (
+              <>
+                <p className="text-xs text-gray-600">
+                  Calendar month of conversion date:{' '}
+                  <strong>
+                    {poolSuggestion.period_start} — {poolSuggestion.period_end}
+                  </strong>
+                  . Uses <code className="text-[11px] bg-white px-1 rounded">ad_daily_revenue_input</code> rows with{' '}
+                  <code className="text-[11px] bg-white px-1 rounded">source = admob_api</code>, usable net per day
+                  (gross × safety buffer %), platform share from <strong>Ad Safety Caps</strong> (same residual split as
+                  Ad Revenue). AdMob days in range: <strong>{poolSuggestion.admob_days_count ?? 0}</strong>.
+                </p>
+                {poolSuggestion.caps_missing && (
+                  <p className="text-sm text-amber-800">
+                    No active Ad Safety Caps row — configure it under Ad Management before using this suggestion.
+                  </p>
+                )}
+                <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 text-sm">
+                  <div>
+                    <p className="text-xs text-gray-500">Usable net (month)</p>
+                    <p className="font-semibold text-gray-900">
+                      ${(poolSuggestion.usable_net_total_usd ?? 0).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                    </p>
+                  </div>
+                  <div>
+                    <p className="text-xs text-gray-500">Platform share</p>
+                    <p className="font-semibold text-gray-900">
+                      ${(poolSuggestion.platform_revenue_usd ?? 0).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                    </p>
+                  </div>
+                  <div>
+                    <p className="text-xs text-gray-500">Pool % (settings)</p>
+                    <p className="font-semibold text-gray-900">{poolSuggestion.pool_percentage ?? 15}%</p>
+                  </div>
+                  <div>
+                    <p className="text-xs text-gray-500">Suggested pool</p>
+                    <p className="font-semibold text-[#309605]">
+                      ${(poolSuggestion.suggested_pool_usd ?? 0).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                    </p>
+                  </div>
+                </div>
+                <button
+                  type="button"
+                  onClick={() =>
+                    setRewardPoolAmount(
+                      (poolSuggestion.suggested_pool_usd ?? 0).toFixed(2)
+                    )
+                  }
+                  disabled={
+                    poolSuggestionLoading ||
+                    (poolSuggestion.suggested_pool_usd ?? 0) <= 0 ||
+                    !!poolSuggestion.caps_missing
+                  }
+                  className="px-4 py-2 bg-slate-800 hover:bg-slate-900 disabled:opacity-50 disabled:cursor-not-allowed rounded-lg text-white text-sm font-medium"
+                >
+                  Use suggested amount
+                </button>
+              </>
+            )}
           </div>
 
           <div className="p-4 bg-yellow-50 border border-yellow-200 rounded-lg">
@@ -617,10 +786,11 @@ export const MonthlyConversionSection: React.FC = () => {
           <div className="p-4 bg-white rounded-lg border border-gray-200">
             <div className="flex items-center gap-2 mb-2">
               <div className="w-6 h-6 bg-blue-600 text-white rounded-full flex items-center justify-center text-xs font-bold">2</div>
-              <h4 className="font-medium text-gray-900 text-sm">Input Reward Pool</h4>
+              <h4 className="font-medium text-gray-900 text-sm">Set reward pool</h4>
             </div>
             <p className="text-sm text-gray-600 leading-relaxed">
-              At month end, admin enters the total reward pool budget to be distributed among contributors.
+              Use <strong>Use suggested amount</strong> to fill the pool from AdMob platform share × your configured %,
+              or enter any USD amount manually.
             </p>
           </div>
 
