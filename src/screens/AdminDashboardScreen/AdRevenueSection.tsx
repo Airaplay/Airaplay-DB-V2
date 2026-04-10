@@ -266,34 +266,55 @@ export const AdRevenueSection = (): JSX.Element => {
         };
       }
 
+      // Calendar window (local date) — matches top-card AdMob range and impression aggregates.
+      const toDateOnlyCal = (d: Date): string => format(d, 'yyyy-MM-dd');
+      const todayCalForWindow = new Date();
+      todayCalForWindow.setHours(0, 0, 0, 0);
+      const windowStartCal = new Date(todayCalForWindow);
+      switch (timeRange) {
+        case '7d':
+          windowStartCal.setDate(windowStartCal.getDate() - 6);
+          break;
+        case '30d':
+          windowStartCal.setDate(windowStartCal.getDate() - 29);
+          break;
+        case '90d':
+          windowStartCal.setDate(windowStartCal.getDate() - 89);
+          break;
+        default:
+          windowStartCal.setDate(windowStartCal.getDate() - 29);
+      }
+      const windowStartStr = toDateOnlyCal(windowStartCal);
+      const windowEndStr = toDateOnlyCal(todayCalForWindow);
+
+      let impressionOverlay: Record<string, unknown> = {};
+      try {
+        const { data: impAgg, error: impAggErr } = await supabase.rpc('admin_aggregate_ad_impressions', {
+          p_start_date: windowStartStr,
+          p_end_date: windowEndStr,
+        });
+        if (!impAggErr && impAgg && typeof impAgg === 'object') {
+          const ob = impAgg as Record<string, unknown>;
+          impressionOverlay = {
+            impressions_by_content_type: Array.isArray(ob.by_content_type) ? ob.by_content_type : [],
+            impressions_by_ad_type: Array.isArray(ob.by_ad_type) ? ob.by_ad_type : [],
+            impressions_total: Number(ob.total_impressions ?? 0),
+            impressions_window_start: windowStartStr,
+            impressions_window_end: windowEndStr,
+          };
+        }
+      } catch (impErr) {
+        console.warn('admin_aggregate_ad_impressions failed:', impErr);
+      }
+
       // AdMob API rows (source = admob_api): align Total + split cards with synced daily data.
       // gross = total_revenue_usd (matches AdMob estimated earnings stored by admob-sync).
       // usable net per row = gross * safety_buffer_percentage/100 (same basis as creator pool distribution).
       // Artist / Listener / Platform $ = usable net × ad_safety_caps percentages (defaults 60/0/40).
       try {
-        const toDateOnly = (d: Date): string => format(d, 'yyyy-MM-dd');
-        const todayCal = new Date();
-        todayCal.setHours(0, 0, 0, 0);
-        const windowStart = new Date(todayCal);
-        switch (timeRange) {
-          case '7d':
-            windowStart.setDate(windowStart.getDate() - 6);
-            break;
-          case '30d':
-            windowStart.setDate(windowStart.getDate() - 29);
-            break;
-          case '90d':
-            windowStart.setDate(windowStart.getDate() - 89);
-            break;
-          default:
-            windowStart.setDate(windowStart.getDate() - 29);
-        }
-        const windowStartStr = toDateOnly(windowStart);
-        const windowEndStr = toDateOnly(todayCal);
-
-        const yesterdayCal = new Date(todayCal);
+        const yesterdayCal = new Date(todayCalForWindow);
         yesterdayCal.setDate(yesterdayCal.getDate() - 1);
-        const yesterdayOnly = toDateOnly(yesterdayCal);
+        const yesterdayOnly = toDateOnlyCal(yesterdayCal);
 
         const [{ data: admobRows, error: admobErr }, { data: capsRow }] = await Promise.all([
           supabase
@@ -446,7 +467,10 @@ export const AdRevenueSection = (): JSX.Element => {
         setRevenueEvents([]);
       }
 
-      setRevenueData(finalSummaryData);
+      setRevenueData({
+        ...(finalSummaryData || {}),
+        ...impressionOverlay,
+      });
     } catch (err) {
       console.error('Error fetching revenue data:', err);
       setError(err instanceof Error ? err.message : 'Failed to load revenue data');
@@ -2248,65 +2272,145 @@ export const AdRevenueSection = (): JSX.Element => {
               {revenueData.revenue_source === 'admob_api' && (
                 <p className="text-sm text-gray-600 mb-4 p-3 bg-blue-50 border border-blue-100 rounded-lg">
                   <strong>AdMob-synced window:</strong> charts below use the same calendar range as{' '}
-                  <strong>{timeRange}</strong> (top selector). Daily trend and ad-format bars sum{' '}
+                  <strong>{timeRange}</strong> (top selector). Daily trend and revenue-by-format bars sum{' '}
                   <code className="text-xs bg-white px-1 rounded">ad_daily_revenue_input</code> rows with{' '}
-                  <code className="text-xs bg-white px-1 rounded">source = admob_api</code>. Content-type bars
-                  still reflect <strong>processed impression events</strong> (in-app attribution), not the AdMob
+                  <code className="text-xs bg-white px-1 rounded">source = admob_api</code>. When present,
+                  impression bars count rows in <code className="text-xs bg-white px-1 rounded">ad_impressions</code>{' '}
+                  by <code className="text-xs bg-white px-1 rounded">created_at::date</code> in that same range.
+                  Revenue-by-content-type (fallback) uses <strong>ad_revenue_events</strong> metadata — not the AdMob
                   network report.
                 </p>
               )}
               <div className="grid grid-cols-2 gap-6">
                 <div>
-                  <h4 className="font-medium text-gray-900 mb-1">Revenue by Content Type</h4>
-                  <p className="text-xs text-gray-500 mb-3">
-                    {revenueData.revenue_source === 'admob_api'
-                      ? 'From ad_revenue_events metadata (per impression). AdMob API does not provide this breakdown.'
-                      : 'From processed ad revenue events in the selected period.'}
-                  </p>
-                  {revenueData.by_content_type && revenueData.by_content_type.length > 0 ? (
-                    <div className="h-80">
-                      <ResponsiveContainer width="100%" height="100%">
-                        <BarChart
-                          data={revenueData.by_content_type}
-                          margin={{ top: 10, right: 30, left: 0, bottom: 20 }}
-                        >
-                          <CartesianGrid strokeDasharray="3 3" stroke="#E5E7EB" />
-                          <XAxis
-                            dataKey="content_type"
-                            tick={{ fill: '#4B5563' }}
-                            tickMargin={10}
-                            axisLine={{ stroke: '#D1D5DB' }}
-                            tickFormatter={(value) => value ? value.charAt(0).toUpperCase() + value.slice(1) : ''}
-                          />
-                          <YAxis
-                            tick={{ fill: '#4B5563' }}
-                            axisLine={{ stroke: '#D1D5DB' }}
-                            tickFormatter={(value) => `$${value}`}
-                          />
-                          <Tooltip
-                            contentStyle={{
-                              backgroundColor: '#FFFFFF',
-                              borderColor: '#D1D5DB',
-                              borderRadius: '0.5rem',
-                              boxShadow: '0 4px 6px -1px rgba(0, 0, 0, 0.1)'
-                            }}
-                            itemStyle={{ color: '#111827' }}
-                            labelStyle={{ color: '#4B5563', fontWeight: 'bold', marginBottom: '0.5rem' }}
-                            formatter={(value: any) => [formatCurrency(value), 'Revenue']}
-                            labelFormatter={(label) => `Content Type: ${label ? label.charAt(0).toUpperCase() + label.slice(1) : 'Unknown'}`}
-                          />
-                          <Bar dataKey="revenue" radius={[4, 4, 0, 0]}>
-                            {revenueData.by_content_type.map((_entry: any, index: number) => (
-                              <Cell key={`cell-${index}`} fill={COLORS[index % COLORS.length]} />
-                            ))}
-                          </Bar>
-                        </BarChart>
-                      </ResponsiveContainer>
-                    </div>
+                  {Array.isArray(revenueData.impressions_by_content_type) &&
+                  revenueData.impressions_by_content_type.length > 0 ? (
+                    <>
+                      <h4 className="font-medium text-gray-900 mb-1">Impressions by Content Type</h4>
+                      <p className="text-xs text-gray-500 mb-3">
+                        From <code className="text-xs bg-gray-100 px-1 rounded">ad_impressions</code>
+                        {revenueData.impressions_window_start && revenueData.impressions_window_end
+                          ? ` (${revenueData.impressions_window_start} → ${revenueData.impressions_window_end}, local date).`
+                          : ' in the selected period (local date).'}
+                        {typeof revenueData.impressions_total === 'number' && revenueData.impressions_total > 0 ? (
+                          <span className="block mt-1 text-gray-600">
+                            Total impressions: {Number(revenueData.impressions_total).toLocaleString()}
+                          </span>
+                        ) : null}
+                      </p>
+                      <div className="h-80">
+                        <ResponsiveContainer width="100%" height="100%">
+                          <BarChart
+                            data={revenueData.impressions_by_content_type}
+                            margin={{ top: 10, right: 30, left: 0, bottom: 20 }}
+                          >
+                            <CartesianGrid strokeDasharray="3 3" stroke="#E5E7EB" />
+                            <XAxis
+                              dataKey="content_type"
+                              tick={{ fill: '#4B5563' }}
+                              tickMargin={10}
+                              axisLine={{ stroke: '#D1D5DB' }}
+                              tickFormatter={(value) =>
+                                value ? value.charAt(0).toUpperCase() + value.slice(1) : ''
+                              }
+                            />
+                            <YAxis
+                              tick={{ fill: '#4B5563' }}
+                              axisLine={{ stroke: '#D1D5DB' }}
+                              tickFormatter={(value) => Number(value).toLocaleString()}
+                            />
+                            <Tooltip
+                              contentStyle={{
+                                backgroundColor: '#FFFFFF',
+                                borderColor: '#D1D5DB',
+                                borderRadius: '0.5rem',
+                                boxShadow: '0 4px 6px -1px rgba(0, 0, 0, 0.1)'
+                              }}
+                              itemStyle={{ color: '#111827' }}
+                              labelStyle={{
+                                color: '#4B5563',
+                                fontWeight: 'bold',
+                                marginBottom: '0.5rem'
+                              }}
+                              formatter={(value: number) => [
+                                Number(value).toLocaleString(),
+                                'Impressions'
+                              ]}
+                              labelFormatter={(label) =>
+                                `Content Type: ${label ? label.charAt(0).toUpperCase() + label.slice(1) : 'Unknown'}`
+                              }
+                            />
+                            <Bar dataKey="impressions" radius={[4, 4, 0, 0]}>
+                              {revenueData.impressions_by_content_type.map((_entry: unknown, index: number) => (
+                                <Cell key={`imp-ct-${index}`} fill={COLORS[index % COLORS.length]} />
+                              ))}
+                            </Bar>
+                          </BarChart>
+                        </ResponsiveContainer>
+                      </div>
+                    </>
                   ) : (
-                    <div className="p-4 bg-gray-100 rounded-lg text-center h-80 flex items-center justify-center">
-                      <p className="text-gray-700">No content type data available</p>
-                    </div>
+                    <>
+                      <h4 className="font-medium text-gray-900 mb-1">Revenue by Content Type</h4>
+                      <p className="text-xs text-gray-500 mb-3">
+                        {revenueData.revenue_source === 'admob_api'
+                          ? 'From ad_revenue_events metadata (per impression). AdMob API does not provide this breakdown.'
+                          : 'From processed ad revenue events in the selected period.'}
+                      </p>
+                      {revenueData.by_content_type && revenueData.by_content_type.length > 0 ? (
+                        <div className="h-80">
+                          <ResponsiveContainer width="100%" height="100%">
+                            <BarChart
+                              data={revenueData.by_content_type}
+                              margin={{ top: 10, right: 30, left: 0, bottom: 20 }}
+                            >
+                              <CartesianGrid strokeDasharray="3 3" stroke="#E5E7EB" />
+                              <XAxis
+                                dataKey="content_type"
+                                tick={{ fill: '#4B5563' }}
+                                tickMargin={10}
+                                axisLine={{ stroke: '#D1D5DB' }}
+                                tickFormatter={(value) =>
+                                  value ? value.charAt(0).toUpperCase() + value.slice(1) : ''
+                                }
+                              />
+                              <YAxis
+                                tick={{ fill: '#4B5563' }}
+                                axisLine={{ stroke: '#D1D5DB' }}
+                                tickFormatter={(value) => `$${value}`}
+                              />
+                              <Tooltip
+                                contentStyle={{
+                                  backgroundColor: '#FFFFFF',
+                                  borderColor: '#D1D5DB',
+                                  borderRadius: '0.5rem',
+                                  boxShadow: '0 4px 6px -1px rgba(0, 0, 0, 0.1)'
+                                }}
+                                itemStyle={{ color: '#111827' }}
+                                labelStyle={{
+                                  color: '#4B5563',
+                                  fontWeight: 'bold',
+                                  marginBottom: '0.5rem'
+                                }}
+                                formatter={(value: any) => [formatCurrency(value), 'Revenue']}
+                                labelFormatter={(label) =>
+                                  `Content Type: ${label ? label.charAt(0).toUpperCase() + label.slice(1) : 'Unknown'}`
+                                }
+                              />
+                              <Bar dataKey="revenue" radius={[4, 4, 0, 0]}>
+                                {revenueData.by_content_type.map((_entry: any, index: number) => (
+                                  <Cell key={`cell-${index}`} fill={COLORS[index % COLORS.length]} />
+                                ))}
+                              </Bar>
+                            </BarChart>
+                          </ResponsiveContainer>
+                        </div>
+                      ) : (
+                        <div className="p-4 bg-gray-100 rounded-lg text-center h-80 flex items-center justify-center">
+                          <p className="text-gray-700">No content type data available</p>
+                        </div>
+                      )}
+                    </>
                   )}
                 </div>
 
@@ -2368,6 +2472,69 @@ export const AdRevenueSection = (): JSX.Element => {
                   )}
                 </div>
               </div>
+
+              {Array.isArray(revenueData.impressions_by_ad_type) &&
+                revenueData.impressions_by_ad_type.length > 0 && (
+                  <div className="mt-8">
+                    <h4 className="font-medium text-gray-900 mb-1">Impressions by Ad Type</h4>
+                    <p className="text-xs text-gray-500 mb-3">
+                      From <code className="text-xs bg-gray-100 px-1 rounded">ad_impressions</code>
+                      {revenueData.impressions_window_start && revenueData.impressions_window_end
+                        ? ` (${revenueData.impressions_window_start} → ${revenueData.impressions_window_end}, local date).`
+                        : ' in the selected period (local date).'}
+                    </p>
+                    <div className="h-64">
+                      <ResponsiveContainer width="100%" height="100%">
+                        <BarChart
+                          data={revenueData.impressions_by_ad_type}
+                          margin={{ top: 10, right: 30, left: 0, bottom: 20 }}
+                        >
+                          <CartesianGrid strokeDasharray="3 3" stroke="#E5E7EB" />
+                          <XAxis
+                            dataKey="ad_type"
+                            tick={{ fill: '#4B5563' }}
+                            tickMargin={10}
+                            axisLine={{ stroke: '#D1D5DB' }}
+                            tickFormatter={(value) =>
+                              value ? value.charAt(0).toUpperCase() + value.slice(1) : ''
+                            }
+                          />
+                          <YAxis
+                            tick={{ fill: '#4B5563' }}
+                            axisLine={{ stroke: '#D1D5DB' }}
+                            tickFormatter={(value) => Number(value).toLocaleString()}
+                          />
+                          <Tooltip
+                            contentStyle={{
+                              backgroundColor: '#FFFFFF',
+                              borderColor: '#D1D5DB',
+                              borderRadius: '0.5rem',
+                              boxShadow: '0 4px 6px -1px rgba(0, 0, 0, 0.1)'
+                            }}
+                            itemStyle={{ color: '#111827' }}
+                            labelStyle={{
+                              color: '#4B5563',
+                              fontWeight: 'bold',
+                              marginBottom: '0.5rem'
+                            }}
+                            formatter={(value: number) => [
+                              Number(value).toLocaleString(),
+                              'Impressions'
+                            ]}
+                            labelFormatter={(label) =>
+                              `Ad Type: ${label ? label.charAt(0).toUpperCase() + label.slice(1) : 'Unknown'}`
+                            }
+                          />
+                          <Bar dataKey="impressions" radius={[4, 4, 0, 0]}>
+                            {revenueData.impressions_by_ad_type.map((_entry: unknown, index: number) => (
+                              <Cell key={`imp-at-${index}`} fill={COLORS[index % COLORS.length]} />
+                            ))}
+                          </Bar>
+                        </BarChart>
+                      </ResponsiveContainer>
+                    </div>
+                  </div>
+                )}
 
               {revenueData.daily_revenue && revenueData.daily_revenue.length > 0 && (
                 <div className="mt-8">
