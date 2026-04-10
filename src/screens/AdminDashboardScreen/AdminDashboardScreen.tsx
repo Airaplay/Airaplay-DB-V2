@@ -2,7 +2,7 @@ import { useState, useEffect, useCallback, useRef } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { Users, FileText, HelpCircle, BarChart, Settings, LogOut, Home, DollarSign, BarChart2, Bell, UserCog, Zap, Image, Coins, Wallet, Calendar, UserPlus, Megaphone, Flag, Star, Music, Tags, Sparkles, ListMusic, Shield, Award, Trophy, TrendingUp, Activity, Gift, Globe, Monitor, ChevronDown, ChevronRight, Menu, X, BookOpen, ScrollText, Headphones, AlertTriangle } from 'lucide-react';
 import { supabase, getUserRole } from '../../lib/supabase';
-import { getAdminMfaSessionState } from '../../lib/adminMfaGate';
+import { hasAdminPasswordAndEmailOtpStepUp } from '../../lib/adminEmailOtpGate';
 import { cacheInvalidation } from '../../lib/enhancedDataFetching';
 import { performCompleteLogout } from '../../lib/logoutService';
 import { ErrorBoundary } from '../../components/ErrorBoundary';
@@ -161,8 +161,8 @@ export const AdminDashboardScreen = (): JSX.Element => {
         return false;
       }
 
-      const mfaState = await getAdminMfaSessionState(supabase);
-      if (mfaState.kind !== 'aal2') {
+      const { data: { session: s2 } } = await supabase.auth.getSession();
+      if (!hasAdminPasswordAndEmailOtpStepUp(s2?.access_token)) {
         await cacheInvalidation.byTags(['user', 'auth']);
         await supabase.auth.signOut();
         navigate('/admin/login');
@@ -227,15 +227,10 @@ export const AdminDashboardScreen = (): JSX.Element => {
         return;
       }
 
-      const mfaState = await getAdminMfaSessionState(supabase);
-      if (mfaState.kind !== 'aal2') {
-        if (mfaState.kind === 'unavailable') {
-          setError('Admin access requires MFA, but MFA verification is unavailable in this environment.');
-        } else if (mfaState.kind === 'error') {
-          setError(mfaState.message);
-        } else {
-          setError('Admin session requires MFA. Please sign in again.');
-        }
+      if (!hasAdminPasswordAndEmailOtpStepUp(session.access_token)) {
+        setError(
+          'Admin access requires email verification after your password. Open the admin login page and complete the email code step.'
+        );
         await supabase.auth.signOut();
         navigate('/admin/login');
         return;

@@ -1,15 +1,15 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { Mail, Lock, Eye, EyeOff, AlertCircle, Clock, Shield } from 'lucide-react';
+import { Mail, Lock, Eye, EyeOff, AlertCircle, Clock, Shield, RefreshCw } from 'lucide-react';
 import { Card, CardContent } from '../../components/ui/card';
 import { supabase, getUserRole } from '../../lib/supabase';
 import { LoadingLogo } from '../../components/LoadingLogo';
 import { cacheInvalidation } from '../../lib/enhancedDataFetching';
 import {
-  getAdminMfaSessionState,
-  startTotpEnrollment,
-  verifyTotpCode,
-} from '../../lib/adminMfaGate';
+  hasAdminPasswordAndEmailOtpStepUp,
+  sendAdminLoginEmailOtp,
+  verifyAdminLoginEmailOtp,
+} from '../../lib/adminEmailOtpGate';
 
 const ADMIN_ROLES = ['admin', 'manager', 'editor', 'account'];
 
@@ -18,7 +18,7 @@ const getClientInfo = () => ({
   ip: '',
 });
 
-type MfaPhase = 'idle' | 'enroll' | 'verify';
+type OtpPhase = 'idle' | 'email_otp';
 
 export const AdminLoginScreen = (): JSX.Element => {
   const navigate = useNavigate();
@@ -30,17 +30,19 @@ export const AdminLoginScreen = (): JSX.Element => {
   const [lockoutSeconds, setLockoutSeconds] = useState(0);
   const [failuresRemaining, setFailuresRemaining] = useState<number | null>(null);
   const lockoutTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const resendCooldownRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
-  const [mfaPhase, setMfaPhase] = useState<MfaPhase>('idle');
-  const [mfaFactorId, setMfaFactorId] = useState<string | null>(null);
-  const [mfaQrCode, setMfaQrCode] = useState('');
-  const [mfaSecret, setMfaSecret] = useState('');
-  const [mfaCode, setMfaCode] = useState('');
+  const [otpPhase, setOtpPhase] = useState<OtpPhase>('idle');
+  const [otpEmail, setOtpEmail] = useState('');
+  const [otpCode, setOtpCode] = useState('');
+  const [resendCooldownSeconds, setResendCooldownSeconds] = useState(0);
+  const [isSendingOtp, setIsSendingOtp] = useState(false);
 
   useEffect(() => {
     checkExistingAuth();
     return () => {
       if (lockoutTimerRef.current) clearInterval(lockoutTimerRef.current);
+      if (resendCooldownRef.current) clearInterval(resendCooldownRef.current);
     };
   }, []);
 
@@ -56,6 +58,23 @@ export const AdminLoginScreen = (): JSX.Element => {
           return 0;
         }
         return prev - 1;
+      });
+    }, 1000);
+  };
+
+  const startResendCooldown = (seconds: number) => {
+    setResendCooldownSeconds(seconds);
+    if (resendCooldownRef.current) clearInterval(resendCooldownRef.current);
+    resendCooldownRef.current = setInterval(() => {
+      setResendCooldownSeconds((s) => {
+        if (s <= 1) {
+          if (resendCooldownRef.current) {
+            clearInterval(resendCooldownRef.current);
+            resendCooldownRef.current = null;
+          }
+          return 0;
+        }
+        return s - 1;
       });
     }, 1000);
   };
@@ -84,55 +103,43 @@ export const AdminLoginScreen = (): JSX.Element => {
     }
 
     await cacheInvalidation.byTags(['user', 'auth']);
-    setMfaPhase('idle');
+    setOtpPhase('idle');
     navigate('/admin');
   };
 
-  const applyMfaGate = async (): Promise<'complete' | 'mfa_ui' | 'abort'> => {
-    const state = await getAdminMfaSessionState(supabase);
-    if (state.kind === 'aal2') {
-      return 'complete';
-    }
-    if (state.kind === 'error') {
-      setError(state.message);
+  /** After password + admin role: require Supabase email OTP so JWT `amr` includes password + otp. */
+  const applyEmailOtpGate = async (): Promise<'complete' | 'otp_ui' | 'abort'> => {
+    const { data: { session } } = await supabase.auth.getSession();
+    if (!session?.access_token) {
+      setError('Session missing after sign-in.');
       return 'abort';
     }
-    if (state.kind === 'unavailable') {
-      setError(
-        'Multi-factor authentication is required for admin access, but MFA APIs are unavailable. Update @supabase/supabase-js and ensure MFA is enabled for your Supabase project.'
-      );
+    if (hasAdminPasswordAndEmailOtpStepUp(session.access_token)) {
+      return 'complete';
+    }
+
+    const email = (session.user.email ?? formData.email).trim().toLowerCase();
+    if (!email) {
+      setError('No email address on this account.');
       await supabase.auth.signOut();
       return 'abort';
     }
-    if (state.kind === 'verify') {
-      setMfaFactorId(state.factorId);
-      setMfaPhase('verify');
-      setMfaCode('');
-      return 'mfa_ui';
+
+    setIsSendingOtp(true);
+    const sent = await sendAdminLoginEmailOtp(supabase, email);
+    setIsSendingOtp(false);
+
+    if (!sent.ok) {
+      setError(sent.message);
+      await supabase.auth.signOut();
+      return 'abort';
     }
-    if (state.kind === 'enroll_finish') {
-      setMfaFactorId(state.factorId);
-      setMfaQrCode('');
-      setMfaSecret('');
-      setMfaPhase('enroll');
-      setMfaCode('');
-      return 'mfa_ui';
-    }
-    if (state.kind === 'enroll_start') {
-      const started = await startTotpEnrollment(supabase);
-      if (!started.ok) {
-        setError(started.message);
-        await supabase.auth.signOut();
-        return 'abort';
-      }
-      setMfaFactorId(started.factorId);
-      setMfaQrCode(started.qrCode);
-      setMfaSecret(started.secret);
-      setMfaPhase('enroll');
-      setMfaCode('');
-      return 'mfa_ui';
-    }
-    return 'abort';
+
+    setOtpEmail(email);
+    setOtpCode('');
+    setOtpPhase('email_otp');
+    startResendCooldown(60);
+    return 'otp_ui';
   };
 
   const checkExistingAuth = async () => {
@@ -144,9 +151,26 @@ export const AdminLoginScreen = (): JSX.Element => {
       const role = await getUserRole();
       if (!ADMIN_ROLES.includes(role ?? '')) return;
 
-      const gate = await applyMfaGate();
-      if (gate === 'complete') {
+      if (hasAdminPasswordAndEmailOtpStepUp(session.access_token)) {
         navigate('/admin');
+        return;
+      }
+
+      const email = (session.user.email ?? '').trim().toLowerCase();
+      if (!email) return;
+
+      setOtpEmail(email);
+      setOtpCode('');
+      setOtpPhase('email_otp');
+      setIsSendingOtp(true);
+      const sent = await sendAdminLoginEmailOtp(supabase, email);
+      setIsSendingOtp(false);
+      if (!sent.ok) {
+        setError(sent.message);
+        await supabase.auth.signOut();
+        setOtpPhase('idle');
+      } else {
+        startResendCooldown(60);
       }
     } catch (error) {
       console.error('Error checking auth:', error);
@@ -181,7 +205,7 @@ export const AdminLoginScreen = (): JSX.Element => {
         user_agent_param: userAgent,
       });
     } catch {
-      // Non-critical - don't block login on this failure
+      // Non-critical
     }
   };
 
@@ -201,38 +225,56 @@ export const AdminLoginScreen = (): JSX.Element => {
     if (error && lockoutSeconds === 0) setError(null);
   };
 
-  const handleCancelMfa = async () => {
-    setMfaPhase('idle');
-    setMfaFactorId(null);
-    setMfaQrCode('');
-    setMfaSecret('');
-    setMfaCode('');
+  const handleCancelOtp = async () => {
+    setOtpPhase('idle');
+    setOtpEmail('');
+    setOtpCode('');
     setError(null);
+    if (resendCooldownRef.current) {
+      clearInterval(resendCooldownRef.current);
+      resendCooldownRef.current = null;
+    }
+    setResendCooldownSeconds(0);
     await supabase.auth.signOut();
   };
 
-  const handleMfaConfirm = async (e: React.FormEvent) => {
+  const handleResendOtp = async () => {
+    if (resendCooldownSeconds > 0 || !otpEmail) return;
+    setIsSendingOtp(true);
+    setError(null);
+    const sent = await sendAdminLoginEmailOtp(supabase, otpEmail);
+    setIsSendingOtp(false);
+    if (!sent.ok) {
+      setError(sent.message);
+      return;
+    }
+    startResendCooldown(60);
+  };
+
+  const handleOtpSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!mfaFactorId) return;
+    if (!otpEmail) return;
     setIsSubmitting(true);
     setError(null);
     try {
-      const v = await verifyTotpCode(supabase, mfaFactorId, mfaCode);
+      const v = await verifyAdminLoginEmailOtp(supabase, otpEmail, otpCode);
       if (!v.ok) {
         setError(v.message);
         setIsSubmitting(false);
         return;
       }
-      const again = await getAdminMfaSessionState(supabase);
-      if (again.kind !== 'aal2') {
-        setError('MFA step incomplete. Try again.');
+      const { data: { session } } = await supabase.auth.getSession();
+      if (!hasAdminPasswordAndEmailOtpStepUp(session?.access_token)) {
+        setError(
+          'Email verified, but the session did not show password + email sign-in. Ensure your Supabase project sends a 6-digit email OTP (not link-only) for signInWithOtp.'
+        );
         setIsSubmitting(false);
         return;
       }
       await finishLoginSuccess();
     } catch (err) {
-      console.error('MFA error:', err);
-      setError(err instanceof Error ? err.message : 'MFA verification failed');
+      console.error('OTP error:', err);
+      setError(err instanceof Error ? err.message : 'Verification failed');
     } finally {
       setIsSubmitting(false);
     }
@@ -299,17 +341,14 @@ export const AdminLoginScreen = (): JSX.Element => {
         return;
       }
 
-      const gate = await applyMfaGate();
+      const gate = await applyEmailOtpGate();
       if (gate === 'complete') {
         await finishLoginSuccess();
-        setIsSubmitting(false);
         return;
       }
       if (gate === 'abort') {
-        setIsSubmitting(false);
         return;
       }
-      setIsSubmitting(false);
     } catch (err) {
       if (err instanceof Error && err.message !== 'skip') {
         console.error('Login error:', err);
@@ -338,7 +377,7 @@ export const AdminLoginScreen = (): JSX.Element => {
 
   const isLocked = lockoutSeconds > 0;
 
-  if (mfaPhase !== 'idle' && mfaFactorId) {
+  if (otpPhase === 'email_otp' && otpEmail) {
     return (
       <div className="admin-layout flex items-center justify-center min-h-screen bg-gray-50 p-4 w-full">
         <div className="w-full flex items-center justify-center">
@@ -346,43 +385,26 @@ export const AdminLoginScreen = (): JSX.Element => {
             <CardContent className="p-8">
               <div className="text-center mb-6">
                 <img src="/Black_logo.fw.png" alt="Airaplay Admin" className="h-10 mx-auto mb-4" />
-                <h1 className="text-2xl font-bold text-gray-900 mb-2">
-                  {mfaPhase === 'enroll' ? 'Set up authenticator' : 'Two-factor verification'}
-                </h1>
+                <h1 className="text-2xl font-bold text-gray-900 mb-2">Check your email</h1>
                 <p className="text-gray-600 text-sm">
-                  {mfaPhase === 'enroll'
-                    ? (mfaQrCode
-                        ? 'Scan the QR code in your authenticator app, then enter the 6-digit code to finish.'
-                        : 'Enter the 6-digit code from your authenticator app to verify this device.')
-                    : 'Enter the 6-digit code from your authenticator app.'}
+                  We sent a one-time code to <span className="font-medium text-gray-800">{otpEmail}</span>. Enter the 6-digit code to finish signing in.
                 </p>
               </div>
 
               <div className="flex items-center gap-2 mb-4 px-3 py-2 bg-[#e6f7f1] border border-[#b0e6d4] rounded-lg">
                 <Shield className="w-4 h-4 text-[#009c68] flex-shrink-0" />
-                <p className="text-xs text-[#008257]">Admin access requires MFA (TOTP).</p>
+                <p className="text-xs text-[#008257]">Admin login uses password plus an email code from Supabase Auth.</p>
               </div>
 
-              <form onSubmit={handleMfaConfirm} className="space-y-4">
-                {mfaPhase === 'enroll' && mfaQrCode ? (
-                  <div className="flex justify-center">
-                    <img src={mfaQrCode} alt="Authenticator QR" className="max-w-[200px] rounded-lg border border-gray-200" />
-                  </div>
-                ) : null}
-                {mfaPhase === 'enroll' && mfaSecret ? (
-                  <p className="text-xs text-gray-500 break-all text-center font-mono bg-gray-50 p-2 rounded border border-gray-100">
-                    {mfaSecret}
-                  </p>
-                ) : null}
-
+              <form onSubmit={handleOtpSubmit} className="space-y-4">
                 <div>
                   <label className="block text-gray-700 text-sm font-medium mb-2">6-digit code</label>
                   <input
                     type="text"
                     inputMode="numeric"
                     autoComplete="one-time-code"
-                    value={mfaCode}
-                    onChange={(e) => setMfaCode(e.target.value.replace(/\D/g, '').slice(0, 6))}
+                    value={otpCode}
+                    onChange={(e) => setOtpCode(e.target.value.replace(/\D/g, '').slice(0, 6))}
                     className="w-full px-4 py-3 bg-white border border-gray-300 rounded-lg text-gray-900 tracking-widest text-center text-lg"
                     placeholder="••••••"
                     maxLength={6}
@@ -399,7 +421,7 @@ export const AdminLoginScreen = (): JSX.Element => {
 
                 <button
                   type="submit"
-                  disabled={isSubmitting || mfaCode.length !== 6}
+                  disabled={isSubmitting || otpCode.length !== 6}
                   className="w-full py-3 bg-gradient-to-r from-[#309605] to-[#3ba208] hover:from-[#3ba208] hover:to-[#309605] rounded-lg text-white font-medium transition-all duration-200 disabled:opacity-70 disabled:cursor-not-allowed"
                 >
                   {isSubmitting ? 'Verifying...' : 'Continue'}
@@ -407,7 +429,21 @@ export const AdminLoginScreen = (): JSX.Element => {
 
                 <button
                   type="button"
-                  onClick={() => handleCancelMfa()}
+                  onClick={handleResendOtp}
+                  disabled={resendCooldownSeconds > 0 || isSendingOtp}
+                  className="w-full flex items-center justify-center gap-2 py-2 text-sm text-[#309605] hover:text-[#267704] disabled:opacity-50 disabled:cursor-not-allowed"
+                >
+                  <RefreshCw className={`w-4 h-4 ${isSendingOtp ? 'animate-spin' : ''}`} />
+                  {resendCooldownSeconds > 0
+                    ? `Resend code in ${resendCooldownSeconds}s`
+                    : isSendingOtp
+                      ? 'Sending...'
+                      : 'Resend code'}
+                </button>
+
+                <button
+                  type="button"
+                  onClick={() => handleCancelOtp()}
                   className="w-full py-2 text-sm text-gray-600 hover:text-gray-900"
                 >
                   Cancel and sign out
@@ -437,7 +473,7 @@ export const AdminLoginScreen = (): JSX.Element => {
 
             <div className="flex items-center gap-2 mb-6 px-3 py-2 bg-[#e6f7f1] border border-[#b0e6d4] rounded-lg">
               <Shield className="w-4 h-4 text-[#009c68] flex-shrink-0" />
-              <p className="text-xs text-[#008257]">Protected area. Admin accounts require MFA (TOTP).</p>
+              <p className="text-xs text-[#008257]">Protected area. You will sign in with password, then a one-time code sent to your email.</p>
             </div>
 
             <form onSubmit={handleSubmit} className="space-y-6">
