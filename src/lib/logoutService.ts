@@ -1,4 +1,5 @@
 import { supabase } from './supabase';
+import { clearAdminLoginTrustStorage } from './adminEmailOtpGate';
 import { cache } from './cache';
 import { persistentCache } from './persistentCache';
 import { smartCache } from './smartCache';
@@ -124,6 +125,7 @@ export async function performCompleteLogout(): Promise<{ success: boolean; error
   console.log('[logoutService] Starting complete logout process...');
 
   try {
+    clearAdminLoginTrustStorage();
     clearLocalStorage();
     clearSessionStorage();
     await clearAllCaches();

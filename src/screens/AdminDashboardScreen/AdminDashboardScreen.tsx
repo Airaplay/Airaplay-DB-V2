@@ -2,7 +2,7 @@ import { useState, useEffect, useCallback, useRef } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { Users, FileText, HelpCircle, BarChart, Settings, LogOut, Home, DollarSign, BarChart2, Bell, UserCog, Zap, Image, Coins, Wallet, Calendar, UserPlus, Megaphone, Flag, Star, Music, Tags, Sparkles, ListMusic, Shield, Award, Trophy, TrendingUp, Activity, Gift, Globe, Monitor, ChevronDown, ChevronRight, Menu, X, BookOpen, ScrollText, Headphones, AlertTriangle } from 'lucide-react';
 import { supabase, getUserRole } from '../../lib/supabase';
-import { hasAdminPasswordAndEmailOtpStepUp } from '../../lib/adminEmailOtpGate';
+import { hasTrustedAdminEmailSecondFactor } from '../../lib/adminEmailOtpGate';
 import { cacheInvalidation } from '../../lib/enhancedDataFetching';
 import { performCompleteLogout } from '../../lib/logoutService';
 import { ErrorBoundary } from '../../components/ErrorBoundary';
@@ -162,7 +162,7 @@ export const AdminDashboardScreen = (): JSX.Element => {
       }
 
       const { data: { session: s2 } } = await supabase.auth.getSession();
-      if (!hasAdminPasswordAndEmailOtpStepUp(s2?.access_token)) {
+      if (!hasTrustedAdminEmailSecondFactor(s2?.access_token, s2?.user?.id)) {
         await cacheInvalidation.byTags(['user', 'auth']);
         await supabase.auth.signOut();
         navigate('/admin/login');
@@ -227,7 +227,7 @@ export const AdminDashboardScreen = (): JSX.Element => {
         return;
       }
 
-      if (!hasAdminPasswordAndEmailOtpStepUp(session.access_token)) {
+      if (!hasTrustedAdminEmailSecondFactor(session.access_token, session.user.id)) {
         setError(
           'Admin access requires email verification after your password. Open the admin login page and complete the email code step.'
         );

@@ -6,7 +6,12 @@ import { supabase, getUserRole } from '../../lib/supabase';
 import { LoadingLogo } from '../../components/LoadingLogo';
 import { cacheInvalidation } from '../../lib/enhancedDataFetching';
 import {
+  canResumeAdminEmailOtpSession,
+  clearAdminLoginTrustStorage,
+  finalizeAdminEmailOtpSession,
   hasAdminPasswordAndEmailOtpStepUp,
+  hasTrustedAdminEmailSecondFactor,
+  markAdminPasswordStepBeforeEmailOtp,
   sendAdminLoginEmailOtp,
   verifyAdminLoginEmailOtp,
 } from '../../lib/adminEmailOtpGate';
@@ -103,6 +108,10 @@ export const AdminLoginScreen = (): JSX.Element => {
     }
 
     await cacheInvalidation.byTags(['user', 'auth']);
+    const { data: { session: s } } = await supabase.auth.getSession();
+    if (s?.user?.id && s.access_token) {
+      finalizeAdminEmailOtpSession(s.access_token, s.user.id);
+    }
     setOtpPhase('idle');
     navigate('/admin');
   };
@@ -114,7 +123,10 @@ export const AdminLoginScreen = (): JSX.Element => {
       setError('Session missing after sign-in.');
       return 'abort';
     }
-    if (hasAdminPasswordAndEmailOtpStepUp(session.access_token)) {
+    if (
+      hasAdminPasswordAndEmailOtpStepUp(session.access_token) ||
+      hasTrustedAdminEmailSecondFactor(session.access_token, session.user.id)
+    ) {
       return 'complete';
     }
 
@@ -151,8 +163,13 @@ export const AdminLoginScreen = (): JSX.Element => {
       const role = await getUserRole();
       if (!ADMIN_ROLES.includes(role ?? '')) return;
 
-      if (hasAdminPasswordAndEmailOtpStepUp(session.access_token)) {
+      if (hasTrustedAdminEmailSecondFactor(session.access_token, session.user.id)) {
         navigate('/admin');
+        return;
+      }
+
+      if (!canResumeAdminEmailOtpSession(session.user.id)) {
+        await supabase.auth.signOut();
         return;
       }
 
@@ -235,6 +252,7 @@ export const AdminLoginScreen = (): JSX.Element => {
       resendCooldownRef.current = null;
     }
     setResendCooldownSeconds(0);
+    clearAdminLoginTrustStorage();
     await supabase.auth.signOut();
   };
 
@@ -264,9 +282,15 @@ export const AdminLoginScreen = (): JSX.Element => {
         return;
       }
       const { data: { session } } = await supabase.auth.getSession();
-      if (!hasAdminPasswordAndEmailOtpStepUp(session?.access_token)) {
+      const uid = session?.user?.id;
+      if (!uid) {
+        setError('Session missing after verification.');
+        setIsSubmitting(false);
+        return;
+      }
+      if (!finalizeAdminEmailOtpSession(session.access_token, uid)) {
         setError(
-          'Email verified, but the session did not show password + email sign-in. Ensure your Supabase project sends a 6-digit email OTP (not link-only) for signInWithOtp.'
+          'Could not confirm this login. Go back, sign in with email and password again, then enter the new code from your email.'
         );
         setIsSubmitting(false);
         return;
@@ -341,6 +365,7 @@ export const AdminLoginScreen = (): JSX.Element => {
         return;
       }
 
+      markAdminPasswordStepBeforeEmailOtp(data.user.id);
       const gate = await applyEmailOtpGate();
       if (gate === 'complete') {
         await finishLoginSuccess();

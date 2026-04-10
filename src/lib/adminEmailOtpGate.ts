@@ -2,6 +2,101 @@ import type { SupabaseClient } from '@supabase/supabase-js';
 
 export const ADMIN_PORTAL_ROLES = ['admin', 'manager', 'editor', 'account'] as const;
 
+/** Supabase often refreshes JWT after email OTP so `amr` may only list `otp`, not `password`. We pair that with a short-lived client marker set only after a successful password sign-in. */
+const LS_PW_PENDING = 'airaplay_admin_pw_pending';
+const LS_2STEP_TRUST = 'airaplay_admin_2step_trust_uid';
+const PW_PENDING_TTL_MS = 20 * 60 * 1000;
+
+type PwPendingPayload = { uid: string; exp: number };
+
+export function canResumeAdminEmailOtpSession(userId: string): boolean {
+  const p = readPwPending();
+  return !!p && p.uid === userId;
+}
+
+function readPwPending(): PwPendingPayload | null {
+  if (typeof window === 'undefined') return null;
+  try {
+    const raw = localStorage.getItem(LS_PW_PENDING);
+    if (!raw) return null;
+    const p = JSON.parse(raw) as PwPendingPayload;
+    if (!p?.uid || typeof p.exp !== 'number') return null;
+    if (Date.now() > p.exp) {
+      localStorage.removeItem(LS_PW_PENDING);
+      return null;
+    }
+    return p;
+  } catch {
+    return null;
+  }
+}
+
+/** Call after password sign-in succeeds and admin role is confirmed, before sending email OTP. */
+export function markAdminPasswordStepBeforeEmailOtp(userId: string): void {
+  if (typeof window === 'undefined') return;
+  try {
+    localStorage.removeItem(LS_2STEP_TRUST);
+    const payload: PwPendingPayload = { uid: userId, exp: Date.now() + PW_PENDING_TTL_MS };
+    localStorage.setItem(LS_PW_PENDING, JSON.stringify(payload));
+  } catch {
+    // ignore
+  }
+}
+
+export function clearAdminLoginTrustStorage(): void {
+  if (typeof window === 'undefined') return;
+  try {
+    localStorage.removeItem(LS_PW_PENDING);
+    localStorage.removeItem(LS_2STEP_TRUST);
+  } catch {
+    // ignore
+  }
+}
+
+/**
+ * After verifyOtp: JWT may already prove password+otp, or only otp — accept if password step was recorded for this uid.
+ */
+export function finalizeAdminEmailOtpSession(accessToken: string | undefined, userId: string): boolean {
+  if (hasAdminPasswordAndEmailOtpStepUp(accessToken)) {
+    clearAdminLoginTrustStorage();
+    if (typeof window !== 'undefined') {
+      try {
+        localStorage.setItem(LS_2STEP_TRUST, userId);
+      } catch {
+        // ignore
+      }
+    }
+    return true;
+  }
+
+  const pending = readPwPending();
+  if (pending && pending.uid === userId) {
+    if (typeof window !== 'undefined') {
+      try {
+        localStorage.removeItem(LS_PW_PENDING);
+        localStorage.setItem(LS_2STEP_TRUST, userId);
+      } catch {
+        // ignore
+      }
+    }
+    return true;
+  }
+
+  return false;
+}
+
+/** Dashboard / session refresh: allow if JWT shows two-step auth OR we finalized email OTP after password in this browser. */
+export function hasTrustedAdminEmailSecondFactor(accessToken: string | undefined, userId: string | undefined): boolean {
+  if (!userId) return false;
+  if (hasAdminPasswordAndEmailOtpStepUp(accessToken)) return true;
+  if (typeof window === 'undefined') return false;
+  try {
+    return localStorage.getItem(LS_2STEP_TRUST) === userId;
+  } catch {
+    return false;
+  }
+}
+
 export function isAdminPortalRole(role: string | null | undefined): boolean {
   return ADMIN_PORTAL_ROLES.includes((role ?? '') as (typeof ADMIN_PORTAL_ROLES)[number]);
 }
@@ -51,6 +146,7 @@ export function hasAdminPasswordAndEmailOtpStepUp(accessToken: string | undefine
   if (hasPassword && hasOtpLike) return true;
   // Some sessions list multiple `amr` steps; password + email OTP can appear as a two-step chain
   if (hasOtpLike && amr.length >= 2) return true;
+  // After verifyOtp, some projects only emit a single `otp` entry — use finalizeAdminEmailOtpSession + hasTrustedAdminEmailSecondFactor instead
   return false;
 }
 
