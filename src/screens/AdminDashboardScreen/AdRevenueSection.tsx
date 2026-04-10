@@ -264,62 +264,94 @@ export const AdRevenueSection = (): JSX.Element => {
         };
       }
 
-      // Override "Total Revenue" with AdMob daily totals (source = admob_api).
-      // This makes the dashboard reflect what we actually have in AdMob (and avoids manual/incorrect inputs).
+      // AdMob API rows (source = admob_api): align Total + split cards with synced daily data.
+      // gross = total_revenue_usd (matches AdMob estimated earnings stored by admob-sync).
+      // usable net per row = gross * safety_buffer_percentage/100 (same basis as creator pool distribution).
+      // Artist / Listener / Platform $ = usable net × ad_safety_caps percentages (defaults 60/0/40).
       try {
         const toDateOnly = (d: Date): string => format(d, 'yyyy-MM-dd');
-        const today = new Date();
-        const todayOnly = toDateOnly(today);
-        const yesterday = new Date(today);
-        yesterday.setDate(yesterday.getDate() - 1);
-        const yesterdayOnly = toDateOnly(yesterday);
+        const todayCal = new Date();
+        todayCal.setHours(0, 0, 0, 0);
+        const windowStart = new Date(todayCal);
+        switch (timeRange) {
+          case '7d':
+            windowStart.setDate(windowStart.getDate() - 6);
+            break;
+          case '30d':
+            windowStart.setDate(windowStart.getDate() - 29);
+            break;
+          case '90d':
+            windowStart.setDate(windowStart.getDate() - 89);
+            break;
+          default:
+            windowStart.setDate(windowStart.getDate() - 29);
+        }
+        const windowStartStr = toDateOnly(windowStart);
+        const windowEndStr = toDateOnly(todayCal);
 
-        const startOfThisMonth = new Date(today.getFullYear(), today.getMonth(), 1);
-        const startOfThisMonthOnly = toDateOnly(startOfThisMonth);
-        const startOfLastMonth = new Date(today.getFullYear(), today.getMonth() - 1, 1);
-        const startOfLastMonthOnly = toDateOnly(startOfLastMonth);
-        const startOfNextMonth = new Date(today.getFullYear(), today.getMonth() + 1, 1);
-        const startOfNextMonthOnly = toDateOnly(startOfNextMonth);
+        const yesterdayCal = new Date(todayCal);
+        yesterdayCal.setDate(yesterdayCal.getDate() - 1);
+        const yesterdayOnly = toDateOnly(yesterdayCal);
 
-        // Calendar-based periods (requested by admin): today, yesterday, this month so far, last month.
-        // We compute from table rows; accuracy depends on AdMob sync coverage for those days.
-        const { data: monthRows, error: monthErr } = await supabase
-          .from('ad_daily_revenue_input')
-          .select('revenue_date,total_revenue_usd,source')
-          .eq('source', 'admob_api')
-          .gte('revenue_date', startOfLastMonthOnly)
-          .lt('revenue_date', startOfNextMonthOnly);
+        const [{ data: admobRows, error: admobErr }, { data: capsRow }] = await Promise.all([
+          supabase
+            .from('ad_daily_revenue_input')
+            .select('revenue_date,total_revenue_usd,safety_buffer_percentage')
+            .eq('source', 'admob_api')
+            .gte('revenue_date', windowStartStr)
+            .lte('revenue_date', windowEndStr),
+          supabase
+            .from('ad_safety_caps')
+            .select('artist_revenue_percentage, listener_revenue_percentage, platform_revenue_percentage')
+            .eq('is_active', true)
+            .maybeSingle(),
+        ]);
 
-        const safeMonthRows = !monthErr && Array.isArray(monthRows) ? monthRows : [];
-        if (safeMonthRows.length > 0) {
-          const thisMonthSoFar = safeMonthRows
-            .filter((row: any) => row.revenue_date >= startOfThisMonthOnly && row.revenue_date <= todayOnly)
-            .reduce((sum: number, row: any) => sum + Number(row.total_revenue_usd || 0), 0);
-          const lastMonthTotal = safeMonthRows
-            .filter((row: any) => row.revenue_date >= startOfLastMonthOnly && row.revenue_date < startOfThisMonthOnly)
-            .reduce((sum: number, row: any) => sum + Number(row.total_revenue_usd || 0), 0);
+        const rows = !admobErr && Array.isArray(admobRows) ? admobRows : [];
+        if (rows.length > 0) {
+          const artistPct = Number(capsRow?.artist_revenue_percentage ?? 60);
+          const listenerPct = Number(capsRow?.listener_revenue_percentage ?? 0);
+          const platformPct = Number(capsRow?.platform_revenue_percentage ?? 40);
 
-          const admobToday = safeMonthRows.filter((row: any) => row.revenue_date === todayOnly)
-            .reduce((sum, row: any) => sum + Number(row.total_revenue_usd || 0), 0);
-          const admobYesterday = safeMonthRows.filter((row: any) => row.revenue_date === yesterdayOnly)
-            .reduce((sum, row: any) => sum + Number(row.total_revenue_usd || 0), 0);
+          let grossSum = 0;
+          let netSum = 0;
+          for (const row of rows) {
+            const g = Number((row as any).total_revenue_usd || 0);
+            const buf = Number((row as any).safety_buffer_percentage ?? 75);
+            grossSum += g;
+            netSum += g * (Math.max(0, Math.min(100, buf)) / 100);
+          }
+
+          const todayRow = rows.find((r: any) => r.revenue_date === windowEndStr);
+          const grossToday = todayRow ? Number(todayRow.total_revenue_usd || 0) : 0;
+          const yesterdayRow = rows.find((r: any) => r.revenue_date === yesterdayOnly);
+          const grossYesterday = yesterdayRow ? Number(yesterdayRow.total_revenue_usd || 0) : 0;
+
+          const artistRevenue = netSum * (artistPct / 100);
+          const listenerRevenue = netSum * (listenerPct / 100);
+          // Residual to platform avoids float drift when caps should sum to 100%.
+          const platformRevenue = netSum - artistRevenue - listenerRevenue;
+          const platformPctDisplay =
+            netSum > 0 ? Math.round((platformRevenue / netSum) * 1000) / 10 : 0;
 
           finalSummaryData = {
             ...(finalSummaryData || {}),
-            // Keep the timeRange-based total available for charts/period UI if needed.
-            // The "Total Revenue" card is intended to reflect AdMob calendar totals (this month + last month)
-            // without being polluted by manual entries.
-            total_revenue: thisMonthSoFar + lastMonthTotal,
-            revenue_today: admobToday,
-            // Extra fields used for display/debug (non-breaking; UI reads unknown keys safely)
-            admob_today: admobToday,
-            admob_yesterday: admobYesterday,
-            admob_this_month_so_far: thisMonthSoFar,
-            admob_last_month: lastMonthTotal,
+            revenue_source: 'admob_api',
+            total_revenue: grossSum,
+            revenue_today: grossToday,
+            artist_revenue: artistRevenue,
+            listener_revenue: listenerRevenue,
+            platform_revenue: platformRevenue,
+            platform_percentage: platformPctDisplay,
+            artist_count: null,
+            listener_count: null,
+            admob_usable_net_total: netSum,
+            admob_gross_total: grossSum,
+            admob_yesterday: grossYesterday,
+            payout_split_label: `${artistPct}/${listenerPct}/${platformPct} (artist/listener/platform · % of usable net)`,
           };
         }
       } catch (admobTotalsErr) {
-        // Non-blocking: keep the rest of the revenue dashboard usable.
         console.warn('Failed to load AdMob daily totals:', admobTotalsErr);
       }
 
@@ -1105,7 +1137,13 @@ export const AdRevenueSection = (): JSX.Element => {
             <div className="flex items-end justify-between">
               <div>
                 <p className="text-2xl font-bold text-gray-900">{formatCurrency(revenueData.total_revenue || 0)}</p>
-                <p className="text-green-600 text-sm">+{formatCurrency(revenueData.revenue_today || 0)} today</p>
+                <p className="text-green-600 text-sm">+{formatCurrency(revenueData.revenue_today || 0)} today (gross)</p>
+                {revenueData.revenue_source === 'admob_api' && (
+                  <p className="text-xs text-gray-500 mt-1">
+                    AdMob-synced estimated earnings, {timeRange} window. Usable after buffer:{' '}
+                    {formatCurrency(revenueData.admob_usable_net_total ?? 0)}
+                  </p>
+                )}
               </div>
             </div>
           </div>
@@ -1120,7 +1158,13 @@ export const AdRevenueSection = (): JSX.Element => {
             <div className="flex items-end justify-between">
               <div>
                 <p className="text-2xl font-bold text-gray-900">{formatCurrency(revenueData.artist_revenue || 0)}</p>
-                <p className="text-blue-600 text-sm">{revenueData.artist_count || 0} artists</p>
+                {revenueData.revenue_source === 'admob_api' ? (
+                  <p className="text-blue-600 text-sm leading-snug" title={revenueData.payout_split_label}>
+                    Share of usable net (payout settings)
+                  </p>
+                ) : (
+                  <p className="text-blue-600 text-sm">{revenueData.artist_count ?? 0} artists (from events)</p>
+                )}
               </div>
             </div>
           </div>
@@ -1135,7 +1179,11 @@ export const AdRevenueSection = (): JSX.Element => {
             <div className="flex items-end justify-between">
               <div>
                 <p className="text-2xl font-bold text-gray-900">{formatCurrency(revenueData.listener_revenue || 0)}</p>
-                <p className="text-teal-600 text-sm">{revenueData.listener_count || 0} listeners</p>
+                {revenueData.revenue_source === 'admob_api' ? (
+                  <p className="text-teal-600 text-sm">Share of usable net (payout settings)</p>
+                ) : (
+                  <p className="text-teal-600 text-sm">{revenueData.listener_count ?? 0} listeners (from events)</p>
+                )}
               </div>
             </div>
           </div>
@@ -1150,7 +1198,11 @@ export const AdRevenueSection = (): JSX.Element => {
             <div className="flex items-end justify-between">
               <div>
                 <p className="text-2xl font-bold text-gray-900">{formatCurrency(revenueData.platform_revenue || 0)}</p>
-                <p className="text-orange-600 text-sm">{Math.round(revenueData.platform_percentage || 0)}% of total</p>
+                <p className="text-orange-600 text-sm">
+                  {revenueData.revenue_source === 'admob_api'
+                    ? `${Math.round((revenueData.platform_percentage as number) || 0)}% of usable net`
+                    : `${Math.round(revenueData.platform_percentage || 0)}% of total (events)`}
+                </p>
               </div>
             </div>
           </div>
