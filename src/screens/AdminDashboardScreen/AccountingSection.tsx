@@ -111,8 +111,8 @@ export const AccountingSection = (): JSX.Element => {
     return {
       cashNet: cash?.net_balance ?? 0,
       creatorPayableNet: creatorPayable?.net_balance ?? 0,
-      platformAdRevNet: platformAdRev ? -platformAdRev.net_balance : 0, // revenue normal credit => negative net_balance
-      treatRevNet: treatRev ? -treatRev.net_balance : 0,
+      platformAdRevNet: platformAdRev?.net_balance ?? 0,
+      treatRevNet: treatRev?.net_balance ?? 0,
     };
   }, [trialBalance]);
 
@@ -223,11 +223,11 @@ export const AccountingSection = (): JSX.Element => {
             </div>
             <div className="bg-white rounded-lg shadow p-5 border border-gray-100">
               <p className="text-xs text-gray-500">Platform Ad Revenue (Account 4000, Revenue)</p>
-              <p className="text-xl font-bold text-gray-900 mt-1">{formatBalanceWithSide(-totals.platformAdRevNet)}</p>
+              <p className="text-xl font-bold text-gray-900 mt-1">{formatBalanceWithSide(totals.platformAdRevNet)}</p>
             </div>
             <div className="bg-white rounded-lg shadow p-5 border border-gray-100">
               <p className="text-xs text-gray-500">Treat Revenue (Account 4010, Revenue)</p>
-              <p className="text-xl font-bold text-gray-900 mt-1">{formatBalanceWithSide(-totals.treatRevNet)}</p>
+              <p className="text-xl font-bold text-gray-900 mt-1">{formatBalanceWithSide(totals.treatRevNet)}</p>
             </div>
           </div>
 
@@ -270,7 +270,7 @@ export const AccountingSection = (): JSX.Element => {
 
           <div className="bg-white rounded-lg shadow border border-gray-200 p-5">
             <div className="flex items-center justify-between gap-3 mb-3 flex-wrap">
-              <p className="font-semibold text-gray-900">Trial Balance (As Displayed)</p>
+              <p className="font-semibold text-gray-900">Trial Balance</p>
               <div
                 className={`inline-flex items-center gap-2 text-xs px-2.5 py-1.5 rounded-full border ${
                   trialBalanceTotals.isBalanced
