@@ -515,6 +515,6 @@ BEGIN
   PERFORM cron.schedule(
     'contribution_monthly_auto_conversion',
     '0 7 1 * *',
-    $$SELECT public.trigger_contribution_monthly_auto_conversion()$$
+    $cron$SELECT public.trigger_contribution_monthly_auto_conversion()$cron$
   );
 END $$;
