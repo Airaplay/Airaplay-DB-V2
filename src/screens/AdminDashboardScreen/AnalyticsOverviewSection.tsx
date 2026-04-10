@@ -32,6 +32,7 @@ export const AnalyticsOverviewSection = (): JSX.Element => {
     netEarningsUSD: 0,
     totalTreatEarnings: 0,
     totalTreatRevenueUSD: 0,
+    platformRevenueUSD: 0,
     treatWalletBalance: 0,
     curatorEarnings: 0,
     newUsersToday: 0,
@@ -99,6 +100,7 @@ export const AnalyticsOverviewSection = (): JSX.Element => {
         netEarningsUSD,
         totalTreatEarnings: Number(overviewTotals?.total_treat_earnings || 0),
         totalTreatRevenueUSD: Number(overviewTotals?.total_treat_revenue_usd || 0),
+        platformRevenueUSD: Number(overviewTotals?.admob_platform_share_usd || 0),
         treatWalletBalance: Number(overviewTotals?.treat_wallet_balance || 0),
         curatorEarnings: Number(overviewTotals?.curator_earnings || 0),
         newUsersToday: newUsersToday || 0,
@@ -331,7 +333,7 @@ export const AnalyticsOverviewSection = (): JSX.Element => {
       </div>
 
       {/* Stats Row 1 — Core KPIs */}
-      <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
+      <div className="grid grid-cols-2 lg:grid-cols-5 gap-4">
         <StatCard
           title="Total Users"
           value={formatNumber(stats.totalUsers)}
@@ -396,6 +398,14 @@ export const AnalyticsOverviewSection = (): JSX.Element => {
           icon={DollarSign}
           iconBg="bg-sky-50"
           iconColor="text-sky-500"
+        />
+        <StatCard
+          title="Platform Revenue"
+          value={formatCurrency(stats.platformRevenueUSD)}
+          sub="AdMob platform share"
+          icon={DollarSign}
+          iconBg="bg-violet-50"
+          iconColor="text-violet-500"
         />
         <StatCard
           title="Treat Balance"
