@@ -60,6 +60,7 @@ export const AccountingSection = (): JSX.Element => {
     new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD', minimumFractionDigits: 2, maximumFractionDigits: 6 }).format(
       Number(amount || 0)
     );
+  const formatBalanceWithSide = (amount: number): string => `${formatCurrency(Math.abs(Number(amount || 0)))} ${Number(amount || 0) >= 0 ? 'Dr' : 'Cr'}`;
   const formatDate = (value: string): string => {
     const dt = new Date(value);
     return Number.isNaN(dt.getTime()) ? value : format(dt, 'yyyy-MM-dd');
@@ -166,7 +167,7 @@ export const AccountingSection = (): JSX.Element => {
           </div>
           <div>
             <h2 className="text-2xl font-bold text-gray-900">Accounting</h2>
-            <p className="text-sm text-gray-500">USD-only • Cash basis • Double-entry journal</p>
+            <p className="text-sm text-gray-500">USD Functional Currency • Cash Basis • Double-Entry Ledger</p>
           </div>
         </div>
         <button
@@ -213,20 +214,20 @@ export const AccountingSection = (): JSX.Element => {
         <div className="space-y-5">
           <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
             <div className="bg-white rounded-lg shadow p-5 border border-gray-100">
-              <p className="text-xs text-gray-500">Cash (1000)</p>
-              <p className="text-xl font-bold text-gray-900 mt-1">{formatCurrency(totals.cashNet)}</p>
+              <p className="text-xs text-gray-500">Cash (Account 1000, Asset)</p>
+              <p className="text-xl font-bold text-gray-900 mt-1">{formatBalanceWithSide(totals.cashNet)}</p>
             </div>
             <div className="bg-white rounded-lg shadow p-5 border border-gray-100">
-              <p className="text-xs text-gray-500">Creator Payable (2000)</p>
-              <p className="text-xl font-bold text-gray-900 mt-1">{formatCurrency(-totals.creatorPayableNet)}</p>
+              <p className="text-xs text-gray-500">Creator Payable (Account 2000, Liability)</p>
+              <p className="text-xl font-bold text-gray-900 mt-1">{formatBalanceWithSide(totals.creatorPayableNet)}</p>
             </div>
             <div className="bg-white rounded-lg shadow p-5 border border-gray-100">
-              <p className="text-xs text-gray-500">Platform Ad Revenue (4000)</p>
-              <p className="text-xl font-bold text-gray-900 mt-1">{formatCurrency(totals.platformAdRevNet)}</p>
+              <p className="text-xs text-gray-500">Platform Ad Revenue (Account 4000, Revenue)</p>
+              <p className="text-xl font-bold text-gray-900 mt-1">{formatBalanceWithSide(-totals.platformAdRevNet)}</p>
             </div>
             <div className="bg-white rounded-lg shadow p-5 border border-gray-100">
-              <p className="text-xs text-gray-500">Treat Revenue (4010)</p>
-              <p className="text-xl font-bold text-gray-900 mt-1">{formatCurrency(totals.treatRevNet)}</p>
+              <p className="text-xs text-gray-500">Treat Revenue (Account 4010, Revenue)</p>
+              <p className="text-xl font-bold text-gray-900 mt-1">{formatBalanceWithSide(-totals.treatRevNet)}</p>
             </div>
           </div>
 
@@ -235,8 +236,8 @@ export const AccountingSection = (): JSX.Element => {
               <div className="flex items-center gap-2">
                 <DollarSign className="w-5 h-5 text-green-600" />
                 <div>
-                  <p className="font-semibold text-gray-900">Post AdMob daily cash</p>
-                  <p className="text-xs text-gray-500">Creates a journal entry from locked daily input (usable revenue) and splits to creator payable + platform revenue.</p>
+              <p className="font-semibold text-gray-900">Post AdMob Daily Cash Journal Entry</p>
+                  <p className="text-xs text-gray-500">Posts a balanced cash-basis journal entry from locked daily input, allocating amounts between Creator Payable and Platform Revenue.</p>
                 </div>
               </div>
               <div className="flex items-center gap-2">
@@ -259,7 +260,7 @@ export const AccountingSection = (): JSX.Element => {
 
             {postResult && (
               <details className="mt-4">
-                <summary className="text-sm text-gray-600 cursor-pointer">Show last post result</summary>
+                <summary className="text-sm text-gray-600 cursor-pointer">Show Last Posting Result</summary>
                 <pre className="mt-2 text-xs bg-gray-50 border border-gray-200 rounded p-3 overflow-auto max-h-56">
 {JSON.stringify(postResult, null, 2)}
                 </pre>
@@ -269,7 +270,7 @@ export const AccountingSection = (): JSX.Element => {
 
           <div className="bg-white rounded-lg shadow border border-gray-200 p-5">
             <div className="flex items-center justify-between gap-3 mb-3 flex-wrap">
-              <p className="font-semibold text-gray-900">Trial Balance</p>
+              <p className="font-semibold text-gray-900">Trial Balance (As Displayed)</p>
               <div
                 className={`inline-flex items-center gap-2 text-xs px-2.5 py-1.5 rounded-full border ${
                   trialBalanceTotals.isBalanced
@@ -280,7 +281,7 @@ export const AccountingSection = (): JSX.Element => {
                 {!trialBalanceTotals.isBalanced && <AlertTriangle className="w-3.5 h-3.5" />}
                 <span>
                   {trialBalanceTotals.isBalanced
-                    ? 'Debits and credits are balanced'
+                    ? 'Debits Equal Credits'
                     : `Out of balance by ${formatCurrency(trialBalanceTotals.imbalance)}`}
                 </span>
               </div>
@@ -294,7 +295,7 @@ export const AccountingSection = (): JSX.Element => {
                     <th className="p-2 text-xs text-gray-700 font-medium">Type</th>
                     <th className="p-2 text-xs text-gray-700 font-medium text-right">Debits</th>
                     <th className="p-2 text-xs text-gray-700 font-medium text-right">Credits</th>
-                    <th className="p-2 text-xs text-gray-700 font-medium text-right">Net</th>
+                    <th className="p-2 text-xs text-gray-700 font-medium text-right">Net (Dr/Cr)</th>
                   </tr>
                 </thead>
                 <tbody>
@@ -306,7 +307,7 @@ export const AccountingSection = (): JSX.Element => {
                       <td className="p-2 text-sm text-gray-700 text-right">{formatCurrency(Number(r.debit_total || 0))}</td>
                       <td className="p-2 text-sm text-gray-700 text-right">{formatCurrency(Number(r.credit_total || 0))}</td>
                       <td className="p-2 text-sm text-gray-900 text-right font-medium">
-                        {formatCurrency(Math.abs(Number(r.net_balance || 0)))} {Number(r.net_balance || 0) >= 0 ? 'Dr' : 'Cr'}
+                        {formatBalanceWithSide(Number(r.net_balance || 0))}
                       </td>
                     </tr>
                   ))}
@@ -315,7 +316,7 @@ export const AccountingSection = (): JSX.Element => {
                     <td className="p-2 text-sm text-gray-900 text-right font-semibold">{formatCurrency(trialBalanceTotals.debitTotal)}</td>
                     <td className="p-2 text-sm text-gray-900 text-right font-semibold">{formatCurrency(trialBalanceTotals.creditTotal)}</td>
                     <td className="p-2 text-sm text-gray-900 text-right font-semibold">
-                      {formatCurrency(Math.abs(trialBalanceTotals.imbalance))} {trialBalanceTotals.imbalance >= 0 ? 'Dr' : 'Cr'}
+                      {formatBalanceWithSide(trialBalanceTotals.imbalance)}
                     </td>
                   </tr>
                 </tbody>
@@ -335,7 +336,7 @@ export const AccountingSection = (): JSX.Element => {
                   <th className="p-2 text-xs text-gray-700 font-medium">Code</th>
                   <th className="p-2 text-xs text-gray-700 font-medium">Name</th>
                   <th className="p-2 text-xs text-gray-700 font-medium">Type</th>
-                  <th className="p-2 text-xs text-gray-700 font-medium">Normal</th>
+                  <th className="p-2 text-xs text-gray-700 font-medium">Normal Balance (Dr/Cr)</th>
                   <th className="p-2 text-xs text-gray-700 font-medium">Active</th>
                 </tr>
               </thead>
@@ -357,7 +358,7 @@ export const AccountingSection = (): JSX.Element => {
 
       {tab === 'journal' && (
         <div className="bg-white rounded-lg shadow border border-gray-200 p-5">
-          <p className="font-semibold text-gray-900 mb-3">Journal Entries (latest 100)</p>
+          <p className="font-semibold text-gray-900 mb-3">Journal Entries (Most Recent 100)</p>
           <div className="overflow-x-auto">
             <table className="w-full border-collapse">
               <thead>
@@ -383,7 +384,7 @@ export const AccountingSection = (): JSX.Element => {
             </table>
           </div>
           <p className="text-xs text-gray-500 mt-3">
-            Tip: accounting is idempotent per source (source_type + source_id) so you can safely click “Post Day” once per locked date.
+            Note: Posting is idempotent per source (`source_type` + `source_id`), so each locked date should be posted once.
           </p>
         </div>
       )}
