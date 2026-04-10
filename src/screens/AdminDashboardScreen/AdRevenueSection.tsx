@@ -181,6 +181,9 @@ export const AdRevenueSection = (): JSX.Element => {
     default_safety_buffer_percentage: 75
   });
 
+  const [creatorPoolAutoEnabled, setCreatorPoolAutoEnabled] = useState<boolean | null>(null);
+  const [isSavingCreatorPoolAuto, setIsSavingCreatorPoolAuto] = useState(false);
+
   const COLORS = ['#4ade80', '#60a5fa', '#f472b6', '#facc15', '#a78bfa', '#fb923c'];
 
   useEffect(() => {
@@ -188,11 +191,53 @@ export const AdRevenueSection = (): JSX.Element => {
     fetchDailyRevenueInputs();
     fetchReconciliationLogs();
     fetchAdmobConfig();
+    fetchCreatorPoolAutomationSetting();
   }, [timeRange]);
 
   useEffect(() => {
     fetchCreatorPayoutHistory();
   }, [creatorPayoutTimeRange]);
+
+  const fetchCreatorPoolAutomationSetting = async () => {
+    try {
+      const { data, error: rpcError } = await supabase.rpc('admin_get_ad_automation_settings');
+      if (rpcError) throw rpcError;
+      if (data?.ok) {
+        setCreatorPoolAutoEnabled(!!data.auto_lock_and_distribute_creator_pool);
+      }
+    } catch (err) {
+      console.warn('Failed to load ad automation settings:', err);
+      setCreatorPoolAutoEnabled(null);
+    }
+  };
+
+  const handleToggleCreatorPoolAuto = async (enabled: boolean) => {
+    try {
+      setIsSavingCreatorPoolAuto(true);
+      setError(null);
+      setSuccess(null);
+
+      const { data, error: rpcError } = await supabase.rpc('admin_set_auto_lock_and_distribute_creator_pool', {
+        p_enabled: enabled,
+      });
+      if (rpcError) throw rpcError;
+      if (!data?.ok) {
+        throw new Error(data?.error || 'Failed to update automation setting');
+      }
+
+      setCreatorPoolAutoEnabled(enabled);
+      setSuccess(
+        enabled
+          ? 'Enabled automatic daily lock + creator pool distribution (cron).'
+          : 'Disabled automatic daily lock + creator pool distribution.'
+      );
+    } catch (err) {
+      console.error('Failed to update creator pool automation:', err);
+      setError(err instanceof Error ? err.message : 'Failed to update automation setting');
+    } finally {
+      setIsSavingCreatorPoolAuto(false);
+    }
+  };
 
   const fetchRevenueData = async () => {
     setIsLoading(true);
@@ -1132,6 +1177,30 @@ export const AdRevenueSection = (): JSX.Element => {
         <h2 className="text-2xl font-bold text-gray-900">Ad Revenue Management</h2>
 
         <div className="flex items-center gap-4">
+          <div className="hidden lg:flex items-center gap-2 bg-white rounded-lg shadow p-2 border border-gray-200">
+            <span className="text-xs text-gray-600">Auto lock + distribute creator pool</span>
+            <button
+              type="button"
+              onClick={() => {
+                if (creatorPoolAutoEnabled == null) return;
+                void handleToggleCreatorPoolAuto(!creatorPoolAutoEnabled);
+              }}
+              disabled={isSavingCreatorPoolAuto || creatorPoolAutoEnabled == null}
+              className={`relative inline-flex h-6 w-11 items-center rounded-full transition-colors ${
+                creatorPoolAutoEnabled ? 'bg-[#309605]' : 'bg-gray-300'
+              } ${creatorPoolAutoEnabled == null ? 'opacity-50' : ''}`}
+              title="Runs daily at 04:15 UTC for AdMob-synced days (<= yesterday)"
+            >
+              <span
+                className={`inline-block h-4 w-4 transform rounded-full bg-white transition-transform ${
+                  creatorPoolAutoEnabled ? 'translate-x-6' : 'translate-x-1'
+                }`}
+              />
+            </button>
+            <span className="text-[11px] text-gray-500">
+              {creatorPoolAutoEnabled == null ? 'Unavailable' : creatorPoolAutoEnabled ? 'On' : 'Off'}
+            </span>
+          </div>
           <div className="flex bg-white rounded-lg shadow p-1 border border-gray-200">
             <button
               onClick={() => setTimeRange('7d')}
