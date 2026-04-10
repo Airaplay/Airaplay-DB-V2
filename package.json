@@ -13,6 +13,7 @@
     "clean-build": "rm -rf dist && tsc --incremental && vite build",
     "clean-build:web": "rm -rf dist && VITE_APP_TARGET=web tsc --incremental && vite build",
     "clean-build:app": "rm -rf dist && VITE_APP_TARGET=app tsc --incremental && vite build",
+    "verify:admin-rpcs": "node scripts/verify-admin-rpcs.mjs",
     "lint": "eslint src supabase/functions --max-warnings 0",
     "lint:fix": "eslint src supabase/functions --fix",
     "preview": "vite preview",

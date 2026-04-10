@@ -1,0 +1,9 @@
+[
+  "admin_check_duplicate_withdrawals",
+  "admin_complete_withdrawal_payment",
+  "admin_get_artist_earnings_ledger",
+  "admin_reconcile_daily_admob_revenue",
+  "get_mood_analysis_coverage",
+  "get_top_moods_by_engagement",
+  "get_uncredited_payments"
+]

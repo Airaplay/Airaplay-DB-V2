@@ -4,6 +4,12 @@ import { Mail, Lock, Eye, EyeOff, AlertCircle, Clock, Shield } from 'lucide-reac
 import { Card, CardContent } from '../../components/ui/card';
 import { supabase, getUserRole } from '../../lib/supabase';
 import { LoadingLogo } from '../../components/LoadingLogo';
+import { cacheInvalidation } from '../../lib/enhancedDataFetching';
+import {
+  getAdminMfaSessionState,
+  startTotpEnrollment,
+  verifyTotpCode,
+} from '../../lib/adminMfaGate';
 
 const ADMIN_ROLES = ['admin', 'manager', 'editor', 'account'];
 
@@ -11,6 +17,8 @@ const getClientInfo = () => ({
   userAgent: navigator.userAgent || '',
   ip: '',
 });
+
+type MfaPhase = 'idle' | 'enroll' | 'verify';
 
 export const AdminLoginScreen = (): JSX.Element => {
   const navigate = useNavigate();
@@ -23,6 +31,12 @@ export const AdminLoginScreen = (): JSX.Element => {
   const [failuresRemaining, setFailuresRemaining] = useState<number | null>(null);
   const lockoutTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
+  const [mfaPhase, setMfaPhase] = useState<MfaPhase>('idle');
+  const [mfaFactorId, setMfaFactorId] = useState<string | null>(null);
+  const [mfaQrCode, setMfaQrCode] = useState('');
+  const [mfaSecret, setMfaSecret] = useState('');
+  const [mfaCode, setMfaCode] = useState('');
+
   useEffect(() => {
     checkExistingAuth();
     return () => {
@@ -34,7 +48,7 @@ export const AdminLoginScreen = (): JSX.Element => {
     setLockoutSeconds(seconds);
     if (lockoutTimerRef.current) clearInterval(lockoutTimerRef.current);
     lockoutTimerRef.current = setInterval(() => {
-      setLockoutSeconds(prev => {
+      setLockoutSeconds((prev) => {
         if (prev <= 1) {
           clearInterval(lockoutTimerRef.current!);
           setError(null);
@@ -46,17 +60,93 @@ export const AdminLoginScreen = (): JSX.Element => {
     }, 1000);
   };
 
+  const getSessionEmail = async (): Promise<string> => {
+    const { data: { session } } = await supabase.auth.getSession();
+    return (session?.user?.email ?? formData.email).trim();
+  };
+
+  const finishLoginSuccess = async () => {
+    const email = (await getSessionEmail()).toLowerCase();
+    await clearAttempts(email);
+    await recordAttempt(email, true);
+
+    try {
+      const { userAgent } = getClientInfo();
+      const role = await getUserRole();
+      await supabase.rpc('log_admin_activity_with_context', {
+        action_type_param: 'admin_login',
+        details_param: { role, email },
+        ip_address_param: '',
+        user_agent_param: userAgent,
+      });
+    } catch {
+      // Non-critical
+    }
+
+    await cacheInvalidation.byTags(['user', 'auth']);
+    setMfaPhase('idle');
+    navigate('/admin');
+  };
+
+  const applyMfaGate = async (): Promise<'complete' | 'mfa_ui' | 'abort'> => {
+    const state = await getAdminMfaSessionState(supabase);
+    if (state.kind === 'aal2') {
+      return 'complete';
+    }
+    if (state.kind === 'error') {
+      setError(state.message);
+      return 'abort';
+    }
+    if (state.kind === 'unavailable') {
+      setError(
+        'Multi-factor authentication is required for admin access, but MFA APIs are unavailable. Update @supabase/supabase-js and ensure MFA is enabled for your Supabase project.'
+      );
+      await supabase.auth.signOut();
+      return 'abort';
+    }
+    if (state.kind === 'verify') {
+      setMfaFactorId(state.factorId);
+      setMfaPhase('verify');
+      setMfaCode('');
+      return 'mfa_ui';
+    }
+    if (state.kind === 'enroll_finish') {
+      setMfaFactorId(state.factorId);
+      setMfaQrCode('');
+      setMfaSecret('');
+      setMfaPhase('enroll');
+      setMfaCode('');
+      return 'mfa_ui';
+    }
+    if (state.kind === 'enroll_start') {
+      const started = await startTotpEnrollment(supabase);
+      if (!started.ok) {
+        setError(started.message);
+        await supabase.auth.signOut();
+        return 'abort';
+      }
+      setMfaFactorId(started.factorId);
+      setMfaQrCode(started.qrCode);
+      setMfaSecret(started.secret);
+      setMfaPhase('enroll');
+      setMfaCode('');
+      return 'mfa_ui';
+    }
+    return 'abort';
+  };
+
   const checkExistingAuth = async () => {
     try {
       setIsCheckingAuth(true);
       const { data: { session }, error: sessionError } = await supabase.auth.getSession();
-      if (sessionError) return;
-      if (session) {
-        const role = await getUserRole();
-        if (ADMIN_ROLES.includes(role ?? '')) {
-          navigate('/admin');
-          return;
-        }
+      if (sessionError || !session) return;
+
+      const role = await getUserRole();
+      if (!ADMIN_ROLES.includes(role ?? '')) return;
+
+      const gate = await applyMfaGate();
+      if (gate === 'complete') {
+        navigate('/admin');
       }
     } catch (error) {
       console.error('Error checking auth:', error);
@@ -65,19 +155,19 @@ export const AdminLoginScreen = (): JSX.Element => {
     }
   };
 
-  const checkRateLimit = async (email: string): Promise<{ locked: boolean; secondsRemaining: number; attemptsRemaining: number }> => {
+  const checkRateLimit = async (email: string): Promise<{ locked: boolean; secondsRemaining: number; attemptsRemaining: number | null }> => {
     try {
       const { data, error } = await supabase.rpc('check_admin_login_rate_limit', {
         email_param: email.toLowerCase().trim(),
       });
-      if (error || !data) return { locked: false, secondsRemaining: 0, attemptsRemaining: 5 };
+      if (error || !data) return { locked: false, secondsRemaining: 0, attemptsRemaining: null };
       return {
         locked: data.locked ?? false,
         secondsRemaining: data.seconds_remaining ?? 0,
-        attemptsRemaining: data.attempts_remaining ?? 5,
+        attemptsRemaining: typeof data.attempts_remaining === 'number' ? data.attempts_remaining : null,
       };
     } catch {
-      return { locked: false, secondsRemaining: 0, attemptsRemaining: 5 };
+      return { locked: false, secondsRemaining: 0, attemptsRemaining: null };
     }
   };
 
@@ -107,8 +197,45 @@ export const AdminLoginScreen = (): JSX.Element => {
 
   const handleInputChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     const { name, value } = e.target;
-    setFormData(prev => ({ ...prev, [name]: value }));
+    setFormData((prev) => ({ ...prev, [name]: value }));
     if (error && lockoutSeconds === 0) setError(null);
+  };
+
+  const handleCancelMfa = async () => {
+    setMfaPhase('idle');
+    setMfaFactorId(null);
+    setMfaQrCode('');
+    setMfaSecret('');
+    setMfaCode('');
+    setError(null);
+    await supabase.auth.signOut();
+  };
+
+  const handleMfaConfirm = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!mfaFactorId) return;
+    setIsSubmitting(true);
+    setError(null);
+    try {
+      const v = await verifyTotpCode(supabase, mfaFactorId, mfaCode);
+      if (!v.ok) {
+        setError(v.message);
+        setIsSubmitting(false);
+        return;
+      }
+      const again = await getAdminMfaSessionState(supabase);
+      if (again.kind !== 'aal2') {
+        setError('MFA step incomplete. Try again.');
+        setIsSubmitting(false);
+        return;
+      }
+      await finishLoginSuccess();
+    } catch (err) {
+      console.error('MFA error:', err);
+      setError(err instanceof Error ? err.message : 'MFA verification failed');
+    } finally {
+      setIsSubmitting(false);
+    }
   };
 
   const handleSubmit = async (e: React.FormEvent) => {
@@ -125,7 +252,6 @@ export const AdminLoginScreen = (): JSX.Element => {
     setError(null);
 
     try {
-      // Check rate limit before attempting login
       const rateLimit = await checkRateLimit(formData.email);
       if (rateLimit.locked) {
         startLockoutTimer(rateLimit.secondsRemaining);
@@ -142,7 +268,6 @@ export const AdminLoginScreen = (): JSX.Element => {
       if (signInError) {
         await recordAttempt(formData.email, false);
 
-        // Re-check rate limit to get updated remaining attempts
         const updatedLimit = await checkRateLimit(formData.email);
         if (updatedLimit.locked) {
           startLockoutTimer(updatedLimit.secondsRemaining);
@@ -150,13 +275,13 @@ export const AdminLoginScreen = (): JSX.Element => {
         } else {
           const remaining = updatedLimit.attemptsRemaining;
           setFailuresRemaining(remaining);
-          if (remaining <= 2) {
+          if (remaining !== null && remaining <= 2) {
             setError(`Invalid credentials. ${remaining} attempt${remaining === 1 ? '' : 's'} remaining before lockout.`);
           } else {
             setError('Invalid email or password. Please try again.');
           }
         }
-        throw new Error('skip'); // prevent outer catch from overwriting error
+        throw new Error('skip');
       }
 
       if (!data.user) {
@@ -174,24 +299,17 @@ export const AdminLoginScreen = (): JSX.Element => {
         return;
       }
 
-      // Success - clear failed attempts and log successful login
-      await clearAttempts(formData.email);
-      await recordAttempt(formData.email, true);
-
-      // Log the login event with device info
-      try {
-        const { userAgent } = getClientInfo();
-        await supabase.rpc('log_admin_activity_with_context', {
-          action_type_param: 'admin_login',
-          details_param: { role, email: formData.email },
-          ip_address_param: '',
-          user_agent_param: userAgent,
-        });
-      } catch {
-        // Non-critical
+      const gate = await applyMfaGate();
+      if (gate === 'complete') {
+        await finishLoginSuccess();
+        setIsSubmitting(false);
+        return;
       }
-
-      navigate('/admin');
+      if (gate === 'abort') {
+        setIsSubmitting(false);
+        return;
+      }
+      setIsSubmitting(false);
     } catch (err) {
       if (err instanceof Error && err.message !== 'skip') {
         console.error('Login error:', err);
@@ -220,6 +338,88 @@ export const AdminLoginScreen = (): JSX.Element => {
 
   const isLocked = lockoutSeconds > 0;
 
+  if (mfaPhase !== 'idle' && mfaFactorId) {
+    return (
+      <div className="admin-layout flex items-center justify-center min-h-screen bg-gray-50 p-4 w-full">
+        <div className="w-full flex items-center justify-center">
+          <Card className="w-full max-w-md bg-white border border-gray-200 shadow-xl">
+            <CardContent className="p-8">
+              <div className="text-center mb-6">
+                <img src="/Black_logo.fw.png" alt="Airaplay Admin" className="h-10 mx-auto mb-4" />
+                <h1 className="text-2xl font-bold text-gray-900 mb-2">
+                  {mfaPhase === 'enroll' ? 'Set up authenticator' : 'Two-factor verification'}
+                </h1>
+                <p className="text-gray-600 text-sm">
+                  {mfaPhase === 'enroll'
+                    ? (mfaQrCode
+                        ? 'Scan the QR code in your authenticator app, then enter the 6-digit code to finish.'
+                        : 'Enter the 6-digit code from your authenticator app to verify this device.')
+                    : 'Enter the 6-digit code from your authenticator app.'}
+                </p>
+              </div>
+
+              <div className="flex items-center gap-2 mb-4 px-3 py-2 bg-[#e6f7f1] border border-[#b0e6d4] rounded-lg">
+                <Shield className="w-4 h-4 text-[#009c68] flex-shrink-0" />
+                <p className="text-xs text-[#008257]">Admin access requires MFA (TOTP).</p>
+              </div>
+
+              <form onSubmit={handleMfaConfirm} className="space-y-4">
+                {mfaPhase === 'enroll' && mfaQrCode ? (
+                  <div className="flex justify-center">
+                    <img src={mfaQrCode} alt="Authenticator QR" className="max-w-[200px] rounded-lg border border-gray-200" />
+                  </div>
+                ) : null}
+                {mfaPhase === 'enroll' && mfaSecret ? (
+                  <p className="text-xs text-gray-500 break-all text-center font-mono bg-gray-50 p-2 rounded border border-gray-100">
+                    {mfaSecret}
+                  </p>
+                ) : null}
+
+                <div>
+                  <label className="block text-gray-700 text-sm font-medium mb-2">6-digit code</label>
+                  <input
+                    type="text"
+                    inputMode="numeric"
+                    autoComplete="one-time-code"
+                    value={mfaCode}
+                    onChange={(e) => setMfaCode(e.target.value.replace(/\D/g, '').slice(0, 6))}
+                    className="w-full px-4 py-3 bg-white border border-gray-300 rounded-lg text-gray-900 tracking-widest text-center text-lg"
+                    placeholder="••••••"
+                    maxLength={6}
+                    required
+                  />
+                </div>
+
+                {error && (
+                  <div className="p-4 bg-red-50 border border-red-200 rounded-lg flex items-start gap-3">
+                    <AlertCircle className="w-5 h-5 text-red-500 flex-shrink-0 mt-0.5" />
+                    <p className="text-sm text-red-700">{error}</p>
+                  </div>
+                )}
+
+                <button
+                  type="submit"
+                  disabled={isSubmitting || mfaCode.length !== 6}
+                  className="w-full py-3 bg-gradient-to-r from-[#309605] to-[#3ba208] hover:from-[#3ba208] hover:to-[#309605] rounded-lg text-white font-medium transition-all duration-200 disabled:opacity-70 disabled:cursor-not-allowed"
+                >
+                  {isSubmitting ? 'Verifying...' : 'Continue'}
+                </button>
+
+                <button
+                  type="button"
+                  onClick={() => handleCancelMfa()}
+                  className="w-full py-2 text-sm text-gray-600 hover:text-gray-900"
+                >
+                  Cancel and sign out
+                </button>
+              </form>
+            </CardContent>
+          </Card>
+        </div>
+      </div>
+    );
+  }
+
   return (
     <div className="admin-layout flex items-center justify-center min-h-screen bg-gray-50 p-4 w-full">
       <div className="w-full flex items-center justify-center">
@@ -235,14 +435,12 @@ export const AdminLoginScreen = (): JSX.Element => {
               <p className="text-gray-600">Sign in to access the admin dashboard</p>
             </div>
 
-            {/* Security badge */}
             <div className="flex items-center gap-2 mb-6 px-3 py-2 bg-[#e6f7f1] border border-[#b0e6d4] rounded-lg">
               <Shield className="w-4 h-4 text-[#009c68] flex-shrink-0" />
-              <p className="text-xs text-[#008257]">Protected area. Unauthorized access is monitored and logged.</p>
+              <p className="text-xs text-[#008257]">Protected area. Admin accounts require MFA (TOTP).</p>
             </div>
 
             <form onSubmit={handleSubmit} className="space-y-6">
-              {/* Email */}
               <div>
                 <label className="flex items-center gap-2 text-gray-700 text-sm font-medium mb-2">
                   <Mail className="w-4 h-4" />
@@ -260,7 +458,6 @@ export const AdminLoginScreen = (): JSX.Element => {
                 />
               </div>
 
-              {/* Password */}
               <div>
                 <label className="flex items-center gap-2 text-gray-700 text-sm font-medium mb-2">
                   <Lock className="w-4 h-4" />
@@ -288,7 +485,6 @@ export const AdminLoginScreen = (): JSX.Element => {
                 </div>
               </div>
 
-              {/* Lockout countdown */}
               {isLocked && (
                 <div className="p-4 bg-orange-50 border border-orange-200 rounded-lg flex items-start gap-3">
                   <Clock className="w-5 h-5 text-orange-500 flex-shrink-0 mt-0.5" />
@@ -302,7 +498,6 @@ export const AdminLoginScreen = (): JSX.Element => {
                 </div>
               )}
 
-              {/* Error Message */}
               {error && !isLocked && (
                 <div className={`p-4 border rounded-lg flex items-start gap-3 ${
                   failuresRemaining !== null && failuresRemaining <= 2
@@ -318,7 +513,6 @@ export const AdminLoginScreen = (): JSX.Element => {
                 </div>
               )}
 
-              {/* Submit Button */}
               <button
                 type="submit"
                 disabled={isSubmitting || isLocked}
@@ -327,7 +521,6 @@ export const AdminLoginScreen = (): JSX.Element => {
                 {isSubmitting ? 'Signing In...' : isLocked ? `Locked (${formatLockoutTime(lockoutSeconds)})` : 'Sign In'}
               </button>
 
-              {/* Back to Home */}
               <div className="text-center">
                 <button
                   type="button"

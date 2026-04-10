@@ -2,6 +2,7 @@ import { useState, useEffect, useCallback, useRef } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { Users, FileText, HelpCircle, BarChart, Settings, LogOut, Home, DollarSign, BarChart2, Bell, UserCog, Zap, Image, Coins, Wallet, Calendar, UserPlus, Megaphone, Flag, Star, Music, Tags, Sparkles, ListMusic, Shield, Award, Trophy, TrendingUp, Activity, Gift, Globe, Monitor, ChevronDown, ChevronRight, Menu, X, BookOpen, ScrollText, Headphones, AlertTriangle } from 'lucide-react';
 import { supabase, getUserRole } from '../../lib/supabase';
+import { getAdminMfaSessionState } from '../../lib/adminMfaGate';
 import { cacheInvalidation } from '../../lib/enhancedDataFetching';
 import { performCompleteLogout } from '../../lib/logoutService';
 import { ErrorBoundary } from '../../components/ErrorBoundary';
@@ -160,6 +161,14 @@ export const AdminDashboardScreen = (): JSX.Element => {
         return false;
       }
 
+      const mfaState = await getAdminMfaSessionState(supabase);
+      if (mfaState.kind !== 'aal2') {
+        await cacheInvalidation.byTags(['user', 'auth']);
+        await supabase.auth.signOut();
+        navigate('/admin/login');
+        return false;
+      }
+
       setUserRole(freshRole);
       lastRoleCheckRef.current = Date.now();
       return true;
@@ -214,6 +223,20 @@ export const AdminDashboardScreen = (): JSX.Element => {
 
       if (!ADMIN_ROLES.includes(role ?? '')) {
         setError('You do not have permission to access the admin dashboard');
+        navigate('/admin/login');
+        return;
+      }
+
+      const mfaState = await getAdminMfaSessionState(supabase);
+      if (mfaState.kind !== 'aal2') {
+        if (mfaState.kind === 'unavailable') {
+          setError('Admin access requires MFA, but MFA verification is unavailable in this environment.');
+        } else if (mfaState.kind === 'error') {
+          setError(mfaState.message);
+        } else {
+          setError('Admin session requires MFA. Please sign in again.');
+        }
+        await supabase.auth.signOut();
         navigate('/admin/login');
         return;
       }
