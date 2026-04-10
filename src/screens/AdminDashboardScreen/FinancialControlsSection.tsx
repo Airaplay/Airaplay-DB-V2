@@ -11,11 +11,21 @@ interface FinancialControl {
   deactivated_at: string | null;
 }
 
+interface AdRevenueResetResult {
+  ok?: boolean;
+  error?: string;
+  required_confirm?: string;
+  deleted?: Record<string, number>;
+}
+
 export const FinancialControlsSection = () => {
   const [activeTab, setActiveTab] = useState<'controls' | 'monitoring'>('controls');
   const [controls, setControls] = useState<FinancialControl[]>([]);
   const [loading, setLoading] = useState(true);
   const [updating, setUpdating] = useState<string | null>(null);
+  const [isResettingData, setIsResettingData] = useState(false);
+  const [includeImpressions, setIncludeImpressions] = useState(false);
+  const [resetResult, setResetResult] = useState<AdRevenueResetResult | null>(null);
   const [message, setMessage] = useState<{ type: 'success' | 'error'; text: string } | null>(null);
 
   useEffect(() => {
@@ -95,6 +105,46 @@ export const FinancialControlsSection = () => {
           : 'INACTIVE: Points remain as promotional credits only.';
       default:
         return '';
+    }
+  };
+
+  const handleResetAdRevenueData = async () => {
+    const confirmText = 'RESET_AD_REVENUE_DATA';
+    const userInput = window.prompt(
+      `This will permanently delete Ad Revenue dashboard data.\nType ${confirmText} to continue:`,
+      ''
+    );
+    if (userInput === null) return;
+    if (userInput !== confirmText) {
+      setMessage({ type: 'error', text: `Reset cancelled. You must type exactly ${confirmText}.` });
+      return;
+    }
+
+    try {
+      setIsResettingData(true);
+      setMessage(null);
+      setResetResult(null);
+
+      const { data, error } = await supabase.rpc('admin_reset_ad_revenue_data', {
+        p_confirm: confirmText,
+        p_include_ad_impressions: includeImpressions,
+      });
+
+      if (error) throw error;
+
+      const result = (data || {}) as AdRevenueResetResult;
+      setResetResult(result);
+
+      if (result.ok) {
+        setMessage({ type: 'success', text: 'Ad Revenue data reset completed successfully.' });
+      } else {
+        setMessage({ type: 'error', text: result.error || 'Reset failed.' });
+      }
+    } catch (error) {
+      console.error('Error resetting Ad Revenue data:', error);
+      setMessage({ type: 'error', text: 'Failed to reset Ad Revenue data' });
+    } finally {
+      setIsResettingData(false);
     }
   };
 
@@ -216,6 +266,45 @@ export const FinancialControlsSection = () => {
                       <p>Promotional credits system ready (run conversion when ready)</p>
                       <p className="pt-1.5 border-t border-blue-200"><strong>Note:</strong> To control withdrawal access, use Earnings & Payout Settings → Withdrawal Settings.</p>
                     </div>
+                  </div>
+
+                  {/* Data Reset */}
+                  <div className="mt-3 p-4 bg-red-50 border border-red-200 rounded-lg">
+                    <p className="text-sm font-semibold text-red-900">Danger Zone: Reset Ad Revenue Data</p>
+                    <p className="text-xs text-red-800 mt-1">
+                      Use this to start fresh by clearing Ad Revenue dashboard data (sync history, daily inputs,
+                      revenue events, reconciliation log, and creator payout history).
+                    </p>
+                    <label className="flex items-center gap-2 mt-3 text-xs text-red-800">
+                      <input
+                        type="checkbox"
+                        checked={includeImpressions}
+                        onChange={(e) => setIncludeImpressions(e.target.checked)}
+                        className="rounded border-red-300"
+                      />
+                      Also reset ad impressions (more destructive, affects related analytics)
+                    </label>
+                    <div className="mt-3">
+                      <button
+                        type="button"
+                        onClick={handleResetAdRevenueData}
+                        disabled={isResettingData}
+                        className="inline-flex items-center gap-2 px-3 py-2 text-xs font-semibold rounded-lg bg-red-600 text-white hover:bg-red-700 disabled:opacity-50"
+                      >
+                        {isResettingData ? <RefreshCw className="w-3 h-3 animate-spin" /> : null}
+                        {isResettingData ? 'Resetting...' : 'Reset Ad Revenue Data'}
+                      </button>
+                    </div>
+                    {resetResult?.ok && resetResult.deleted && (
+                      <div className="mt-3 p-2.5 bg-white border border-red-100 rounded text-xs text-gray-700">
+                        <p className="font-semibold text-gray-900 mb-1">Deleted Rows</p>
+                        {Object.entries(resetResult.deleted).map(([table, count]) => (
+                          <p key={table}>
+                            {table}: <span className="font-semibold">{count}</span>
+                          </p>
+                        ))}
+                      </div>
+                    )}
                   </div>
                 </div>
               )}
