@@ -18,14 +18,25 @@ interface AdRevenueResetResult {
   deleted?: Record<string, number>;
 }
 
+interface FullFinancialResetResult {
+  ok?: boolean;
+  error?: string;
+  required_confirm?: string;
+  deleted?: Record<string, number>;
+  updated?: Record<string, number>;
+  ad_revenue_reset?: AdRevenueResetResult;
+}
+
 export const FinancialControlsSection = () => {
   const [activeTab, setActiveTab] = useState<'controls' | 'monitoring'>('controls');
   const [controls, setControls] = useState<FinancialControl[]>([]);
   const [loading, setLoading] = useState(true);
   const [updating, setUpdating] = useState<string | null>(null);
   const [isResettingData, setIsResettingData] = useState(false);
+  const [isResettingAllFinancial, setIsResettingAllFinancial] = useState(false);
   const [includeImpressions, setIncludeImpressions] = useState(false);
   const [resetResult, setResetResult] = useState<AdRevenueResetResult | null>(null);
+  const [fullResetResult, setFullResetResult] = useState<FullFinancialResetResult | null>(null);
   const [message, setMessage] = useState<{ type: 'success' | 'error'; text: string } | null>(null);
 
   useEffect(() => {
@@ -145,6 +156,46 @@ export const FinancialControlsSection = () => {
       setMessage({ type: 'error', text: 'Failed to reset Ad Revenue data' });
     } finally {
       setIsResettingData(false);
+    }
+  };
+
+  const handleResetAllFinancialData = async () => {
+    const confirmText = 'RESET_ALL_FINANCIAL_DATA';
+    const userInput = window.prompt(
+      `This will reset core financial data to zero across ledgers, wallets, earnings, withdrawals, and accounting journals.\nType ${confirmText} to continue:`,
+      ''
+    );
+    if (userInput === null) return;
+    if (userInput !== confirmText) {
+      setMessage({ type: 'error', text: `Reset cancelled. You must type exactly ${confirmText}.` });
+      return;
+    }
+
+    try {
+      setIsResettingAllFinancial(true);
+      setMessage(null);
+      setFullResetResult(null);
+
+      const { data, error } = await supabase.rpc('admin_reset_all_financial_data', {
+        p_confirm: confirmText,
+        p_include_ad_impressions: includeImpressions,
+      });
+
+      if (error) throw error;
+
+      const result = (data || {}) as FullFinancialResetResult;
+      setFullResetResult(result);
+
+      if (result.ok) {
+        setMessage({ type: 'success', text: 'Full financial reset completed successfully.' });
+      } else {
+        setMessage({ type: 'error', text: result.error || 'Full financial reset failed.' });
+      }
+    } catch (error) {
+      console.error('Error resetting all financial data:', error);
+      setMessage({ type: 'error', text: 'Failed to reset all financial data' });
+    } finally {
+      setIsResettingAllFinancial(false);
     }
   };
 
@@ -303,6 +354,49 @@ export const FinancialControlsSection = () => {
                             {table}: <span className="font-semibold">{count}</span>
                           </p>
                         ))}
+                      </div>
+                    )}
+                  </div>
+
+                  <div className="mt-3 p-4 bg-red-100 border border-red-300 rounded-lg">
+                    <p className="text-sm font-semibold text-red-900">Danger Zone: Reset ALL Financial Data to Zero</p>
+                    <p className="text-xs text-red-900 mt-1">
+                      This is broader than Ad Revenue reset. It clears accounting journal entries, treat transactions,
+                      withdrawal requests, and sets wallets/earnings/contribution aggregates to zero.
+                    </p>
+                    <div className="mt-3">
+                      <button
+                        type="button"
+                        onClick={handleResetAllFinancialData}
+                        disabled={isResettingAllFinancial}
+                        className="inline-flex items-center gap-2 px-3 py-2 text-xs font-semibold rounded-lg bg-red-800 text-white hover:bg-red-900 disabled:opacity-50"
+                      >
+                        {isResettingAllFinancial ? <RefreshCw className="w-3 h-3 animate-spin" /> : null}
+                        {isResettingAllFinancial ? 'Resetting Everything...' : 'Reset ALL Financial Data'}
+                      </button>
+                    </div>
+                    {fullResetResult?.ok && (
+                      <div className="mt-3 p-2.5 bg-white border border-red-200 rounded text-xs text-gray-800 space-y-1">
+                        {fullResetResult.deleted && (
+                          <>
+                            <p className="font-semibold text-gray-900">Deleted Rows</p>
+                            {Object.entries(fullResetResult.deleted).map(([table, count]) => (
+                              <p key={`deleted-${table}`}>
+                                {table}: <span className="font-semibold">{count}</span>
+                              </p>
+                            ))}
+                          </>
+                        )}
+                        {fullResetResult.updated && (
+                          <>
+                            <p className="font-semibold text-gray-900 pt-2">Updated Rows</p>
+                            {Object.entries(fullResetResult.updated).map(([table, count]) => (
+                              <p key={`updated-${table}`}>
+                                {table}: <span className="font-semibold">{count}</span>
+                              </p>
+                            ))}
+                          </>
+                        )}
                       </div>
                     )}
                   </div>
