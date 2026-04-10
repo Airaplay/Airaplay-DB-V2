@@ -11,6 +11,8 @@ interface ConversionSettings {
   minimum_points_for_payout: number;
   /** % of platform ad-revenue share suggested for this reward pool (default 15) */
   platform_to_pool_percentage?: number;
+  /** When true, pg_cron runs conversion for previous month (1st ~07:00 UTC) */
+  auto_execute_monthly_conversion?: boolean;
   updated_at: string;
 }
 
@@ -68,6 +70,7 @@ export const MonthlyConversionSection: React.FC = () => {
   const [newConversionRate, setNewConversionRate] = useState<string>('');
   const [rateDescription, setRateDescription] = useState<string>('');
   const [newPlatformPoolPct, setNewPlatformPoolPct] = useState<string>('15');
+  const [autoExecuteMonthly, setAutoExecuteMonthly] = useState(false);
 
   const [poolSuggestion, setPoolSuggestion] = useState<PoolSuggestion | null>(null);
   const [poolSuggestionLoading, setPoolSuggestionLoading] = useState(false);
@@ -140,6 +143,7 @@ export const MonthlyConversionSection: React.FC = () => {
             ? settingsData.platform_to_pool_percentage
             : 15;
         setNewPlatformPoolPct(String(poolPct));
+        setAutoExecuteMonthly(!!settingsData.auto_execute_monthly_conversion);
       }
 
       // Load conversion preview
@@ -206,6 +210,13 @@ export const MonthlyConversionSection: React.FC = () => {
       if (poolRes && typeof poolRes === 'object' && 'success' in poolRes && poolRes.success === false) {
         throw new Error((poolRes as { error?: string }).error || 'Failed to save platform pool percentage');
       }
+
+      const { error: autoErr } = await supabase
+        .from('contribution_conversion_settings')
+        .update({ auto_execute_monthly_conversion: autoExecuteMonthly })
+        .eq('is_active', true);
+
+      if (autoErr) throw autoErr;
 
       setSuccess('Conversion settings updated successfully');
       setEditingSettings(false);
@@ -375,7 +386,7 @@ export const MonthlyConversionSection: React.FC = () => {
         </div>
 
         {settings && !editingSettings && (
-          <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
+          <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-4 gap-4">
             <div className="p-4 bg-blue-50 border border-blue-200 rounded-lg">
               <p className="text-xs text-blue-600 uppercase tracking-wider mb-1">Conversion Rate</p>
               <p className="text-2xl font-bold text-gray-900">{settings.conversion_rate}</p>
@@ -395,6 +406,13 @@ export const MonthlyConversionSection: React.FC = () => {
                 %
               </p>
               <p className="text-xs text-gray-600 mt-1">Of platform ad share → reward pool</p>
+            </div>
+            <div className="p-4 bg-violet-50 border border-violet-200 rounded-lg">
+              <p className="text-xs text-violet-700 uppercase tracking-wider mb-1">Auto monthly run</p>
+              <p className="text-2xl font-bold text-gray-900">
+                {settings.auto_execute_monthly_conversion ? 'On' : 'Off'}
+              </p>
+              <p className="text-xs text-gray-600 mt-1">1st of month ~07:00 UTC, previous month</p>
             </div>
           </div>
         )}
@@ -449,6 +467,27 @@ export const MonthlyConversionSection: React.FC = () => {
               </p>
             </div>
 
+            <label className="flex items-start gap-3 cursor-pointer rounded-lg border border-gray-200 bg-gray-50 p-3">
+              <input
+                type="checkbox"
+                className="mt-1 rounded border-gray-300 text-green-600 focus:ring-green-600"
+                checked={autoExecuteMonthly}
+                onChange={(e) => setAutoExecuteMonthly(e.target.checked)}
+              />
+              <span>
+                <span className="block text-sm font-medium text-gray-900">
+                  Automatically execute monthly conversion
+                </span>
+                <span className="block text-xs text-gray-600 mt-0.5">
+                  On the 1st of each month (~07:00 UTC), runs conversion for the <strong>previous</strong> calendar month
+                  using the suggested pool (platform AdMob share × this %). Skips if already completed for that month,
+                  if disabled here, or if the suggested pool is zero. Requires pg_cron, Edge Function{' '}
+                  <code className="text-[11px] bg-white px-1 rounded">contribution-monthly-convert</code>, and service-role
+                  JWT config for pg_net (same as AdMob auto-sync).
+                </span>
+              </span>
+            </label>
+
             <div className="flex items-center gap-2 pt-2">
               <button
                 onClick={handleUpdateConversionRate}
@@ -470,6 +509,7 @@ export const MonthlyConversionSection: React.FC = () => {
                           : 15
                       )
                     );
+                    setAutoExecuteMonthly(!!settings.auto_execute_monthly_conversion);
                   }
                 }}
                 disabled={processing}
