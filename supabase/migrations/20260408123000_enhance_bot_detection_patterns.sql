@@ -5,7 +5,7 @@
   - Plays at highly regular intervals (e.g. every ~30 seconds)
   - Same-track dominance (1 song getting ~100% of plays)
   - Long continuous playback behavior (24h-ish nonstop approximation)
-  - Many accounts from same IP (only when ip_address is present)
+  - (IP/device fan-out check removed by policy update)
 
   Design goals:
   - Do NOT change RPC signatures used by the app
@@ -110,7 +110,6 @@ DECLARE
 
   v_ip_address text := NULL;
   v_user_agent text := NULL;
-  v_distinct_users_same_ip int := 0;
 BEGIN
   -- Check cache first (5 min TTL table already exists).
   SELECT * INTO v_cached_result
@@ -168,8 +167,8 @@ BEGIN
         AND watched_at > now() - interval '1 hour';
     END IF;
 
-    -- Existing threshold: >5 duplicates in 1 hour
-    IF v_duplicate_plays > 5 THEN
+    -- Updated threshold: >10 duplicates in 1 hour
+    IF v_duplicate_plays > 10 THEN
       v_is_fraudulent := true;
       v_fraud_reason := 'Too many duplicate plays in 1 hour';
       v_validation_score := 0.3;
@@ -320,48 +319,6 @@ BEGIN
     IF v_recent_24h_count >= 200 AND COALESCE(v_max_gap_s, 999999) <= 600 THEN
       v_is_fraudulent := true;
       v_fraud_reason := 'Continuous playback behavior detected (nonstop)';
-      v_validation_score := 0.0;
-    END IF;
-  END IF;
-
-  -- =========================================================
-  -- New check 4: "50 accounts from same IP"
-  -- Only triggers when ip_address is present in the recent play row.
-  -- =========================================================
-  IF NOT v_is_fraudulent THEN
-    IF p_content_type IN ('song', 'audio') THEN
-      SELECT lh.ip_address INTO v_ip_address
-      FROM public.listening_history lh
-      WHERE lh.user_id = p_user_id
-      ORDER BY lh.listened_at DESC
-      LIMIT 1;
-
-      IF v_ip_address IS NOT NULL THEN
-        SELECT COUNT(DISTINCT user_id) INTO v_distinct_users_same_ip
-        FROM public.listening_history
-        WHERE ip_address = v_ip_address
-          AND listened_at > now() - interval '24 hours'
-          AND user_id IS NOT NULL;
-      END IF;
-    ELSE
-      SELECT vh.ip_address INTO v_ip_address
-      FROM public.video_playback_history vh
-      WHERE vh.user_id = p_user_id
-      ORDER BY vh.watched_at DESC
-      LIMIT 1;
-
-      IF v_ip_address IS NOT NULL THEN
-        SELECT COUNT(DISTINCT user_id) INTO v_distinct_users_same_ip
-        FROM public.video_playback_history
-        WHERE ip_address = v_ip_address
-          AND watched_at > now() - interval '24 hours'
-          AND user_id IS NOT NULL;
-      END IF;
-    END IF;
-
-    IF v_ip_address IS NOT NULL AND v_distinct_users_same_ip >= 50 THEN
-      v_is_fraudulent := true;
-      v_fraud_reason := 'High account fan-out from same IP (possible farm)';
       v_validation_score := 0.0;
     END IF;
   END IF;
