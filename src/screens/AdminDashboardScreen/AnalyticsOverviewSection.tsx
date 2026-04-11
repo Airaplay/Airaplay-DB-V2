@@ -32,7 +32,8 @@ export const AnalyticsOverviewSection = (): JSX.Element => {
     netEarningsUSD: 0,
     totalTreatEarnings: 0,
     totalTreatRevenueUSD: 0,
-    platformRevenueUSD: 0,
+    admobGrossUSD: 0,
+    admobPlatformShareUSD: 0,
     treatWalletBalance: 0,
     curatorEarnings: 0,
     newUsersToday: 0,
@@ -100,7 +101,8 @@ export const AnalyticsOverviewSection = (): JSX.Element => {
         netEarningsUSD,
         totalTreatEarnings: Number(overviewTotals?.total_treat_earnings || 0),
         totalTreatRevenueUSD: Number(overviewTotals?.total_treat_revenue_usd || 0),
-        platformRevenueUSD: Number(overviewTotals?.admob_platform_share_usd || 0),
+        admobGrossUSD: Number(overviewTotals?.admob_total_revenue_usd || 0),
+        admobPlatformShareUSD: Number(overviewTotals?.admob_platform_share_usd || 0),
         treatWalletBalance: Number(overviewTotals?.treat_wallet_balance || 0),
         curatorEarnings: Number(overviewTotals?.curator_earnings || 0),
         newUsersToday: newUsersToday || 0,
@@ -400,9 +402,9 @@ export const AnalyticsOverviewSection = (): JSX.Element => {
           iconColor="text-sky-500"
         />
         <StatCard
-          title="Platform Revenue"
-          value={formatCurrency(stats.platformRevenueUSD)}
-          sub="AdMob platform share"
+          title="AdMob revenue (USD)"
+          value={formatCurrency(stats.admobGrossUSD)}
+          sub={`Gross daily sync • Platform share (pool runs): ${formatCurrency(stats.admobPlatformShareUSD)}`}
           icon={DollarSign}
           iconBg="bg-violet-50"
           iconColor="text-violet-500"
