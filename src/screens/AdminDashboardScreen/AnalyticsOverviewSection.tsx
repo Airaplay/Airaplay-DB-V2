@@ -27,7 +27,8 @@ export const AnalyticsOverviewSection = (): JSX.Element => {
     totalUsers: 0,
     totalContent: 0,
     totalPlays: 0,
-    totalEarningsUSD: 0,
+    /** Server: user USD + Treat IAP + curator + AdMob platform component */
+    platformGrossUSD: 0,
     totalWithdrawnUSD: 0,
     netEarningsUSD: 0,
     totalTreatEarnings: 0,
@@ -90,13 +91,16 @@ export const AnalyticsOverviewSection = (): JSX.Element => {
       const usdEarnings = overviewTotals?.usd_earnings || {};
       const netEarningsUSD = Number(usdEarnings.net_usd || 0);
       const totalWithdrawnUSD = Number(usdEarnings.withdrawn_usd || 0);
-      const totalEarningsUSD = Number(usdEarnings.gross_usd || (netEarningsUSD + totalWithdrawnUSD));
+      const userGrossUSD = Number(usdEarnings.gross_usd || (netEarningsUSD + totalWithdrawnUSD));
+      const platformGrossUSD = Number(
+        overviewTotals?.platform_gross_usd ?? userGrossUSD
+      );
 
       setStats({
         totalUsers: totalUsers || 0,
         totalContent: totalContent || 0,
         totalPlays: songPlays + videoPlays,
-        totalEarningsUSD,
+        platformGrossUSD,
         totalWithdrawnUSD,
         netEarningsUSD,
         totalTreatEarnings: Number(overviewTotals?.total_treat_earnings || 0),
@@ -365,8 +369,8 @@ export const AnalyticsOverviewSection = (): JSX.Element => {
         />
         <StatCard
           title="Gross USD Earnings"
-          value={formatCurrency(stats.totalEarningsUSD)}
-          sub="User USD: net + withdrawn (all-time). Separate from AdMob app gross below."
+          value={formatCurrency(stats.platformGrossUSD)}
+          sub="Users + Treat sales + curator + platform ad share (est. 40% of AdMob gross if pool not run)"
           icon={DollarSign}
           iconBg="bg-amber-50"
           iconColor="text-amber-500"
