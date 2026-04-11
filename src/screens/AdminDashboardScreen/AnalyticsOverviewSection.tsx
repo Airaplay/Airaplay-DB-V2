@@ -366,7 +366,7 @@ export const AnalyticsOverviewSection = (): JSX.Element => {
         <StatCard
           title="Gross USD Earnings"
           value={formatCurrency(stats.totalEarningsUSD)}
-          sub="Total earned by users"
+          sub="User USD: net + withdrawn (all-time). Separate from AdMob app gross below."
           icon={DollarSign}
           iconBg="bg-amber-50"
           iconColor="text-amber-500"
