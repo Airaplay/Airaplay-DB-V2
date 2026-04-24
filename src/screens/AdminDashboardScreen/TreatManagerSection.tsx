@@ -1,8 +1,9 @@
-import { useState } from 'react';
+import { useState, type FormEvent } from 'react';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '../../components/ui/tabs';
 import { Card } from '../../components/ui/card';
 import { DollarSign, Settings, CreditCard, Package, BarChart, Download, Clock, Coins, RefreshCw, TrendingUp, AlertTriangle, Users, Wallet } from 'lucide-react';
 import { supabase } from '../../lib/supabase';
+import { validateChannelConfig } from '../../lib/paymentChannels';
 import { sanitizeForFilter } from '../../lib/filterSecurity';
 import { useEffect } from 'react';
 import { RevenueBreakdownChart } from '../../components/RevenueBreakdownChart';
@@ -944,11 +945,28 @@ const PaymentChannelsTab = () => {
       const { data: { user } } = await supabase.auth.getUser();
       if (!user) throw new Error('Not authenticated');
 
+      let configuration = { ...(channelData.configuration || {}) };
+      if (channelData.channel_type === 'google_play' && typeof configuration.product_id_by_package === 'string') {
+        try {
+          configuration.product_id_by_package = JSON.parse(configuration.product_id_by_package);
+        } catch {
+          setError('Google Play product map must be valid JSON (package id → Play product id).');
+          return;
+        }
+      }
+
+      const normalized = { ...channelData, configuration };
+      const validation = validateChannelConfig(normalized.channel_type, normalized.configuration);
+      if (!validation.isValid) {
+        setError(validation.errors.join('; '));
+        return;
+      }
+
       if (editingChannel) {
         const { error: updateError } = await supabase
           .from('treat_payment_channels')
           .update({
-            ...channelData,
+            ...normalized,
             updated_by: user.id,
             updated_at: new Date().toISOString()
           })
@@ -960,7 +978,7 @@ const PaymentChannelsTab = () => {
         const { error: insertError } = await supabase
           .from('treat_payment_channels')
           .insert({
-            ...channelData,
+            ...normalized,
             created_by: user.id
           });
 
@@ -1157,6 +1175,7 @@ const PaymentChannelsTab = () => {
             <li>• Display order determines the order channels appear to users</li>
             <li>• Keep your API keys and secrets secure</li>
             <li>• Test channels thoroughly before enabling for production use</li>
+            <li>• Google Play Billing: map each treat package UUID to a Play in-app product id; only this channel is offered for treat purchases on the Android app</li>
           </ul>
         </div>
       </Card>
@@ -1167,7 +1186,7 @@ const PaymentChannelsTab = () => {
 const PaymentChannelModal = ({ channel, onClose, onSave }: {
   channel: any | null;
   onClose: () => void;
-  onSave: (data: any) => void;
+  onSave: (_payload: unknown) => void;
 }) => {
   const [formData, setFormData] = useState({
     channel_name: channel?.channel_name || '',
@@ -1183,7 +1202,23 @@ const PaymentChannelModal = ({ channel, onClose, onSave }: {
   useEffect(() => {
     const fields = getConfigFieldsForType(formData.channel_type);
     setConfigFields(fields);
+    // getConfigFieldsForType is stable for a given channel_type; omitting it avoids unnecessary rerenders.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [formData.channel_type, formData.configuration.api_version]);
+
+  useEffect(() => {
+    if (!channel || channel.channel_type !== 'google_play') return;
+    const p = channel.configuration?.product_id_by_package;
+    if (p && typeof p === 'object') {
+      setFormData((prev) => ({
+        ...prev,
+        configuration: {
+          ...prev.configuration,
+          product_id_by_package: JSON.stringify(p, null, 2),
+        },
+      }));
+    }
+  }, [channel]);
 
   const getConfigFieldsForType = (type: string) => {
     const fieldMap: any = {
@@ -1211,7 +1246,22 @@ const PaymentChannelModal = ({ channel, onClose, onSave }: {
       'usdt_erc20': [
         { key: 'wallet_address', label: 'Wallet Address', type: 'text' },
         { key: 'network', label: 'Network', type: 'text', default: 'ERC20' }
-      ]
+      ],
+      'google_play': [
+        {
+          key: 'android_application_id',
+          label: 'Android application ID (optional)',
+          type: 'text',
+          default: 'com.airaplay.app',
+          placeholder: 'com.airaplay.app',
+        },
+        {
+          key: 'product_id_by_package',
+          label: 'Treat package → Play product IDs (JSON)',
+          type: 'textarea',
+          placeholder: '{"<treat-package-uuid>":"treats_100"}',
+        },
+      ],
     };
     return fieldMap[type] || [];
   };
@@ -1262,7 +1312,20 @@ const PaymentChannelModal = ({ channel, onClose, onSave }: {
               </label>
               <select
                 value={formData.channel_type}
-                onChange={(e) => setFormData({ ...formData, channel_type: e.target.value })}
+                onChange={(e) => {
+                  const channel_type = e.target.value;
+                  setFormData((prev) => ({
+                    ...prev,
+                    channel_type,
+                    configuration:
+                      channel_type === 'google_play'
+                        ? {
+                            android_application_id: 'com.airaplay.app',
+                            product_id_by_package: '{\n  \n}',
+                          }
+                        : {},
+                  }));
+                }}
                 required
                 disabled={!!channel}
                 className="w-full px-4 py-3 bg-white border border-gray-300 rounded-lg text-gray-900 focus:outline-none focus:ring-2 focus:ring-[#309605] focus:border-[#309605] disabled:bg-gray-100 disabled:cursor-not-allowed"
@@ -1273,6 +1336,7 @@ const PaymentChannelModal = ({ channel, onClose, onSave }: {
                 <option value="stripe">Stripe</option>
                 <option value="usdt_trc20">USDT (TRC20)</option>
                 <option value="usdt_erc20">USDT (ERC20)</option>
+                <option value="google_play">Google Play Billing (Android treats)</option>
                 <option value="custom">Custom</option>
               </select>
             </div>
@@ -1357,6 +1421,18 @@ const PaymentChannelModal = ({ channel, onClose, onSave }: {
                             </option>
                           ))}
                         </select>
+                      ) : field.type === 'textarea' ? (
+                        <textarea
+                          rows={8}
+                          value={
+                            typeof formData.configuration[field.key] === 'object'
+                              ? JSON.stringify(formData.configuration[field.key], null, 2)
+                              : (formData.configuration[field.key] as string) || field.default || ''
+                          }
+                          onChange={(e) => handleConfigChange(field.key, e.target.value)}
+                          className="w-full px-4 py-3 bg-white border border-gray-300 rounded-lg text-gray-900 focus:outline-none focus:ring-2 focus:ring-[#309605] focus:border-[#309605] font-mono text-sm"
+                          placeholder={(field as { placeholder?: string }).placeholder || field.label}
+                        />
                       ) : (
                         <input
                           type={field.type}
@@ -1697,7 +1773,7 @@ const TreatPackageTab = () => {
 const TreatPackageModal = ({ package: pkg, onClose, onSave }: {
   package: any | null;
   onClose: () => void;
-  onSave: (data: any) => void;
+  onSave: (_payload: unknown) => void;
 }) => {
   const [formData, setFormData] = useState({
     name: pkg?.name || '',
@@ -2779,7 +2855,7 @@ const TransactionsTab = () => {
   );
 };
 
-/** Admin-managed monthly Treat cost for offline downloads (table: offline_download_pricing). */
+/** Edits `offline_download_pricing` — charged by `subscribe_offline_download_monthly` (30-day access). */
 const OfflineDownloadPricingTab = (): JSX.Element => {
   const [rowId, setRowId] = useState<string | null>(null);
   const [monthlyCostTreats, setMonthlyCostTreats] = useState<string>('300');
@@ -2803,8 +2879,7 @@ const OfflineDownloadPricingTab = (): JSX.Element => {
       }
 
       const rows = data ?? [];
-      const preferred =
-        rows.find((r) => r.is_active === true) ?? rows[0] ?? null;
+      const preferred = rows.find((r) => r.is_active === true) ?? rows[0] ?? null;
 
       if (preferred) {
         setRowId(preferred.id);
@@ -2827,7 +2902,7 @@ const OfflineDownloadPricingTab = (): JSX.Element => {
     void load();
   }, []);
 
-  const handleSubmit = async (e: React.FormEvent) => {
+  const handleSubmit = async (e: FormEvent) => {
     e.preventDefault();
     setError(null);
     setSuccess(null);
@@ -2869,14 +2944,14 @@ const OfflineDownloadPricingTab = (): JSX.Element => {
         }
       }
 
-      setSuccess('Saved. The app uses the latest active row for new subscriptions.');
+      setSuccess('Saved. New subscriptions use the active row’s price.');
       await load();
     } catch (errSave) {
       console.error(errSave);
       const msg = errSave instanceof Error ? errSave.message : 'Save failed';
       setError(
         msg.includes('permission') || msg.includes('policy') || msg.includes('42501')
-          ? 'Only admin or manager roles can change this (database policy).'
+          ? 'Only admin or manager roles can change this.'
           : msg
       );
     } finally {
@@ -2902,7 +2977,7 @@ const OfflineDownloadPricingTab = (): JSX.Element => {
         <div>
           <h3 className="text-lg font-semibold text-gray-900">Offline download subscription</h3>
           <p className="text-sm text-gray-500 mt-1 max-w-xl">
-            Treats charged when a user subscribes for 30 days of offline downloads. Users see this price in the app; the server reads the active row (latest by update if several are active—only one active is recommended).
+            Treats deducted when a user unlocks 30 days of offline downloads. Price is read from the active row (latest update wins if multiple are active — keep one active).
           </p>
         </div>
       </div>
@@ -2921,7 +2996,7 @@ const OfflineDownloadPricingTab = (): JSX.Element => {
       <form onSubmit={handleSubmit} className="space-y-4 max-w-md">
         <div>
           <label htmlFor="offline-monthly-cost" className="block text-sm font-medium text-gray-700 mb-1">
-            Monthly price (Treats)
+            Price per 30-day unlock (Treats)
           </label>
           <input
             id="offline-monthly-cost"
@@ -2940,7 +3015,7 @@ const OfflineDownloadPricingTab = (): JSX.Element => {
             onChange={(e) => setIsActive(e.target.checked)}
             className="rounded border-gray-300 text-[#309605] focus:ring-[#309605]"
           />
-          <span className="text-sm text-gray-700">Pricing row is active</span>
+          <span className="text-sm text-gray-700">This row is active</span>
         </label>
         <div className="flex flex-wrap gap-2 pt-2">
           <button
