@@ -1,8 +1,15 @@
 import React, { useState, useEffect } from 'react';
-import { CreditCard, Wallet, DollarSign, Check, AlertCircle } from 'lucide-react';
+import { CreditCard, Wallet, DollarSign, Check, AlertCircle, Smartphone } from 'lucide-react';
 import { Card, CardContent } from './ui/card';
-import { getEnabledPaymentChannels, processPayment, PaymentChannel } from '../lib/paymentChannels';
+import {
+  getEnabledTreatPaymentChannels,
+  getPlayProductIdForTreatPackage,
+  processPayment,
+  PaymentChannel,
+} from '../lib/paymentChannels';
 import { paymentMonitor } from '../lib/paymentMonitor';
+import { supabase } from '../lib/supabase';
+import { purchaseGooglePlayConsumable } from '../lib/playBilling';
 import { Currency, CurrencyDetectionResult } from '../lib/currencyDetection';
 import { CurrencySelector } from './CurrencySelector';
 import { Browser } from '@capacitor/browser';
@@ -64,7 +71,7 @@ export const PaymentChannelSelector: React.FC<PaymentChannelSelectorProps> = ({
       setIsLoading(true);
       setError(null);
 
-      const channels = await getEnabledPaymentChannels();
+      const channels = await getEnabledTreatPaymentChannels();
       setPaymentChannels(channels);
 
       if (channels.length === 1) {
@@ -88,6 +95,63 @@ export const PaymentChannelSelector: React.FC<PaymentChannelSelectorProps> = ({
     setError(null);
 
     const isNativePlatform = Capacitor.isNativePlatform();
+
+    if (selectedChannel.channel_type === 'google_play') {
+      try {
+        const sku = getPlayProductIdForTreatPackage(selectedChannel, packageId);
+        if (!sku) {
+          const msg =
+            'This package is not linked to a Google Play product. Your administrator must map package IDs in the Google Play payment channel.';
+          setError(msg);
+          onPaymentError(msg);
+          return;
+        }
+
+        const purchase = await purchaseGooglePlayConsumable(sku);
+
+        const { data, error: fnError } = await supabase.functions.invoke('verify-google-play-purchase', {
+          body: {
+            payment_channel_id: selectedChannel.id,
+            package_id: packageId,
+            purchase_token: purchase.purchaseToken,
+            product_id: purchase.productId,
+            order_id: purchase.orderId,
+            amount_usd: amount,
+          },
+        });
+
+        if (fnError) {
+          const msg = fnError.message || (data as { error?: string } | null)?.error || 'Could not verify Google Play purchase';
+          setError(msg);
+          onPaymentError(msg);
+          return;
+        }
+
+        const row = data as { success?: boolean; payment_id?: string; error?: string } | null;
+        if (!row?.success || !row.payment_id) {
+          const msg = row?.error || 'Could not verify Google Play purchase';
+          setError(msg);
+          onPaymentError(msg);
+          return;
+        }
+
+        onPaymentSuccess({
+          payment_method: 'google_play',
+          payment_reference: purchase.orderId,
+          payment_id: row.payment_id,
+          status: 'completed',
+          amount,
+        });
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : 'Google Play purchase failed';
+        setError(msg);
+        onPaymentError(msg);
+      } finally {
+        setIsProcessing(false);
+      }
+      return;
+    }
+
     let paymentWindow: Window | null = null;
     const needsPopup = selectedChannel.channel_type === 'flutterwave' || selectedChannel.channel_type === 'paystack';
 
@@ -480,6 +544,8 @@ export const PaymentChannelSelector: React.FC<PaymentChannelSelectorProps> = ({
         return <CreditCard className="w-6 h-6" />;
       case 'usdt':
         return <Wallet className="w-6 h-6" />;
+      case 'google_play':
+        return <Smartphone className="w-6 h-6" />;
       default:
         return <DollarSign className="w-6 h-6" />;
     }
@@ -493,6 +559,8 @@ export const PaymentChannelSelector: React.FC<PaymentChannelSelectorProps> = ({
         return 'Flutterwave (Card/Bank)';
       case 'usdt':
         return 'USDT (Crypto)';
+      case 'google_play':
+        return 'Google Play';
       default:
         return channel.channel_name;
     }
@@ -506,6 +574,8 @@ export const PaymentChannelSelector: React.FC<PaymentChannelSelectorProps> = ({
         return 'Pay with debit card, bank transfer, or mobile money';
       case 'usdt':
         return 'Pay with USDT cryptocurrency';
+      case 'google_play':
+        return 'Billed through Google Play (required on Android)';
       default:
         return 'Secure payment processing';
     }
@@ -562,7 +632,9 @@ export const PaymentChannelSelector: React.FC<PaymentChannelSelectorProps> = ({
             No Payment Methods Available
           </h3>
           <p className="font-['Inter',sans-serif] text-white/70 text-sm">
-            Payment methods are currently being set up. Please try again later.
+            {Capacitor.isNativePlatform() && Capacitor.getPlatform() === 'android'
+              ? 'Google Play Billing is not set up yet. Ask an admin to add and enable a Google Play payment channel with product IDs for each treat package.'
+              : 'Payment methods are currently being set up. Please try again later.'}
           </p>
         </div>
         <button
