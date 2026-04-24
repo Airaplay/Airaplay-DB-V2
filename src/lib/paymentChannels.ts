@@ -1,6 +1,7 @@
+import { Capacitor } from '@capacitor/core';
 import { supabase } from './supabase';
 import { CurrencyDetectionResult } from './currencyDetection';
-import { fetchWithCache, CACHE_KEYS, CACHE_TTL, configCache } from './configCache';
+import { fetchWithCache, CACHE_KEYS, CACHE_TTL } from './configCache';
 
 export interface PaymentChannel {
   id: string;
@@ -16,7 +17,7 @@ export interface PaymentChannel {
 
 export interface PaymentChannelConfig {
   channel_name: string;
-  channel_type: 'paystack' | 'flutterwave' | 'usdt';
+  channel_type: 'paystack' | 'flutterwave' | 'usdt' | 'google_play';
   is_enabled: boolean;
   icon_url?: string;
   configuration: {
@@ -27,6 +28,10 @@ export interface PaymentChannelConfig {
     webhook_url?: string;
     wallet_address?: string;
     network?: string;
+    /** Play Console application id (defaults to com.airaplay.app) */
+    android_application_id?: string;
+    /** Map treat_packages.id -> Play in-app product id */
+    product_id_by_package?: Record<string, string>;
     [key: string]: any;
   };
   display_order: number;
@@ -58,6 +63,48 @@ export const getEnabledPaymentChannels = async (): Promise<PaymentChannel[]> => 
     throw error;
   }
 };
+
+/**
+ * Treat checkout channels: Play-distributed Android app uses only `google_play` when configured;
+ * web and other native targets use non-Play channels (Paystack, Flutterwave, etc.).
+ */
+export const getEnabledTreatPaymentChannels = async (): Promise<PaymentChannel[]> => {
+  const rows = await getEnabledPaymentChannels();
+  const androidNative = Capacitor.isNativePlatform() && Capacitor.getPlatform() === 'android';
+  if (androidNative) {
+    const play = rows.filter((c) => c.channel_type === 'google_play');
+    return play;
+  }
+  return rows.filter((c) => c.channel_type !== 'google_play');
+};
+
+export function parseProductIdByPackage(configuration: unknown): Record<string, string> | null {
+  if (!configuration || typeof configuration !== 'object') return null;
+  const raw = (configuration as { product_id_by_package?: unknown }).product_id_by_package;
+  if (raw == null) return null;
+  if (typeof raw === 'string') {
+    try {
+      const parsed = JSON.parse(raw) as unknown;
+      return parsed && typeof parsed === 'object' && !Array.isArray(parsed)
+        ? (parsed as Record<string, string>)
+        : null;
+    } catch {
+      return null;
+    }
+  }
+  if (typeof raw === 'object' && !Array.isArray(raw)) {
+    return raw as Record<string, string>;
+  }
+  return null;
+}
+
+export function getPlayProductIdForTreatPackage(channel: PaymentChannel, treatPackageId: string): string | null {
+  if (channel.channel_type !== 'google_play') return null;
+  const map = parseProductIdByPackage(channel.configuration);
+  if (!map) return null;
+  const sku = map[treatPackageId];
+  return typeof sku === 'string' && sku.trim().length > 0 ? sku.trim() : null;
+}
 
 /**
  * Get all payment channels (admin only)
@@ -208,6 +255,13 @@ export const processPayment = async (
       throw new Error('Payment channel not found or disabled');
     }
 
+    if (channel.channel_type === 'google_play') {
+      return {
+        success: false,
+        error: 'Google Play purchases use in-app billing, not the card checkout flow.',
+      };
+    }
+
     // Call the payment processing edge function
     const { data, error } = await supabase.functions.invoke('process-payment', {
       body: {
@@ -277,7 +331,7 @@ export const validateChannelConfig = (
       }
       break;
 
-    case 'flutterwave':
+    case 'flutterwave': {
       const apiVersion = configuration.api_version || 'v3';
       if (!configuration.public_key) {
         errors.push('Flutterwave public key is required');
@@ -289,6 +343,7 @@ export const validateChannelConfig = (
         errors.push('Flutterwave V4 encryption key is required');
       }
       break;
+    }
 
     case 'usdt':
       if (!configuration.wallet_address) {
@@ -298,6 +353,32 @@ export const validateChannelConfig = (
         errors.push('Network (TRC-20, ERC-20, etc.) is required');
       }
       break;
+
+    case 'google_play': {
+      const map = parseProductIdByPackage(configuration);
+      if (!map || Object.keys(map).length === 0) {
+        errors.push('product_id_by_package is required (JSON object: treat package id -> Play product id)');
+        break;
+      }
+      for (const [pkgId, sku] of Object.entries(map)) {
+        if (!pkgId || typeof sku !== 'string' || !sku.trim()) {
+          errors.push('Each package id must map to a non-empty Play product id');
+          break;
+        }
+      }
+      {
+        const appId = configuration.android_application_id;
+        if (
+          appId != null &&
+          typeof appId === 'string' &&
+          appId.trim() &&
+          !/^[a-z][a-z0-9_]*(\.[a-z][a-z0-9_]*)+$/i.test(appId.trim())
+        ) {
+          errors.push('android_application_id should look like com.example.app');
+        }
+      }
+      break;
+    }
 
     default:
       errors.push('Invalid channel type');
