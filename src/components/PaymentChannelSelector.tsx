@@ -235,8 +235,9 @@ export const PaymentChannelSelector: React.FC<PaymentChannelSelectorProps> = ({
         const paymentId = paymentData.payment_id;
 
         setProcessingState({
-          paymentId: paymentId,
-          isMonitoring: true
+          paymentId,
+          isMonitoring: true,
+          isVerifying: false,
         });
 
         const monitorPayment = async () => {

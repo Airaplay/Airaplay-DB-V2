@@ -162,7 +162,7 @@ export const PurchaseTreatsModal: React.FC<PurchaseTreatsModalProps> = ({ onClos
       } else {
         setError('No treat packages available at this time');
       }
-    } catch {
+    } catch (err: unknown) {
       setError(toUserFacingPaymentError(err, 'load'));
     } finally {
       setIsLoadingPackages(false);
