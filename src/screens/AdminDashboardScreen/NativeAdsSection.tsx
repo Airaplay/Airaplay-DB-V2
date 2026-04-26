@@ -3,12 +3,46 @@ import { Plus, Trash2, Edit2, Eye, EyeOff, ExternalLink, TrendingUp, CreditCard,
 import { supabase } from '../../lib/supabase';
 import type { NativeAdCard } from '../../lib/nativeAdService';
 import { LoadingLogo } from '../../components/LoadingLogo';
+import { directUploadToBunny } from '../../lib/directBunnyUpload';
 
 const AUDIO_AD_PLACEHOLDER_IMAGE_URL = 'https://placehold.co/1200x1200/111827/FFFFFF?text=Audio+Ad';
 const AUDIO_MIME_TYPES = ['audio/mpeg', 'audio/mp3', 'audio/mp4', 'audio/x-m4a', 'audio/aac', 'audio/wav', 'audio/x-wav', 'audio/ogg', 'audio/webm'];
 const VISUAL_MIME_TYPES = ['image/jpeg', 'image/png', 'image/webp', 'image/jpg', 'video/mp4', 'video/webm', 'video/quicktime'];
 
 type UploadedMediaType = 'visual' | 'audio';
+type ListFilterType = 'all' | 'visual' | 'audio';
+
+const PLAYER_ONLY_PLACEMENTS = ['music_player', 'album_player', 'playlist_player', 'daily_mix_player'] as const;
+const ALL_PLACEMENTS = [
+  'home_popup',
+  'trending_near_you_grid',
+  'explore_grid',
+  'home_grid',
+  'home_featured_banner',
+  'home_featured_banner_secondary',
+  'music_player_popup',
+  'album_player_popup',
+  'playlist_player_popup',
+  'daily_mix_player_popup',
+  ...PLAYER_ONLY_PLACEMENTS,
+] as const;
+
+const PLACEMENT_LABELS: Record<string, string> = {
+  home_popup: 'Home Screen Popup',
+  trending_near_you_grid: 'Trending Near You',
+  explore_grid: 'Explore Grid',
+  home_grid: 'Home Grid',
+  home_featured_banner: 'Home Featured Banner',
+  home_featured_banner_secondary: 'Home Featured Banner 2',
+  music_player: 'Music Player Screen',
+  album_player: 'Album Player Screen',
+  playlist_player: 'Playlist Player Screen',
+  daily_mix_player: 'Daily Mix Player Screen',
+  music_player_popup: 'Music Player Popup',
+  album_player_popup: 'Album Player Popup',
+  playlist_player_popup: 'Playlist Player Popup',
+  daily_mix_player_popup: 'Daily Mix Player Popup',
+};
 
 export const NativeAdsSection = (): JSX.Element => {
   const [ads, setAds] = useState<NativeAdCard[]>([]);
@@ -21,6 +55,7 @@ export const NativeAdsSection = (): JSX.Element => {
   const [selectedFile, setSelectedFile] = useState<File | null>(null);
   const [previewUrl, setPreviewUrl] = useState<string | null>(null);
   const [selectedMediaType, setSelectedMediaType] = useState<UploadedMediaType>('visual');
+  const [listFilterType, setListFilterType] = useState<ListFilterType>('all');
 
   const [formData, setFormData] = useState({
     title: '',
@@ -96,25 +131,21 @@ export const NativeAdsSection = (): JSX.Element => {
       throw new Error('Authentication session expired. Please sign in again.');
     }
 
-    const userId = session.user.id;
-    const ext = selectedFile.name.split('.').pop() || 'bin';
-    const path = `${userId}/native-ads/ad-${Date.now()}.${ext}`;
+    const mediaType: UploadedMediaType = AUDIO_MIME_TYPES.includes(selectedFile.type) ? 'audio' : 'visual';
+    const uploadResult = await directUploadToBunny(selectedFile, {
+      userId: session.user.id,
+      contentType: mediaType === 'audio'
+        ? 'audio'
+        : (selectedFile.type.startsWith('video/') ? 'video' : 'image'),
+      // Keep ad visuals in thumbnails-like public paths when image upload is routed via Supabase.
+      customPath: mediaType === 'visual' && !selectedFile.type.startsWith('video/') ? 'thumbnails' : undefined,
+    });
 
-    const { error: uploadError } = await supabase.storage
-      .from('thumbnails')
-      .upload(path, selectedFile, {
-        cacheControl: '3600',
-        upsert: false,
-        duplex: 'half'
-      });
-
-    if (uploadError) {
-      throw new Error(`Failed to upload media: ${uploadError.message}`);
+    if (!uploadResult.success || !uploadResult.publicUrl) {
+      throw new Error(`Failed to upload media: ${uploadResult.error || 'Unknown upload error'}`);
     }
 
-    const { data: { publicUrl } } = supabase.storage.from('thumbnails').getPublicUrl(path);
-    const mediaType: UploadedMediaType = AUDIO_MIME_TYPES.includes(selectedFile.type) ? 'audio' : 'visual';
-    return { url: publicUrl, type: mediaType };
+    return { url: uploadResult.publicUrl, type: mediaType };
   };
 
   const handleSubmit = async (e: React.FormEvent) => {
@@ -132,7 +163,13 @@ export const NativeAdsSection = (): JSX.Element => {
       const finalAudioUrl = uploadedMedia?.type === 'audio'
         ? uploadedMedia.url
         : (isAudioAd ? (editingAd?.audio_url || null) : null);
-      const playerOnlyPlacements = new Set(['music_player', 'album_player', 'playlist_player', 'daily_mix_player']);
+      const playerOnlyPlacements = new Set([
+        ...PLAYER_ONLY_PLACEMENTS,
+        'music_player_popup',
+        'album_player_popup',
+        'playlist_player_popup',
+        'daily_mix_player_popup',
+      ]);
 
       if (finalAudioUrl && !playerOnlyPlacements.has(formData.placement_type)) {
         throw new Error('Audio ads can only be assigned to music player placements.');
@@ -275,6 +312,32 @@ export const NativeAdsSection = (): JSX.Element => {
     return ((ad.click_count / ad.impression_count) * 100).toFixed(2);
   };
 
+  const isAudioAd = (ad: NativeAdCard): boolean => !!ad.audio_url && ad.audio_url.trim().length > 0;
+
+  const filteredAds = ads.filter((ad) => {
+    if (listFilterType === 'all') return true;
+    if (listFilterType === 'audio') return isAudioAd(ad);
+    return !isAudioAd(ad);
+  });
+
+  const placementOptions =
+    selectedMediaType === 'audio'
+      ? [...PLAYER_ONLY_PLACEMENTS, 'music_player_popup', 'album_player_popup', 'playlist_player_popup', 'daily_mix_player_popup']
+      : ALL_PLACEMENTS;
+
+  const ensureValidPlacementForMediaType = (mediaType: UploadedMediaType) => {
+    const validAudioPlacements = new Set([
+      ...PLAYER_ONLY_PLACEMENTS,
+      'music_player_popup',
+      'album_player_popup',
+      'playlist_player_popup',
+      'daily_mix_player_popup',
+    ]);
+    if (mediaType === 'audio' && !validAudioPlacements.has(formData.placement_type)) {
+      setFormData((prev) => ({ ...prev, placement_type: 'music_player' }));
+    }
+  };
+
   if (isLoading) {
     return (
       <div className="flex items-center justify-center h-64">
@@ -317,6 +380,43 @@ export const NativeAdsSection = (): JSX.Element => {
           <p className="text-red-400">{error}</p>
         </div>
       )}
+
+      {/* List Filter */}
+      <div className="flex items-center gap-2">
+        <button
+          type="button"
+          onClick={() => setListFilterType('all')}
+          className={`px-3 py-1.5 rounded-lg text-xs font-medium transition-colors ${
+            listFilterType === 'all'
+              ? 'bg-[#309605] text-white'
+              : 'bg-gray-100 text-gray-700 hover:bg-gray-200'
+          }`}
+        >
+          All Ads
+        </button>
+        <button
+          type="button"
+          onClick={() => setListFilterType('visual')}
+          className={`px-3 py-1.5 rounded-lg text-xs font-medium transition-colors ${
+            listFilterType === 'visual'
+              ? 'bg-[#309605] text-white'
+              : 'bg-gray-100 text-gray-700 hover:bg-gray-200'
+          }`}
+        >
+          Visual Ads
+        </button>
+        <button
+          type="button"
+          onClick={() => setListFilterType('audio')}
+          className={`px-3 py-1.5 rounded-lg text-xs font-medium transition-colors ${
+            listFilterType === 'audio'
+              ? 'bg-[#309605] text-white'
+              : 'bg-gray-100 text-gray-700 hover:bg-gray-200'
+          }`}
+        >
+          Audio Ads
+        </button>
+      </div>
 
       {/* Form */}
       {showForm && (
@@ -400,7 +500,9 @@ export const NativeAdsSection = (): JSX.Element => {
                       className="absolute top-2 right-2 w-7 h-7 rounded-full bg-black/60 flex items-center justify-center"
                       onClick={() => {
                         setSelectedFile(null);
-                      setSelectedMediaType(editingAd?.audio_url ? 'audio' : 'visual');
+                        const nextType: UploadedMediaType = editingAd?.audio_url ? 'audio' : 'visual';
+                        setSelectedMediaType(nextType);
+                        ensureValidPlacementForMediaType(nextType);
                         if (previewUrl && previewUrl.startsWith('blob:')) {
                           URL.revokeObjectURL(previewUrl);
                         }
@@ -418,7 +520,13 @@ export const NativeAdsSection = (): JSX.Element => {
                     type="file"
                     accept="image/jpeg,image/png,image/webp,image/jpg,video/mp4,video/webm,video/quicktime,audio/mpeg,audio/mp3,audio/mp4,audio/x-m4a,audio/aac,audio/wav,audio/ogg,audio/webm"
                     className="hidden"
-                    onChange={handleFileChange}
+                    onChange={(e) => {
+                      handleFileChange(e);
+                      const file = e.target.files?.[0];
+                      if (!file) return;
+                      const nextType: UploadedMediaType = AUDIO_MIME_TYPES.includes(file.type) ? 'audio' : 'visual';
+                      ensureValidPlacementForMediaType(nextType);
+                    }}
                   />
                   <label
                     htmlFor="native-ad-media"
@@ -457,16 +565,17 @@ export const NativeAdsSection = (): JSX.Element => {
                 className="w-full px-3 py-2 bg-white border border-gray-200 rounded-lg text-sm text-gray-900 focus:outline-none focus:ring-2 focus:ring-[#309605]/70 focus:border-[#309605]"
                 required
               >
-                <option value="trending_near_you_grid">Trending Near You</option>
-                <option value="explore_grid">Explore Grid</option>
-                <option value="home_grid">Home Grid</option>
-                <option value="home_featured_banner">Home Featured Banner</option>
-                <option value="home_featured_banner_secondary">Home Featured Banner 2</option>
-                <option value="music_player">Music Player Screen</option>
-                <option value="album_player">Album Player Screen</option>
-                <option value="playlist_player">Playlist Player Screen</option>
-                <option value="daily_mix_player">Daily Mix Player Screen</option>
+                {placementOptions.map((placement) => (
+                  <option key={placement} value={placement}>
+                    {PLACEMENT_LABELS[placement]}
+                  </option>
+                ))}
               </select>
+              {selectedMediaType === 'audio' ? (
+                <p className="mt-1 text-[11px] text-gray-500">
+                  Audio ads are limited to player placements.
+                </p>
+              ) : null}
             </div>
 
             <div>
@@ -559,12 +668,12 @@ export const NativeAdsSection = (): JSX.Element => {
 
       {/* Ads List */}
       <div className="space-y-4">
-        {ads.length === 0 ? (
+        {filteredAds.length === 0 ? (
           <div className="bg-white/5 rounded-lg p-8 text-center">
-            <p className="text-gray-400">No native ads created yet</p>
+            <p className="text-gray-400">No ads match this filter</p>
           </div>
         ) : (
-          ads.map((ad) => (
+          filteredAds.map((ad) => (
             <div key={ad.id} className="bg-white/5 rounded-lg p-4">
               <div className="flex items-start gap-4">
                 {/* Ad Media */}
@@ -586,9 +695,11 @@ export const NativeAdsSection = (): JSX.Element => {
                     <div>
                       <h3 className="text-white font-semibold">{ad.title}</h3>
                       <p className="text-gray-400 text-sm">{ad.advertiser_name}</p>
-                      {ad.audio_url ? (
+                      {isAudioAd(ad) ? (
                         <p className="text-xs text-blue-300 mt-1">Audio Ad (Player Placement)</p>
-                      ) : null}
+                      ) : (
+                        <p className="text-xs text-gray-500 mt-1">Visual Ad</p>
+                      )}
                     </div>
                     <div className="flex items-center gap-2">
                       <span className={`px-2 py-1 rounded text-xs ${
