@@ -134,6 +134,16 @@ export const NativeAdsSection = (): JSX.Element => {
     const mediaType: UploadedMediaType = AUDIO_MIME_TYPES.includes(selectedFile.type) ? 'audio' : 'visual';
     const isVideoCreative = mediaType === 'visual' && selectedFile.type.startsWith('video/');
 
+    // Do not depend on Edge Function transport for audio ad uploads.
+    // This avoids "Failed to send a request to the Edge Function" failures in admin.
+    if (mediaType === 'audio') {
+      const audioUrl = await uploadAudioToSupabaseStorage(selectedFile, session.user.id);
+      if (!audioUrl) {
+        throw new Error('Failed to upload audio ad media to storage. Please try again.');
+      }
+      return { url: audioUrl, type: mediaType };
+    }
+
     if (isVideoCreative) {
       const bunnyStreamUrl = await uploadVideoToBunnyStream(selectedFile);
       if (!bunnyStreamUrl) {
@@ -152,14 +162,6 @@ export const NativeAdsSection = (): JSX.Element => {
       return { url: uploadResult.publicUrl, type: mediaType };
     }
 
-    // Audio ads should still be publishable even when Bunny edge uploads fail
-    // (e.g. transient network/CORS issues on web admin). Fallback to Supabase Storage.
-    if (mediaType === 'audio') {
-      const fallbackUrl = await uploadAudioToSupabaseStorage(selectedFile, session.user.id);
-      if (fallbackUrl) {
-        return { url: fallbackUrl, type: mediaType };
-      }
-    }
     throw new Error(`Failed to upload media: ${uploadResult.error || 'Unknown upload error'}`);
   };
 
