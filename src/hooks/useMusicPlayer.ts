@@ -11,12 +11,14 @@ import { getTrendingFallbackSong } from '../lib/trendingFallbackService';
 import { generateContextKey, loadContextSettings, saveContextSettings } from '../lib/contextSettings';
 import { trackListeningEngagement } from '../lib/contributionService';
 import { logger } from '../lib/logger';
+import { resolveSongForPlayback } from '../lib/offlineAudioService';
 import {
   updateMediaSessionMetadata,
   setMediaSessionPlaybackState,
   setMediaSessionPositionState,
   setMediaSessionActionHandlers,
 } from '../lib/mediaSession';
+import { playNativeAudioAdForPlacement } from '../lib/nativeAdService';
 
 interface Song {
   id: string;
@@ -78,6 +80,22 @@ const isDiscoveryContext = (context?: string): boolean => {
 
   return discoveryContexts.includes(context);
 };
+
+function isPlaybackAudioUrl(url: string): boolean {
+  if (url.startsWith('https://')) return true;
+  if (url.startsWith('blob:')) return true;
+  if (url.startsWith('http://localhost')) return true;
+  if (url.includes('/_capacitor_file_/')) return true;
+  return false;
+}
+
+function resolveNativePlayerPlacementFromContext(context: string | undefined): string {
+  if (!context) return 'music_player';
+  if (context.startsWith('album-') || context === 'Album') return 'album_player';
+  if (context.startsWith('playlist-') || context === 'Playlist') return 'playlist_player';
+  if (context.startsWith('daily-mix-')) return 'daily_mix_player';
+  return 'music_player';
+}
 
 export const useMusicPlayer = () => {
   const { session } = useAuth();
@@ -181,31 +199,29 @@ export const useMusicPlayer = () => {
       return null;
     }
 
-    // Validate URL format before creating audio element
-    // Allow https:// URLs and blob: URLs (for offline playback)
-    const isValidUrl = song.audioUrl.startsWith('https://') || song.audioUrl.startsWith('blob:');
-    if (!isValidUrl) {
-      logger.error('Invalid audio URL: must start with https:// or blob:', song.audioUrl);
+    const url = song.audioUrl;
+    if (!isPlaybackAudioUrl(url)) {
+      logger.error('Invalid audio URL for playback:', song.audioUrl);
       setState(prev => ({ ...prev, error: 'Invalid audio URL format. Please re-upload this song.' }));
       return null;
     }
 
-    // Check if URL is malformed (missing CDN domain) - only for https URLs, not blob URLs
-    if (song.audioUrl.startsWith('https://') && song.audioUrl.includes('https://airaplay/')) {
+    // Check if URL is malformed (missing CDN domain) - only for https URLs, not blob/local
+    if (url.startsWith('https://') && url.includes('https://airaplay/')) {
       logger.error('Malformed audio URL detected: missing .b-cdn.net domain', song.audioUrl);
       setState(prev => ({ ...prev, error: 'Audio file URL is malformed. Please re-upload this song.' }));
       return null;
     }
 
     const audio = new Audio();
-    audio.src = song.audioUrl;
+    audio.src = url;
 
     audio.preload = 'metadata';
 
     // Only set crossOrigin if the URL is from a different origin
-    // Blob URLs don't need CORS handling as they're always same-origin
-    if (!song.audioUrl.startsWith('blob:')) {
-      const audioUrl = new URL(song.audioUrl, window.location.href);
+    // Blob / Capacitor local URLs don't need CDN CORS
+    if (!url.startsWith('blob:') && !url.startsWith('http://localhost') && !url.includes('/_capacitor_file_/')) {
+      const audioUrl = new URL(url, window.location.href);
       const isCrossOrigin = audioUrl.origin !== window.location.origin;
 
       if (isCrossOrigin) {
@@ -355,6 +371,22 @@ export const useMusicPlayer = () => {
         return;
       }
 
+      // Attempt to play native audio ads between songs for player placements.
+      // Any ad failure must not block autoplay progression.
+      try {
+        const placementType = resolveNativePlayerPlacementFromContext(currentState.playlistContext);
+        const userCountry =
+          typeof session?.user?.user_metadata?.country === 'string'
+            ? session.user.user_metadata.country
+            : null;
+        await playNativeAudioAdForPlacement(placementType, userCountry, undefined, {
+          maxDurationMs: 35_000,
+          minIntervalMs: 45_000,
+        });
+      } catch (adError) {
+        logger.warn('Audio ad between songs failed; continuing playback', adError);
+      }
+
       const getCurrentPlaylist = () => {
         return currentState.isShuffleEnabled ? currentState.shuffledPlaylist : currentState.playlist;
       };
@@ -405,8 +437,8 @@ export const useMusicPlayer = () => {
                   : [...albumTracks],
               }));
 
-              // Create new audio element for the first album track
-              const result = createAudioElement(firstAlbumTrack);
+              const resolvedFirst = await resolveSongForPlayback(firstAlbumTrack);
+              const result = createAudioElement(resolvedFirst);
               if (result) {
                 const { audio, cleanup } = result;
 
@@ -524,8 +556,8 @@ export const useMusicPlayer = () => {
           };
         });
 
-        // Create new audio element for the recommended song
-        const result = createAudioElement(nextSong);
+        const resolvedNext = await resolveSongForPlayback(nextSong);
+        const result = createAudioElement(resolvedNext);
         if (result) {
           const { audio, cleanup } = result;
 
@@ -576,8 +608,9 @@ export const useMusicPlayer = () => {
         songTitle: song.title
       });
 
-      // Test if URL is accessible (diagnostic only)
-      fetch(song.audioUrl, { method: 'HEAD', mode: 'no-cors' }).catch(() => {});
+      if (song.audioUrl?.startsWith('https://')) {
+        fetch(song.audioUrl, { method: 'HEAD', mode: 'no-cors' }).catch(() => {});
+      }
 
       setState(prev => ({ ...prev, isPlaying: false, error: errorMessage }));
     };
@@ -627,53 +660,54 @@ export const useMusicPlayer = () => {
   // Update playNext ref to always use the latest state
   useEffect(() => {
     playNextSongRef.current = () => {
-      const getCurrentPlaylist = () => {
-        return state.isShuffleEnabled ? state.shuffledPlaylist : state.playlist;
-      };
+      void (async () => {
+        const getCurrentPlaylist = () => {
+          return state.isShuffleEnabled ? state.shuffledPlaylist : state.playlist;
+        };
 
-      const currentPlaylist = getCurrentPlaylist();
-      if (currentPlaylist.length === 0) return;
+        const currentPlaylist = getCurrentPlaylist();
+        if (currentPlaylist.length === 0) return;
 
-      let nextIndex: number;
-      let nextSongInOriginalPlaylist: number;
+        let nextIndex: number;
+        let nextSongInOriginalPlaylist: number;
 
-      if (state.isShuffleEnabled) {
-        const currentShuffledIndex = state.shuffledPlaylist.findIndex(s => s.id === state.currentSong?.id);
-        if (currentShuffledIndex === state.shuffledPlaylist.length - 1) {
-          if (state.repeatMode === 'all') {
-            nextIndex = 0;
+        if (state.isShuffleEnabled) {
+          const currentShuffledIndex = state.shuffledPlaylist.findIndex(s => s.id === state.currentSong?.id);
+          if (currentShuffledIndex === state.shuffledPlaylist.length - 1) {
+            if (state.repeatMode === 'all') {
+              nextIndex = 0;
+            } else {
+              return;
+            }
           } else {
-            return; // End of playlist
+            nextIndex = currentShuffledIndex + 1;
           }
+
+          const nextSongId = state.shuffledPlaylist[nextIndex]?.id;
+          nextSongInOriginalPlaylist = state.playlist.findIndex(s => s.id === nextSongId);
         } else {
-          nextIndex = currentShuffledIndex + 1;
+          if (state.currentIndex === currentPlaylist.length - 1) {
+            if (state.repeatMode === 'all') {
+              nextIndex = 0;
+            } else {
+              return;
+            }
+          } else {
+            nextIndex = state.currentIndex + 1;
+          }
+          nextSongInOriginalPlaylist = nextIndex;
         }
 
-        // Find the next song's index in the original playlist for proper tracking
-        const nextSongId = state.shuffledPlaylist[nextIndex]?.id;
-        nextSongInOriginalPlaylist = state.playlist.findIndex(s => s.id === nextSongId);
-      } else {
-        if (state.currentIndex === currentPlaylist.length - 1) {
-          if (state.repeatMode === 'all') {
-            nextIndex = 0;
-          } else {
-            return; // End of playlist
-          }
-        } else {
-          nextIndex = state.currentIndex + 1;
-        }
-        nextSongInOriginalPlaylist = nextIndex;
-      }
+        const nextSong = currentPlaylist[nextIndex];
+        if (!nextSong) return;
 
-      const nextSong = currentPlaylist[nextIndex];
-      if (nextSong) {
         if (audioCleanupRef.current) {
           audioCleanupRef.current();
           audioCleanupRef.current = null;
         }
 
-        // Create new audio element
-        const audioResult = createAudioElement(nextSong);
+        const resolved = await resolveSongForPlayback(nextSong);
+        const audioResult = createAudioElement(resolved);
         if (!audioResult) return;
 
         const { audio: newAudio, cleanup } = audioResult;
@@ -689,13 +723,12 @@ export const useMusicPlayer = () => {
           error: null,
         }));
 
-        // Start playback
         newAudio.play().catch(err => {
           if (err.name !== 'AbortError') {
             logger.error('Error playing audio', err);
           }
         });
-      }
+      })();
     };
   }, [state, createAudioElement]);
 
@@ -770,14 +803,19 @@ export const useMusicPlayer = () => {
     }
 
     const nextSong = currentPlaylist[nextIndex];
-    if (nextSong) {
+    if (!nextSong) {
+      logger.error('playNext: Next song not found at index', nextIndex);
+      return;
+    }
+
+    void (async () => {
       if (audioCleanupRef.current) {
         audioCleanupRef.current();
         audioCleanupRef.current = null;
       }
 
-      // Create new audio element
-      const audioResult = createAudioElement(nextSong);
+      const resolved = await resolveSongForPlayback(nextSong);
+      const audioResult = createAudioElement(resolved);
       if (!audioResult) return;
 
       const { audio: newAudio, cleanup } = audioResult;
@@ -793,15 +831,12 @@ export const useMusicPlayer = () => {
         error: null,
       }));
 
-      // Start playback
       newAudio.play().catch(err => {
         if (err.name !== 'AbortError') {
           logger.error('Error playing audio', err);
         }
       });
-    } else {
-      logger.error('playNext: Next song not found at index', nextIndex);
-    }
+    })();
   }, [state.currentIndex, state.playlist, state.currentSong, state.isShuffleEnabled, state.shuffledPlaylist, state.repeatMode, state.playlistContext, createAudioElement]);
 
   const playPrevious = useCallback(() => {
@@ -893,8 +928,8 @@ export const useMusicPlayer = () => {
         ? await getSongsFromIds(savedState.playlist)
         : songs;
 
-      // Create audio element
-      const audioResult = createAudioElement(currentSong);
+      const resolvedCurrent = await resolveSongForPlayback(currentSong);
+      const audioResult = createAudioElement(resolvedCurrent);
       if (!audioResult) return false;
 
       const { audio: newAudio, cleanup } = audioResult;
@@ -926,44 +961,40 @@ export const useMusicPlayer = () => {
   }, [createAudioElement]);
 
   const showMiniPlayer = useCallback((song: Song, playlist: Song[] = [], context: string = 'unknown', playlistId: string | null = null) => {
-    // This is the primary entry point for all music playback in the app
-    // Clean up current audio if it exists
     if (audioCleanupRef.current) {
       audioCleanupRef.current();
       audioCleanupRef.current = null;
     }
 
-    // Create new audio element
-    const audioResult = createAudioElement(song);
-    if (!audioResult) return;
+    void (async () => {
+      const resolved = await resolveSongForPlayback(song);
+      const audioResult = createAudioElement(resolved);
+      if (!audioResult) return;
 
-    const { audio: newAudio, cleanup } = audioResult;
+      const { audio: newAudio, cleanup } = audioResult;
+      audioCleanupRef.current = cleanup;
 
-    // Store the cleanup function for later use
-    audioCleanupRef.current = cleanup;
+      setState(prev => ({
+        ...prev,
+        currentSong: song,
+        playlist,
+        currentIndex: playlist.findIndex(s => s.id === song.id) !== -1 ? playlist.findIndex(s => s.id === song.id) : 0,
+        audioElement: newAudio,
+        isMiniPlayerVisible: true,
+        isFullPlayerVisible: false,
+        currentTime: 0,
+        duration: 0,
+        error: null,
+        playlistContext: context,
+        playlistId,
+      }));
 
-    setState(prev => ({
-      ...prev,
-      currentSong: song,
-      playlist,
-      currentIndex: playlist.findIndex(s => s.id === song.id) !== -1 ? playlist.findIndex(s => s.id === song.id) : 0,
-      audioElement: newAudio,
-      isMiniPlayerVisible: true,
-      isFullPlayerVisible: false,
-      currentTime: 0,
-      duration: 0,
-      error: null,
-      playlistContext: context,
-      playlistId,
-    }));
-
-    // Start playback
-    newAudio.play().catch(err => {
-      // Only log errors that aren't AbortError (play interrupted by pause)
-      if (err.name !== 'AbortError') {
-        logger.error('Error playing audio', err);
-      }
-    });
+      newAudio.play().catch(err => {
+        if (err.name !== 'AbortError') {
+          logger.error('Error playing audio', err);
+        }
+      });
+    })();
   }, [createAudioElement]);
 
   const hideMiniPlayer = useCallback(() => {
@@ -986,98 +1017,85 @@ export const useMusicPlayer = () => {
   }, []);
 
   const playSong = useCallback((song: Song, expandFullPlayer: boolean = true, playlist: Song[] = [], index: number = 0, context: string = 'unknown', albumId: string | null = null, playlistId: string | null = null) => {
-    // Clean up current audio if it exists
     if (audioCleanupRef.current) {
       audioCleanupRef.current();
       audioCleanupRef.current = null;
     }
 
-    // Reset contribution tracking refs for new song
     hasTrackedSongStartRef.current = false;
     hasTrackedSongCompleteRef.current = false;
     currentSongGenreRef.current = null;
     currentSongArtistPlaysRef.current = null;
-    intentionalPauseRef.current = false; // New song is always intentionally played
+    intentionalPauseRef.current = false;
 
-    // Create new audio element
-    const audioResult = createAudioElement(song);
-    if (!audioResult) return;
+    void (async () => {
+      const resolved = await resolveSongForPlayback(song);
+      const audioResult = createAudioElement(resolved);
+      if (!audioResult) return;
 
-    const { audio: newAudio, cleanup } = audioResult;
+      const { audio: newAudio, cleanup } = audioResult;
+      audioCleanupRef.current = cleanup;
 
-    // Store the cleanup function for later use
-    audioCleanupRef.current = cleanup;
+      setState(prev => ({
+        ...prev,
+        currentSong: song,
+        playlist,
+        currentIndex: index,
+        audioElement: newAudio,
+        isFullPlayerVisible: expandFullPlayer,
+        isMiniPlayerVisible: true,
+        currentTime: 0,
+        duration: 0,
+        error: null,
+        playlistContext: context,
+        albumId,
+        playlistId,
+        shuffledPlaylist: prev.isShuffleEnabled && playlist.length > 1
+          ? [...playlist].sort(() => Math.random() - 0.5)
+          : [...playlist],
+      }));
 
-
-    setState(prev => ({
-      ...prev,
-      currentSong: song,
-      playlist,
-      currentIndex: index,
-      audioElement: newAudio,
-      isFullPlayerVisible: expandFullPlayer,
-      // Always show mini player when a song is playing, unless full player is explicitly requested
-      isMiniPlayerVisible: true,
-      currentTime: 0,
-      duration: 0,
-      error: null,
-      playlistContext: context,
-      albumId,
-      playlistId,
-      // Update shuffledPlaylist immediately to match the new playlist
-      shuffledPlaylist: prev.isShuffleEnabled && playlist.length > 1
-        ? [...playlist].sort(() => Math.random() - 0.5)
-        : [...playlist],
-    }));
-
-    // User-initiated click - load and play immediately
-    // With preload='none', calling load() then play() will download and start playback
-    newAudio.load(); // Start loading the media
-    newAudio.play().catch(err => {
-      // Only log errors that aren't AbortError (play interrupted by pause)
-      if (err.name !== 'AbortError') {
-        logger.error('Error playing audio', err);
-        setState(prev => ({ ...prev, error: 'Failed to play audio. Please try again.' }));
-      }
-    });
+      newAudio.load();
+      newAudio.play().catch(err => {
+        if (err.name !== 'AbortError') {
+          logger.error('Error playing audio', err);
+          setState(prev => ({ ...prev, error: 'Failed to play audio. Please try again.' }));
+        }
+      });
+    })();
   }, [createAudioElement]);
 
   const changeSong = useCallback((song: Song, index?: number) => {
-    // Clean up current audio if it exists
     if (audioCleanupRef.current) {
       audioCleanupRef.current();
       audioCleanupRef.current = null;
     }
 
-    // Create new audio element
-    const audioResult = createAudioElement(song);
-    if (!audioResult) return;
+    void (async () => {
+      const resolved = await resolveSongForPlayback(song);
+      const audioResult = createAudioElement(resolved);
+      if (!audioResult) return;
 
-    const { audio: newAudio, cleanup } = audioResult;
+      const { audio: newAudio, cleanup } = audioResult;
+      audioCleanupRef.current = cleanup;
 
-    // Store the cleanup function for later use
-    audioCleanupRef.current = cleanup;
+      setState(prev => ({
+        ...prev,
+        currentSong: song,
+        currentIndex: index !== undefined ? index : prev.currentIndex,
+        audioElement: newAudio,
+        currentTime: 0,
+        duration: 0,
+        error: null,
+        isMiniPlayerVisible: true,
+      }));
 
-
-    setState(prev => ({
-      ...prev,
-      currentSong: song,
-      currentIndex: index !== undefined ? index : prev.currentIndex,
-      audioElement: newAudio,
-      currentTime: 0,
-      duration: 0,
-      error: null,
-      // Ensure mini player stays visible when changing songs
-      isMiniPlayerVisible: true,
-    }));
-
-    // Start playback
-    newAudio.play().catch(err => {
-      // Only log errors that aren't AbortError (play interrupted by pause)
-      if (err.name !== 'AbortError') {
-        logger.error('Error playing audio', err);
-      }
-    });
+      newAudio.play().catch(err => {
+        if (err.name !== 'AbortError') {
+          logger.error('Error playing audio', err);
+        }
+      });
+    })();
   }, [createAudioElement]);
 
   const togglePlayPause = useCallback(() => {
