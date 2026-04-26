@@ -137,11 +137,11 @@ export const NativeAdsSection = (): JSX.Element => {
     // Do not depend on Edge Function transport for audio ad uploads.
     // This avoids "Failed to send a request to the Edge Function" failures in admin.
     if (mediaType === 'audio') {
-      const audioUrl = await uploadAudioToSupabaseStorage(selectedFile, session.user.id);
-      if (!audioUrl) {
-        throw new Error('Failed to upload audio ad media to storage. Please try again.');
+      const audioUpload = await uploadAudioToSupabaseStorage(selectedFile, session.user.id);
+      if (!audioUpload.url) {
+        throw new Error(audioUpload.error || 'Failed to upload audio ad media to storage. Please try again.');
       }
-      return { url: audioUrl, type: mediaType };
+      return { url: audioUpload.url, type: mediaType };
     }
 
     if (isVideoCreative) {
@@ -193,31 +193,49 @@ export const NativeAdsSection = (): JSX.Element => {
     }
   };
 
-  const uploadAudioToSupabaseStorage = async (file: File, userId: string): Promise<string | null> => {
+  const uploadAudioToSupabaseStorage = async (
+    file: File,
+    userId: string
+  ): Promise<{ url: string | null; error?: string }> => {
     try {
       const fileExt = file.name.split('.').pop() || 'mp3';
       const safeExt = fileExt.toLowerCase().replace(/[^a-z0-9]/g, '');
       const fileName = `${Date.now()}-${Math.random().toString(36).slice(2, 10)}.${safeExt}`;
       const filePath = `native-ads/${userId}/${fileName}`;
+      const candidateBuckets = ['content-media', 'thumbnails', 'covers'] as const;
+      const errors: string[] = [];
 
-      const { error: uploadError } = await supabase.storage
-        .from('content-media')
-        .upload(filePath, file, {
-          cacheControl: '2592000',
-          upsert: true,
-          contentType: file.type || 'audio/mpeg',
-        });
+      for (const bucket of candidateBuckets) {
+        const { error: uploadError } = await supabase.storage
+          .from(bucket)
+          .upload(filePath, file, {
+            cacheControl: '2592000',
+            upsert: true,
+            contentType: file.type || 'audio/mpeg',
+          });
 
-      if (uploadError) {
-        console.error('Audio fallback upload failed:', uploadError);
-        return null;
+        if (uploadError) {
+          const message = uploadError.message || 'Unknown upload error';
+          errors.push(`${bucket}: ${message}`);
+          continue;
+        }
+
+        const { data } = supabase.storage.from(bucket).getPublicUrl(filePath);
+        if (data?.publicUrl) {
+          return { url: data.publicUrl };
+        }
       }
 
-      const { data } = supabase.storage.from('content-media').getPublicUrl(filePath);
-      return data?.publicUrl || null;
+      return {
+        url: null,
+        error: `Audio upload failed across buckets (${errors.join(' | ')})`,
+      };
     } catch (error) {
       console.error('Audio fallback upload error:', error);
-      return null;
+      return {
+        url: null,
+        error: error instanceof Error ? error.message : 'Unknown audio upload error',
+      };
     }
   };
 
