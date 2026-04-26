@@ -5,6 +5,7 @@ export interface NativeAdCard {
   title: string;
   description: string | null;
   image_url: string;
+  audio_url?: string | null;
   click_url: string;
   advertiser_name: string;
   placement_type: string;
@@ -17,6 +18,10 @@ export interface NativeAdCard {
   created_at: string;
   expires_at: string | null;
 }
+
+type NativeAdVariant = 'visual' | 'audio' | 'any';
+
+const lastAudioAdPlaybackAtByPlacement = new Map<string, number>();
 
 export interface GridItem {
   id: string;
@@ -32,7 +37,8 @@ export async function getNativeAdsForPlacement(
   placementType: string,
   userCountry?: string | null,
   genreId?: string | null,
-  limit: number = 10
+  limit: number = 10,
+  adVariant: NativeAdVariant = 'visual'
 ): Promise<NativeAdCard[]> {
   try {
     let query = supabase
@@ -58,6 +64,17 @@ export async function getNativeAdsForPlacement(
 
     // Filter ads by targeting rules
     const filteredAds = data.filter((ad: NativeAdCard) => {
+      // Filter by ad asset variant when requested.
+      if (adVariant === 'audio') {
+        if (!ad.audio_url || ad.audio_url.trim().length === 0) {
+          return false;
+        }
+      } else if (adVariant === 'visual') {
+        if (!ad.image_url || ad.image_url.trim().length === 0) {
+          return false;
+        }
+      }
+
       // Check country targeting
       if (ad.target_countries && ad.target_countries.length > 0 && userCountry) {
         if (!ad.target_countries.includes(userCountry)) {
@@ -186,5 +203,101 @@ export async function getAdFrequencyConfig(): Promise<number> {
   } catch (error) {
     console.error('Error fetching ad frequency config:', error);
     return 6; // Default fallback
+  }
+}
+
+function normalizeAudioUrl(url: string | null | undefined): string | null {
+  if (!url) return null;
+  const trimmed = url.trim();
+  return trimmed.length > 0 ? trimmed : null;
+}
+
+/**
+ * Plays a native audio ad for a player placement and resolves when it ends/fails.
+ * Returns true when an audio ad was attempted and completed naturally.
+ */
+export async function playNativeAudioAdForPlacement(
+  placementType: string,
+  userCountry?: string | null,
+  genreId?: string | null,
+  options?: {
+    maxDurationMs?: number;
+    minIntervalMs?: number;
+  }
+): Promise<boolean> {
+  try {
+    const now = Date.now();
+    const minIntervalMs = options?.minIntervalMs ?? 45_000;
+    const lastPlayedAt = lastAudioAdPlaybackAtByPlacement.get(placementType) ?? 0;
+    if (now - lastPlayedAt < minIntervalMs) {
+      return false;
+    }
+
+    const ads = await getNativeAdsForPlacement(placementType, userCountry, genreId, 5, 'audio');
+    const ad = ads.find((item) => normalizeAudioUrl(item.audio_url) != null);
+    if (!ad) {
+      return false;
+    }
+
+    const audioUrl = normalizeAudioUrl(ad.audio_url);
+    if (!audioUrl) return false;
+
+    // Record impression right before playback attempt.
+    void recordNativeAdImpression(ad.id);
+
+    const adAudio = new Audio(audioUrl);
+    adAudio.preload = 'auto';
+
+    const maxDurationMs = options?.maxDurationMs ?? 35_000;
+
+    const completed = await new Promise<boolean>((resolve) => {
+      let settled = false;
+
+      const cleanup = () => {
+        adAudio.removeEventListener('ended', onEnded);
+        adAudio.removeEventListener('error', onError);
+        window.clearTimeout(timeoutId);
+      };
+
+      const settle = (value: boolean) => {
+        if (settled) return;
+        settled = true;
+        cleanup();
+        resolve(value);
+      };
+
+      const onEnded = () => {
+        settle(true);
+      };
+
+      const onError = () => {
+        settle(false);
+      };
+
+      const timeoutId = window.setTimeout(() => {
+        try {
+          adAudio.pause();
+        } catch {
+          // Ignore pause failures.
+        }
+        settle(false);
+      }, maxDurationMs);
+
+      adAudio.addEventListener('ended', onEnded, { once: true });
+      adAudio.addEventListener('error', onError, { once: true });
+
+      adAudio.play().catch(() => {
+        settle(false);
+      });
+    });
+
+    if (completed) {
+      lastAudioAdPlaybackAtByPlacement.set(placementType, Date.now());
+    }
+
+    return completed;
+  } catch (error) {
+    console.error('Error playing native audio ad:', error);
+    return false;
   }
 }
