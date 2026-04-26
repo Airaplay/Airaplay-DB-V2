@@ -127,65 +127,30 @@ async function uploadToBunnyStorage(
     }
     formData.append('skipHash', 'true');
 
-    const uploadUrl = `${import.meta.env.VITE_SUPABASE_URL}/functions/v1/upload-to-bunny`;
-
-    const xhr = new XMLHttpRequest();
-
-    return new Promise<DirectUploadResult>((resolve, reject) => {
-      if (options.onProgress) {
-        xhr.upload.addEventListener('progress', (event) => {
-          if (event.lengthComputable && options.onProgress) {
-            const percentComplete = (event.loaded / event.total) * 100;
-            options.onProgress(percentComplete);
-          }
-        });
-      }
-
-      xhr.addEventListener('load', async () => {
-        if (xhr.status >= 200 && xhr.status < 300) {
-          try {
-            const response = JSON.parse(xhr.responseText);
-
-            if (response.success) {
-              console.log('✅ Upload successful to Bunny Storage:', response.publicUrl);
-
-              if (options.onProgress) {
-                options.onProgress(100);
-              }
-
-              resolve({
-                success: true,
-                publicUrl: response.publicUrl
-              });
-            } else {
-              reject(new Error(response.error || 'Upload failed'));
-            }
-          } catch (error) {
-            reject(new Error('Failed to parse upload response'));
-          }
-        } else {
-          try {
-            const errorResponse = JSON.parse(xhr.responseText);
-            reject(new Error(errorResponse.error || `Upload failed with status: ${xhr.status}`));
-          } catch {
-            reject(new Error(`Upload failed with status: ${xhr.status}`));
-          }
-        }
-      });
-
-      xhr.addEventListener('error', () => {
-        reject(new Error('Network error during upload'));
-      });
-
-      xhr.addEventListener('abort', () => {
-        reject(new Error('Upload was aborted'));
-      });
-
-      xhr.open('POST', uploadUrl);
-      xhr.setRequestHeader('Authorization', `Bearer ${session.access_token}`);
-
-      xhr.send(formData);
+    // Prefer Supabase function invoke to avoid browser-level XHR/CORS network errors.
+    const { data, error } = await supabase.functions.invoke('upload-to-bunny', {
+      body: formData,
     });
+
+    if (error) {
+      throw new Error(error.message || 'Failed to invoke upload-to-bunny function');
+    }
+
+    const response = data as { success?: boolean; publicUrl?: string; error?: string } | null;
+    if (!response?.success || !response.publicUrl) {
+      throw new Error(response?.error || 'Upload failed');
+    }
+
+    console.log('✅ Upload successful to Bunny Storage:', response.publicUrl);
+
+    if (options.onProgress) {
+      options.onProgress(100);
+    }
+
+    return {
+      success: true,
+      publicUrl: response.publicUrl
+    };
   } catch (error) {
     console.error('❌ Bunny Storage upload failed:', error);
     return {
