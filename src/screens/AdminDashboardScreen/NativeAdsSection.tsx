@@ -140,13 +140,54 @@ export const NativeAdsSection = (): JSX.Element => {
       // Keep ad visuals in thumbnails-like public paths when image upload is routed via Supabase.
       customPath: mediaType === 'visual' && !selectedFile.type.startsWith('video/') ? 'thumbnails' : undefined,
     });
-
-    if (!uploadResult.success || !uploadResult.publicUrl) {
-      throw new Error(`Failed to upload media: ${uploadResult.error || 'Unknown upload error'}`);
+    if (uploadResult.success && uploadResult.publicUrl) {
+      return { url: uploadResult.publicUrl, type: mediaType };
     }
 
-    return { url: uploadResult.publicUrl, type: mediaType };
+    // Audio ads should still be publishable even when Bunny edge uploads fail
+    // (e.g. transient network/CORS issues on web admin). Fallback to Supabase Storage.
+    if (mediaType === 'audio') {
+      const fallbackUrl = await uploadAudioToSupabaseStorage(selectedFile, session.user.id);
+      if (fallbackUrl) {
+        return { url: fallbackUrl, type: mediaType };
+      }
+    }
+    const isVideoCreative = mediaType === 'visual' && selectedFile.type.startsWith('video/');
+    if (isVideoCreative) {
+      throw new Error(`Failed to upload video to Bunny Stream: ${uploadResult.error || 'Unknown upload error'}`);
+    }
+
+    throw new Error(`Failed to upload media: ${uploadResult.error || 'Unknown upload error'}`);
   };
+
+  const uploadAudioToSupabaseStorage = async (file: File, userId: string): Promise<string | null> => {
+    try {
+      const fileExt = file.name.split('.').pop() || 'mp3';
+      const safeExt = fileExt.toLowerCase().replace(/[^a-z0-9]/g, '');
+      const fileName = `${Date.now()}-${Math.random().toString(36).slice(2, 10)}.${safeExt}`;
+      const filePath = `native-ads/${userId}/${fileName}`;
+
+      const { error: uploadError } = await supabase.storage
+        .from('content-media')
+        .upload(filePath, file, {
+          cacheControl: '2592000',
+          upsert: true,
+          contentType: file.type || 'audio/mpeg',
+        });
+
+      if (uploadError) {
+        console.error('Audio fallback upload failed:', uploadError);
+        return null;
+      }
+
+      const { data } = supabase.storage.from('content-media').getPublicUrl(filePath);
+      return data?.publicUrl || null;
+    } catch (error) {
+      console.error('Audio fallback upload error:', error);
+      return null;
+    }
+  };
+
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();

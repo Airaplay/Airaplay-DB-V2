@@ -12,13 +12,18 @@ import { TrendingNearYouSection } from "./sections/TrendingNearYouSection";
 import { NewReleasesSection } from "./sections/NewReleasesSection";
 import { MustWatchSection } from "./sections/MustWatchSection";
 import { AIRecommendedSection } from "./sections/AIRecommendedSection";
+import { BlogSection } from "./sections/BlogSection";
 import { TrendingAlbumsSection } from "./sections/TrendingAlbumsSection";
 import { TopArtisteSection } from "./sections/TopArtisteSection";
 import { InspiredByYouSection } from "./sections/InspiredByYouSection";
 import { MixForYouSection } from "./sections/MixForYouSection";
 import { ListenerCurationsSection } from "./sections/ListenerCurationsSection";
+import { OnYourRadarSection } from "./sections/OnYourRadarSection";
 import { TracksBlowingUpSection } from "./sections/TracksBlowingUpSection";
 import { DailyMixSection } from "./sections/DailyMixSection";
+import { HomeFeaturedAdSection } from "./sections/HomeFeaturedAdSection";
+import { TopSongTodaySection } from "./sections/TopSongTodaySection";
+import { MoodsSection } from "./sections/MoodsSection/MoodsSection";
 import { PlayerPopupAdModal } from "../../components/PlayerPopupAdModal";
 
 interface HomePlayerProps {
@@ -53,6 +58,7 @@ function HomeOfflineBanner() {
 
 // Memoize sections for stable identity when navigating back to Home
 const MemoizedHeroSection = memo(HeroSection);
+const MemoizedMoodsSection = memo(MoodsSection);
 const MemoizedTrendingSection = memo(TrendingSection);
 const MemoizedDailyMixSection = memo(DailyMixSection);
 
@@ -115,12 +121,17 @@ const HomePlayerContent = memo(({ onOpenMusicPlayer }: HomePlayerProps): JSX.Ele
         <MemoizedHeroSection
           onShowNotificationsModal={() => navigate('/notifications')}
         />
+        <MemoizedMoodsSection />
         <MemoizedTrendingSection onOpenMusicPlayer={onOpenMusicPlayer} />
 
         <MemoizedDailyMixSection />
+        <HomeFeaturedAdSection placement="home_featured_banner" />
+        <TopSongTodaySection onOpenMusicPlayer={onOpenMusicPlayer} />
         <TrendingNearYouSection onOpenMusicPlayer={onOpenMusicPlayer} />
         <MixForYouSection />
         <ListenerCurationsSection />
+        <HomeFeaturedAdSection placement="home_featured_banner_secondary" />
+        <OnYourRadarSection onOpenMusicPlayer={onOpenMusicPlayer} />
         <TracksBlowingUpSection onOpenMusicPlayer={onOpenMusicPlayer} />
         <InspiredByYouSection onOpenMusicPlayer={onOpenMusicPlayer} />
         <MustWatchSection />
@@ -128,6 +139,7 @@ const HomePlayerContent = memo(({ onOpenMusicPlayer }: HomePlayerProps): JSX.Ele
         <TopArtisteSection />
         <TrendingAlbumsSection />
         <AIRecommendedSection onOpenMusicPlayer={onOpenMusicPlayer} />
+        <BlogSection />
       </div>
       <PlayerPopupAdModal
         placementType="home_popup"
