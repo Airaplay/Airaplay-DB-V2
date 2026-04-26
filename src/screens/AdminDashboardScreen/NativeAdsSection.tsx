@@ -132,13 +132,21 @@ export const NativeAdsSection = (): JSX.Element => {
     }
 
     const mediaType: UploadedMediaType = AUDIO_MIME_TYPES.includes(selectedFile.type) ? 'audio' : 'visual';
+    const isVideoCreative = mediaType === 'visual' && selectedFile.type.startsWith('video/');
+
+    if (isVideoCreative) {
+      const bunnyStreamUrl = await uploadVideoToBunnyStream(selectedFile);
+      if (!bunnyStreamUrl) {
+        throw new Error('Failed to upload video to Bunny Stream. Please try again.');
+      }
+      return { url: bunnyStreamUrl, type: mediaType };
+    }
+
     const uploadResult = await directUploadToBunny(selectedFile, {
       userId: session.user.id,
-      contentType: mediaType === 'audio'
-        ? 'audio'
-        : (selectedFile.type.startsWith('video/') ? 'video' : 'image'),
+      contentType: mediaType === 'audio' ? 'audio' : 'image',
       // Keep ad visuals in thumbnails-like public paths when image upload is routed via Supabase.
-      customPath: mediaType === 'visual' && !selectedFile.type.startsWith('video/') ? 'thumbnails' : undefined,
+      customPath: mediaType === 'visual' ? 'thumbnails' : undefined,
     });
     if (uploadResult.success && uploadResult.publicUrl) {
       return { url: uploadResult.publicUrl, type: mediaType };
@@ -152,12 +160,35 @@ export const NativeAdsSection = (): JSX.Element => {
         return { url: fallbackUrl, type: mediaType };
       }
     }
-    const isVideoCreative = mediaType === 'visual' && selectedFile.type.startsWith('video/');
-    if (isVideoCreative) {
-      throw new Error(`Failed to upload video to Bunny Stream: ${uploadResult.error || 'Unknown upload error'}`);
-    }
-
     throw new Error(`Failed to upload media: ${uploadResult.error || 'Unknown upload error'}`);
+  };
+
+  const uploadVideoToBunnyStream = async (file: File): Promise<string | null> => {
+    try {
+      const formData = new FormData();
+      formData.append('file', file);
+      formData.append('title', file.name.replace(/\.[^/.]+$/, ''));
+
+      const { data, error } = await supabase.functions.invoke('bunny-stream-upload', {
+        body: formData,
+      });
+
+      if (error) {
+        console.error('Bunny Stream upload invoke failed:', error);
+        return null;
+      }
+
+      const publicUrl = (data as { publicUrl?: string } | null)?.publicUrl;
+      if (!publicUrl || typeof publicUrl !== 'string') {
+        console.error('Bunny Stream upload returned invalid payload:', data);
+        return null;
+      }
+
+      return publicUrl;
+    } catch (error) {
+      console.error('Bunny Stream upload error:', error);
+      return null;
+    }
   };
 
   const uploadAudioToSupabaseStorage = async (file: File, userId: string): Promise<string | null> => {
