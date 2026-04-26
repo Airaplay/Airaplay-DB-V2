@@ -1,22 +1,30 @@
-import { memo, lazy, Suspense } from "react";
+import { memo, useEffect, useRef } from "react";
 import { useNavigate } from "react-router-dom";
+import { WifiOff } from "lucide-react";
 import { useAuth } from "../../contexts/AuthContext";
 import { HeroSection } from "./sections/HeroSection";
 import { TrendingSection } from "./sections/TrendingSection";
 import { useTabPersistence } from "../../hooks/useTabPersistence";
-
-// Lazy load non-critical sections for faster initial render
-const TrendingNearYouSection = lazy(() => import("./sections/TrendingNearYouSection").then(m => ({ default: m.TrendingNearYouSection })));
-const NewReleasesSection = lazy(() => import("./sections/NewReleasesSection").then(m => ({ default: m.NewReleasesSection })));
-const MustWatchSection = lazy(() => import("./sections/MustWatchSection").then(m => ({ default: m.MustWatchSection })));
-const AIRecommendedSection = lazy(() => import("./sections/AIRecommendedSection").then(m => ({ default: m.AIRecommendedSection })));
-const TrendingAlbumsSection = lazy(() => import("./sections/TrendingAlbumsSection").then(m => ({ default: m.TrendingAlbumsSection })));
-const TopArtisteSection = lazy(() => import("./sections/TopArtisteSection").then(m => ({ default: m.TopArtisteSection })));
-const InspiredByYouSection = lazy(() => import("./sections/InspiredByYouSection").then(m => ({ default: m.InspiredByYouSection })));
-const MixForYouSection = lazy(() => import("./sections/MixForYouSection").then(m => ({ default: m.MixForYouSection })));
-const ListenerCurationsSection = lazy(() => import("./sections/ListenerCurationsSection").then(m => ({ default: m.ListenerCurationsSection })));
-const TracksBlowingUpSection = lazy(() => import("./sections/TracksBlowingUpSection").then(m => ({ default: m.TracksBlowingUpSection })));
-const DailyMixSection = lazy(() => import("./sections/DailyMixSection").then(m => ({ default: m.DailyMixSection })));
+import { useNetworkQuality } from "../../hooks/useNetworkQuality";
+import { useAdPlacement } from "../../hooks/useAdPlacement";
+// Direct imports so returning to Home does not trigger Suspense skeletons (no "reload" flash)
+import { TrendingNearYouSection } from "./sections/TrendingNearYouSection";
+import { NewReleasesSection } from "./sections/NewReleasesSection";
+import { MustWatchSection } from "./sections/MustWatchSection";
+import { AIRecommendedSection } from "./sections/AIRecommendedSection";
+import { BlogSection } from "./sections/BlogSection";
+import { TrendingAlbumsSection } from "./sections/TrendingAlbumsSection";
+import { TopArtisteSection } from "./sections/TopArtisteSection";
+import { InspiredByYouSection } from "./sections/InspiredByYouSection";
+import { MixForYouSection } from "./sections/MixForYouSection";
+import { ListenerCurationsSection } from "./sections/ListenerCurationsSection";
+import { OnYourRadarSection } from "./sections/OnYourRadarSection";
+import { TracksBlowingUpSection } from "./sections/TracksBlowingUpSection";
+import { DailyMixSection } from "./sections/DailyMixSection";
+import { HomeFeaturedAdSection } from "./sections/HomeFeaturedAdSection";
+import { TopSongTodaySection } from "./sections/TopSongTodaySection";
+import { MoodsSection } from "./sections/MoodsSection/MoodsSection";
+import { PlayerPopupAdModal } from "../../components/PlayerPopupAdModal";
 
 interface HomePlayerProps {
   onOpenMusicPlayer: (song: Song, playlist?: Song[], context?: string) => void;
@@ -35,31 +43,57 @@ interface Song {
   playCount?: number;
 }
 
-// Memoize critical sections
-const MemoizedHeroSection = memo(HeroSection);
-const MemoizedTrendingSection = memo(TrendingSection);
-
-// Skeleton loader for lazy sections
-const SectionSkeleton = () => (
-  <div className="px-5 py-6 animate-pulse">
-    <div className="h-6 w-32 bg-white/10 rounded-lg mb-4"></div>
-    <div className="flex gap-3 overflow-hidden">
-      {[...Array(3)].map((_, i) => (
-        <div key={i} className="w-40 h-40 bg-white/10 rounded-2xl flex-shrink-0"></div>
-      ))}
+function HomeOfflineBanner() {
+  return (
+    <div
+      className="flex items-center justify-center gap-2 px-4 py-3 mx-4 rounded-xl bg-white/[0.06] border border-white/15 text-white/90 text-sm font-medium text-center"
+      role="status"
+      aria-live="polite"
+    >
+      <WifiOff className="w-4 h-4 shrink-0 text-amber-400/90" aria-hidden />
+      <span>You&apos;re offline</span>
     </div>
-  </div>
-);
+  );
+}
+
+// Memoize sections for stable identity when navigating back to Home
+const MemoizedHeroSection = memo(HeroSection);
+const MemoizedMoodsSection = memo(MoodsSection);
+const MemoizedTrendingSection = memo(TrendingSection);
+const MemoizedDailyMixSection = memo(DailyMixSection);
 
 const HomePlayerContent = memo(({ onOpenMusicPlayer }: HomePlayerProps): JSX.Element => {
   const navigate = useNavigate();
   const { containerRef } = useTabPersistence('home-player');
   const { isInitialized } = useAuth();
+  const { isOnline } = useNetworkQuality();
+  const { showRewarded } = useAdPlacement('HomePlayer');
+  const hasTriggeredFirstAdRef = useRef(false);
+
+  // Home: one rewarded ad at a time. Ref ensures we only trigger once per mount (avoids double fire in React Strict Mode).
+  // App-open ad is skipped when route is Home (see index.tsx), so only rewarded ads run on home.
+  useEffect(() => {
+    if (hasTriggeredFirstAdRef.current) return;
+    hasTriggeredFirstAdRef.current = true;
+    showRewarded('home_screen_rewarded', {
+      contentType: 'home',
+    }).catch(() => {});
+    const intervalId = setInterval(() => {
+      showRewarded('home_screen_rewarded', {
+        contentType: 'home',
+      }).catch(() => {});
+    }, 5 * 60 * 1000); // 5 minutes
+    return () => clearInterval(intervalId);
+  }, [showRewarded]);
 
   // Show skeleton while auth initializes
   if (!isInitialized) {
     return (
-      <div className="flex flex-col min-h-screen min-h-[100dvh] content-with-nav overflow-y-auto relative z-0 bg-gradient-to-b from-[#0a0a0a] via-[#0d0d0d] to-[#000000]">
+      <div
+        className="flex flex-col h-full min-h-0 content-with-nav overflow-y-auto relative z-0 bg-gradient-to-b from-[#0a0a0a] via-[#0d0d0d] to-[#000000] font-sans"
+        style={{ paddingLeft: 'env(safe-area-inset-left)', paddingRight: 'env(safe-area-inset-right)' }}
+      >
+        {!isOnline && <HomeOfflineBanner />}
         <div className="px-5 py-6 animate-pulse">
           <div className="h-8 w-48 bg-white/10 rounded-lg mb-6"></div>
           <div className="h-48 bg-white/10 rounded-2xl mb-6"></div>
@@ -75,58 +109,42 @@ const HomePlayerContent = memo(({ onOpenMusicPlayer }: HomePlayerProps): JSX.Ele
   }
 
   return (
-    <div ref={containerRef} className="flex flex-col min-h-screen min-h-[100dvh] content-with-nav overflow-y-auto relative z-0 animate-in fade-in duration-300 bg-gradient-to-b from-[#0a0a0a] via-[#0d0d0d] to-[#000000]">
-      {/* Critical above-the-fold content - loads immediately */}
-      <MemoizedHeroSection
-        onShowNotificationsModal={() => navigate('/notifications')}
-      />
-      <MemoizedTrendingSection onOpenMusicPlayer={onOpenMusicPlayer} />
+    <div
+      ref={containerRef}
+      className="flex flex-col h-full min-h-0 content-with-nav overflow-y-auto overflow-x-hidden relative z-0 animate-in fade-in duration-300 bg-gradient-to-b from-[#0a0a0a] via-[#0d0d0d] to-[#000000] font-sans overscroll-y-none"
+      style={{ paddingLeft: 'env(safe-area-inset-left)', paddingRight: 'env(safe-area-inset-right)' }}
+    >
+      {/* Uniform vertical rhythm: one gap between every block (sections use horizontal padding only). */}
+      <div className="flex flex-col gap-8">
+        {!isOnline && <HomeOfflineBanner />}
+        {/* Critical above-the-fold content - loads immediately */}
+        <MemoizedHeroSection
+          onShowNotificationsModal={() => navigate('/notifications')}
+        />
+        <MemoizedMoodsSection />
+        <MemoizedTrendingSection onOpenMusicPlayer={onOpenMusicPlayer} />
 
-      {/* Daily Mix AI - Personalized playlists */}
-      <Suspense fallback={<SectionSkeleton />}>
-        <DailyMixSection />
-      </Suspense>
-
-      {/* Non-critical content - lazy loaded with suspense */}
-      <Suspense fallback={<SectionSkeleton />}>
+        <MemoizedDailyMixSection />
+        <HomeFeaturedAdSection placement="home_featured_banner" />
+        <TopSongTodaySection onOpenMusicPlayer={onOpenMusicPlayer} />
         <TrendingNearYouSection onOpenMusicPlayer={onOpenMusicPlayer} />
-      </Suspense>
-
-      <Suspense fallback={<SectionSkeleton />}>
         <MixForYouSection />
-      </Suspense>
-
-      <Suspense fallback={<SectionSkeleton />}>
         <ListenerCurationsSection />
-      </Suspense>
-
-      <Suspense fallback={<SectionSkeleton />}>
+        <HomeFeaturedAdSection placement="home_featured_banner_secondary" />
+        <OnYourRadarSection onOpenMusicPlayer={onOpenMusicPlayer} />
         <TracksBlowingUpSection onOpenMusicPlayer={onOpenMusicPlayer} />
-      </Suspense>
-
-      <Suspense fallback={<SectionSkeleton />}>
         <InspiredByYouSection onOpenMusicPlayer={onOpenMusicPlayer} />
-      </Suspense>
-
-      <Suspense fallback={<SectionSkeleton />}>
         <MustWatchSection />
-      </Suspense>
-
-      <Suspense fallback={<SectionSkeleton />}>
         <NewReleasesSection onOpenMusicPlayer={onOpenMusicPlayer} />
-      </Suspense>
-
-      <Suspense fallback={<SectionSkeleton />}>
         <TopArtisteSection />
-      </Suspense>
-
-      <Suspense fallback={<SectionSkeleton />}>
         <TrendingAlbumsSection />
-      </Suspense>
-
-      <Suspense fallback={<SectionSkeleton />}>
         <AIRecommendedSection onOpenMusicPlayer={onOpenMusicPlayer} />
-      </Suspense>
+        <BlogSection />
+      </div>
+      <PlayerPopupAdModal
+        placementType="home_popup"
+        triggerKey="home-screen"
+      />
     </div>
   );
 });
