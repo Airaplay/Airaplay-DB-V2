@@ -4,6 +4,12 @@ import { supabase } from '../../lib/supabase';
 import type { NativeAdCard } from '../../lib/nativeAdService';
 import { LoadingLogo } from '../../components/LoadingLogo';
 
+const AUDIO_AD_PLACEHOLDER_IMAGE_URL = 'https://placehold.co/1200x1200/111827/FFFFFF?text=Audio+Ad';
+const AUDIO_MIME_TYPES = ['audio/mpeg', 'audio/mp3', 'audio/mp4', 'audio/x-m4a', 'audio/aac', 'audio/wav', 'audio/x-wav', 'audio/ogg', 'audio/webm'];
+const VISUAL_MIME_TYPES = ['image/jpeg', 'image/png', 'image/webp', 'image/jpg', 'video/mp4', 'video/webm', 'video/quicktime'];
+
+type UploadedMediaType = 'visual' | 'audio';
+
 export const NativeAdsSection = (): JSX.Element => {
   const [ads, setAds] = useState<NativeAdCard[]>([]);
   const [isLoading, setIsLoading] = useState(true);
@@ -14,6 +20,7 @@ export const NativeAdsSection = (): JSX.Element => {
   const [formSuccess, setFormSuccess] = useState<string | null>(null);
   const [selectedFile, setSelectedFile] = useState<File | null>(null);
   const [previewUrl, setPreviewUrl] = useState<string | null>(null);
+  const [selectedMediaType, setSelectedMediaType] = useState<UploadedMediaType>('visual');
 
   const [formData, setFormData] = useState({
     title: '',
@@ -58,9 +65,10 @@ export const NativeAdsSection = (): JSX.Element => {
     const file = e.target.files?.[0];
     if (!file) return;
 
-    const allowedTypes = ['image/jpeg', 'image/png', 'image/webp', 'image/jpg', 'video/mp4', 'video/webm', 'video/quicktime'];
-    if (!allowedTypes.includes(file.type)) {
-      setError('Please select a JPEG, PNG, WebP image or MP4/WebM video (max 20MB)');
+    const isVisual = VISUAL_MIME_TYPES.includes(file.type);
+    const isAudio = AUDIO_MIME_TYPES.includes(file.type);
+    if (!isVisual && !isAudio) {
+      setError('Please select an image/video file or an audio file (max 20MB)');
       return;
     }
 
@@ -70,6 +78,7 @@ export const NativeAdsSection = (): JSX.Element => {
     }
 
     setSelectedFile(file);
+    setSelectedMediaType(isAudio ? 'audio' : 'visual');
     setError(null);
     if (previewUrl && previewUrl.startsWith('blob:')) {
       URL.revokeObjectURL(previewUrl);
@@ -77,10 +86,9 @@ export const NativeAdsSection = (): JSX.Element => {
     setPreviewUrl(URL.createObjectURL(file));
   };
 
-  const uploadMedia = async (): Promise<string> => {
+  const uploadMedia = async (): Promise<{ url: string; type: UploadedMediaType } | null> => {
     if (!selectedFile) {
-      if (editingAd?.image_url) return editingAd.image_url;
-      throw new Error('Ad media file is required');
+      return null;
     }
 
     const { data: { session }, error: sessionError } = await supabase.auth.getSession();
@@ -105,7 +113,8 @@ export const NativeAdsSection = (): JSX.Element => {
     }
 
     const { data: { publicUrl } } = supabase.storage.from('thumbnails').getPublicUrl(path);
-    return publicUrl;
+    const mediaType: UploadedMediaType = AUDIO_MIME_TYPES.includes(selectedFile.type) ? 'audio' : 'visual';
+    return { url: publicUrl, type: mediaType };
   };
 
   const handleSubmit = async (e: React.FormEvent) => {
@@ -115,12 +124,29 @@ export const NativeAdsSection = (): JSX.Element => {
     setError(null);
 
     try {
-      const mediaUrl = await uploadMedia();
+      const uploadedMedia = await uploadMedia();
+      const isAudioAd = uploadedMedia?.type === 'audio' || (!uploadedMedia && !!editingAd?.audio_url);
+      const finalImageUrl = uploadedMedia?.type === 'visual'
+        ? uploadedMedia.url
+        : (editingAd?.image_url || AUDIO_AD_PLACEHOLDER_IMAGE_URL);
+      const finalAudioUrl = uploadedMedia?.type === 'audio'
+        ? uploadedMedia.url
+        : (isAudioAd ? (editingAd?.audio_url || null) : null);
+      const playerOnlyPlacements = new Set(['music_player', 'album_player', 'playlist_player', 'daily_mix_player']);
+
+      if (finalAudioUrl && !playerOnlyPlacements.has(formData.placement_type)) {
+        throw new Error('Audio ads can only be assigned to music player placements.');
+      }
+
+      if (!editingAd && !uploadedMedia) {
+        throw new Error('Ad media file is required');
+      }
 
       const adData = {
         title: formData.title,
         description: formData.description || null,
-        image_url: mediaUrl,
+        image_url: finalImageUrl,
+        audio_url: finalAudioUrl,
         click_url: formData.click_url,
         advertiser_name: formData.advertiser_name,
         placement_type: formData.placement_type,
@@ -182,7 +208,8 @@ export const NativeAdsSection = (): JSX.Element => {
     });
     setShowForm(true);
     setSelectedFile(null);
-    setPreviewUrl(ad.image_url);
+    setSelectedMediaType(ad.audio_url ? 'audio' : 'visual');
+    setPreviewUrl(ad.audio_url || ad.image_url);
   };
 
   const handleToggleActive = async (ad: NativeAdCard) => {
@@ -236,6 +263,7 @@ export const NativeAdsSection = (): JSX.Element => {
     setFormSuccess(null);
     setError(null);
     setSelectedFile(null);
+    setSelectedMediaType('visual');
     if (previewUrl && previewUrl.startsWith('blob:')) {
       URL.revokeObjectURL(previewUrl);
     }
@@ -297,7 +325,7 @@ export const NativeAdsSection = (): JSX.Element => {
             {editingAd ? 'Edit Native Ad' : 'Create Native Ad'}
           </h3>
           <p className="text-xs text-gray-500 mb-3">
-            Upload creative, set targeting and choose where this card appears.
+            Upload visual or audio creative, set targeting and choose where this card appears.
           </p>
 
           <div className="grid grid-cols-2 gap-4">
@@ -343,12 +371,16 @@ export const NativeAdsSection = (): JSX.Element => {
           <div className="grid grid-cols-2 gap-4">
             <div>
               <label className="block text-sm font-medium text-gray-700 mb-2">
-                Ad Media (image or 10s video) *
+                Ad Media (image/video/audio) *
               </label>
               {previewUrl ? (
                 <div className="space-y-2">
                   <div className="relative rounded-lg overflow-hidden bg-white/10 h-32">
-                    {previewUrl.match(/\.(mp4|webm|mov)$/i) ? (
+                    {selectedMediaType === 'audio' ? (
+                      <div className="w-full h-full flex items-center justify-center bg-gray-50 border border-gray-200 rounded-lg px-4">
+                        <audio src={previewUrl} controls className="w-full" />
+                      </div>
+                    ) : previewUrl.match(/\.(mp4|webm|mov)$/i) ? (
                       <video
                         src={previewUrl}
                         className="w-full h-full object-cover"
@@ -368,10 +400,11 @@ export const NativeAdsSection = (): JSX.Element => {
                       className="absolute top-2 right-2 w-7 h-7 rounded-full bg-black/60 flex items-center justify-center"
                       onClick={() => {
                         setSelectedFile(null);
+                      setSelectedMediaType(editingAd?.audio_url ? 'audio' : 'visual');
                         if (previewUrl && previewUrl.startsWith('blob:')) {
                           URL.revokeObjectURL(previewUrl);
                         }
-                        setPreviewUrl(editingAd?.image_url ?? null);
+                        setPreviewUrl(editingAd?.audio_url || editingAd?.image_url || null);
                       }}
                     >
                       <X className="w-4 h-4 text-white" />
@@ -383,7 +416,7 @@ export const NativeAdsSection = (): JSX.Element => {
                   <input
                     id="native-ad-media"
                     type="file"
-                    accept="image/jpeg,image/png,image/webp,image/jpg,video/mp4,video/webm,video/quicktime"
+                    accept="image/jpeg,image/png,image/webp,image/jpg,video/mp4,video/webm,video/quicktime,audio/mpeg,audio/mp3,audio/mp4,audio/x-m4a,audio/aac,audio/wav,audio/ogg,audio/webm"
                     className="hidden"
                     onChange={handleFileChange}
                   />
@@ -392,8 +425,8 @@ export const NativeAdsSection = (): JSX.Element => {
                     className="flex flex-col items-center justify-center w-full h-32 bg-gray-50 border border-dashed border-gray-300 rounded-lg cursor-pointer hover:border-gray-400 transition"
                   >
                     <Upload className="w-5 h-5 text-gray-600 mb-1" />
-                    <span className="text-xs text-gray-800">Upload image or 10s video</span>
-                    <span className="text-[11px] text-gray-500 mt-0.5">Max 20MB · MP4/WebM or JPG/PNG/WebP</span>
+                    <span className="text-xs text-gray-800">Upload image, video, or audio ad</span>
+                    <span className="text-[11px] text-gray-500 mt-0.5">Max 20MB · MP4/WebM/MP3/M4A/AAC/WAV or JPG/PNG/WebP</span>
                   </label>
                 </div>
               )}
@@ -534,12 +567,18 @@ export const NativeAdsSection = (): JSX.Element => {
           ads.map((ad) => (
             <div key={ad.id} className="bg-white/5 rounded-lg p-4">
               <div className="flex items-start gap-4">
-                {/* Ad Image */}
-                <img
-                  src={ad.image_url}
-                  alt={ad.title}
-                  className="w-24 h-24 object-cover rounded-lg"
-                />
+                {/* Ad Media */}
+                {ad.audio_url ? (
+                  <div className="w-24 h-24 rounded-lg bg-gray-50 border border-gray-200 flex items-center justify-center p-2">
+                    <audio src={ad.audio_url} controls className="w-full" />
+                  </div>
+                ) : (
+                  <img
+                    src={ad.image_url}
+                    alt={ad.title}
+                    className="w-24 h-24 object-cover rounded-lg"
+                  />
+                )}
 
                 {/* Ad Details */}
                 <div className="flex-1">
@@ -547,6 +586,9 @@ export const NativeAdsSection = (): JSX.Element => {
                     <div>
                       <h3 className="text-white font-semibold">{ad.title}</h3>
                       <p className="text-gray-400 text-sm">{ad.advertiser_name}</p>
+                      {ad.audio_url ? (
+                        <p className="text-xs text-blue-300 mt-1">Audio Ad (Player Placement)</p>
+                      ) : null}
                     </div>
                     <div className="flex items-center gap-2">
                       <span className={`px-2 py-1 rounded text-xs ${
