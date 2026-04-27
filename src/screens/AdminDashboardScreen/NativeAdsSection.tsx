@@ -66,12 +66,17 @@ export const NativeAdsSection = (): JSX.Element => {
     title: '',
     description: '',
     image_url: '',
+    companion_image_url: '',
+    companion_cta_text: 'Learn More',
     click_url: '',
     advertiser_name: '',
     placement_type: 'trending_near_you_grid',
     priority: 5,
     is_active: true,
     target_countries: '',
+    target_genders: '',
+    target_age_min: '',
+    target_age_max: '',
     target_genres: '',
     expires_at: ''
   });
@@ -294,6 +299,12 @@ export const NativeAdsSection = (): JSX.Element => {
         description: formData.description || null,
         image_url: finalImageUrl,
         audio_url: finalAudioUrl,
+        companion_image_url: selectedMediaType === 'audio'
+          ? (formData.companion_image_url?.trim() || finalImageUrl)
+          : null,
+        companion_cta_text: selectedMediaType === 'audio'
+          ? (formData.companion_cta_text?.trim() || 'Learn More')
+          : null,
         click_url: selectedMediaType === 'audio'
           ? (formData.click_url?.trim() || AUDIO_AD_DEFAULT_CLICK_URL)
           : formData.click_url,
@@ -304,6 +315,11 @@ export const NativeAdsSection = (): JSX.Element => {
         target_countries: formData.target_countries
           ? formData.target_countries.split(',').map(c => c.trim()).filter(Boolean)
           : null,
+        target_genders: formData.target_genders
+          ? formData.target_genders.split(',').map(g => g.trim().toLowerCase()).filter(Boolean)
+          : null,
+        target_age_min: formData.target_age_min ? Number(formData.target_age_min) : null,
+        target_age_max: formData.target_age_max ? Number(formData.target_age_max) : null,
         target_genres: formData.target_genres
           ? formData.target_genres.split(',').map(g => g.trim()).filter(Boolean)
           : null,
@@ -346,12 +362,17 @@ export const NativeAdsSection = (): JSX.Element => {
       title: ad.title,
       description: ad.description || '',
       image_url: ad.image_url,
+      companion_image_url: ad.companion_image_url || '',
+      companion_cta_text: ad.companion_cta_text || 'Learn More',
       click_url: ad.click_url,
       advertiser_name: ad.advertiser_name,
       placement_type: ad.placement_type,
       priority: ad.priority,
       is_active: ad.is_active,
       target_countries: ad.target_countries?.join(', ') || '',
+      target_genders: ad.target_genders?.join(', ') || '',
+      target_age_min: ad.target_age_min?.toString() || '',
+      target_age_max: ad.target_age_max?.toString() || '',
       target_genres: ad.target_genres?.join(', ') || '',
       expires_at: ad.expires_at ? new Date(ad.expires_at).toISOString().split('T')[0] : ''
     });
@@ -398,12 +419,17 @@ export const NativeAdsSection = (): JSX.Element => {
       title: '',
       description: '',
       image_url: '',
+      companion_image_url: '',
+      companion_cta_text: 'Learn More',
       click_url: '',
       advertiser_name: '',
       placement_type: 'trending_near_you_grid',
       priority: 5,
       is_active: true,
       target_countries: '',
+      target_genders: '',
+      target_age_min: '',
+      target_age_max: '',
       target_genres: '',
       expires_at: ''
     });
@@ -883,6 +909,40 @@ export const NativeAdsSection = (): JSX.Element => {
             )}
           </div>
 
+          {selectedMediaType === 'audio' ? (
+            <div className="grid grid-cols-2 gap-4">
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-2">
+                  Companion Image URL (640x640 recommended) *
+                </label>
+                <input
+                  type="url"
+                  value={formData.companion_image_url}
+                  onChange={(e) => setFormData({ ...formData, companion_image_url: e.target.value })}
+                  placeholder="https://.../companion-640x640.png"
+                  className="w-full px-3 py-2 bg-white border border-gray-200 rounded-lg text-sm text-gray-900 focus:outline-none focus:ring-2 focus:ring-[#309605]/70 focus:border-[#309605]"
+                  required={selectedMediaType === 'audio'}
+                />
+                <p className="mt-1 text-[11px] text-gray-500">
+                  This image is shown on screen while the audio ad is playing.
+                </p>
+              </div>
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-2">
+                  CTA Text *
+                </label>
+                <input
+                  type="text"
+                  value={formData.companion_cta_text}
+                  onChange={(e) => setFormData({ ...formData, companion_cta_text: e.target.value })}
+                  placeholder="Learn More / Buy Now / Sign up"
+                  className="w-full px-3 py-2 bg-white border border-gray-200 rounded-lg text-sm text-gray-900 focus:outline-none focus:ring-2 focus:ring-[#309605]/70 focus:border-[#309605]"
+                  required={selectedMediaType === 'audio'}
+                />
+              </div>
+            </div>
+          ) : null}
+
           <div className="grid grid-cols-3 xl:grid-cols-4 gap-4">
             <div>
               <label className="block text-sm font-medium text-gray-700 mb-2">
@@ -962,6 +1022,49 @@ export const NativeAdsSection = (): JSX.Element => {
               />
             </div>
           </div>
+
+          {selectedMediaType === 'audio' ? (
+            <div className="grid grid-cols-3 gap-4">
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-2">
+                  Target Genders
+                </label>
+                <input
+                  type="text"
+                  value={formData.target_genders}
+                  onChange={(e) => setFormData({ ...formData, target_genders: e.target.value })}
+                  placeholder="male, female"
+                  className="w-full px-3 py-2 bg-white border border-gray-200 rounded-lg text-sm text-gray-900 focus:outline-none focus:ring-2 focus:ring-[#309605]/70 focus:border-[#309605]"
+                />
+              </div>
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-2">
+                  Min Age
+                </label>
+                <input
+                  type="number"
+                  min="0"
+                  value={formData.target_age_min}
+                  onChange={(e) => setFormData({ ...formData, target_age_min: e.target.value })}
+                  placeholder="e.g. 18"
+                  className="w-full px-3 py-2 bg-white border border-gray-200 rounded-lg text-sm text-gray-900 focus:outline-none focus:ring-2 focus:ring-[#309605]/70 focus:border-[#309605]"
+                />
+              </div>
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-2">
+                  Max Age
+                </label>
+                <input
+                  type="number"
+                  min="0"
+                  value={formData.target_age_max}
+                  onChange={(e) => setFormData({ ...formData, target_age_max: e.target.value })}
+                  placeholder="e.g. 45"
+                  className="w-full px-3 py-2 bg-white border border-gray-200 rounded-lg text-sm text-gray-900 focus:outline-none focus:ring-2 focus:ring-[#309605]/70 focus:border-[#309605]"
+                />
+              </div>
+            </div>
+          ) : null}
 
           <div className="flex items-center gap-2">
             <input
