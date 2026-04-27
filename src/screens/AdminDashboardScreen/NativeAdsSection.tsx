@@ -61,6 +61,7 @@ export const NativeAdsSection = (): JSX.Element => {
   const [companionImageFile, setCompanionImageFile] = useState<File | null>(null);
   const [companionImagePreviewUrl, setCompanionImagePreviewUrl] = useState<string | null>(null);
   const [selectedMediaType, setSelectedMediaType] = useState<UploadedMediaType>('visual');
+  const [selectedPlacementTypes, setSelectedPlacementTypes] = useState<string[]>(['trending_near_you_grid']);
   const [listFilterType, setListFilterType] = useState<ListFilterType>('all');
   const [statusFilterType, setStatusFilterType] = useState<StatusFilterType>('all');
 
@@ -330,7 +331,11 @@ export const NativeAdsSection = (): JSX.Element => {
         'daily_mix_player_popup',
       ]);
 
-      if (finalAudioUrl && !playerOnlyPlacements.has(formData.placement_type)) {
+      if (selectedPlacementTypes.length === 0) {
+        throw new Error('Please select at least one placement type.');
+      }
+
+      if (finalAudioUrl && selectedPlacementTypes.some((placement) => !playerOnlyPlacements.has(placement))) {
         throw new Error('Audio ads can only be assigned to music player placements.');
       }
 
@@ -365,7 +370,8 @@ export const NativeAdsSection = (): JSX.Element => {
           ? (formData.click_url?.trim() || AUDIO_AD_DEFAULT_CLICK_URL)
           : formData.click_url,
         advertiser_name: formData.advertiser_name,
-        placement_type: formData.placement_type,
+        placement_type: selectedPlacementTypes[0],
+        placement_types: selectedPlacementTypes,
         priority: formData.priority,
         is_active: formData.is_active,
         target_countries: formData.target_countries
@@ -436,6 +442,11 @@ export const NativeAdsSection = (): JSX.Element => {
     setSelectedFile(null);
     setCompanionImageFile(null);
     setSelectedMediaType(ad.audio_url ? 'audio' : 'visual');
+    setSelectedPlacementTypes(
+      ad.placement_types && ad.placement_types.length > 0
+        ? ad.placement_types
+        : [ad.placement_type]
+    );
     setPreviewUrl(ad.audio_url || ad.image_url);
     setCompanionImagePreviewUrl(ad.companion_image_url || null);
   };
@@ -498,6 +509,7 @@ export const NativeAdsSection = (): JSX.Element => {
     setSelectedFile(null);
     setCompanionImageFile(null);
     setSelectedMediaType('visual');
+    setSelectedPlacementTypes(['trending_near_you_grid']);
     if (previewUrl && previewUrl.startsWith('blob:')) {
       URL.revokeObjectURL(previewUrl);
     }
@@ -566,7 +578,13 @@ export const NativeAdsSection = (): JSX.Element => {
 
     const status = isFinishedAd(ad) ? 'Finished' : 'Running';
     const type = isAudioAd(ad) ? 'Audio' : 'Visual';
-    const placement = PLACEMENT_LABELS[ad.placement_type] || ad.placement_type;
+    const placementValues =
+      ad.placement_types && ad.placement_types.length > 0
+        ? ad.placement_types
+        : [ad.placement_type];
+    const placement = placementValues
+      .map((item) => PLACEMENT_LABELS[item] || item)
+      .join(', ');
     const expiresLabel = ad.expires_at ? new Date(ad.expires_at).toLocaleString() : 'No expiry date';
 
     autoTable(doc, {
@@ -628,8 +646,9 @@ export const NativeAdsSection = (): JSX.Element => {
       'playlist_player_popup',
       'daily_mix_player_popup',
     ]);
-    if (mediaType === 'audio' && !validAudioPlacements.has(formData.placement_type)) {
-      setFormData((prev) => ({ ...prev, placement_type: 'music_player' }));
+    if (mediaType === 'audio') {
+      const filtered = selectedPlacementTypes.filter((placement) => validAudioPlacements.has(placement));
+      setSelectedPlacementTypes(filtered.length > 0 ? filtered : ['music_player']);
     }
   };
 
@@ -1047,20 +1066,32 @@ export const NativeAdsSection = (): JSX.Element => {
           <div className="grid grid-cols-3 xl:grid-cols-4 gap-4">
             <div>
               <label className="block text-sm font-medium text-gray-700 mb-2">
-                Placement Type *
+                Placement Types *
               </label>
-              <select
-                value={formData.placement_type}
-                onChange={(e) => setFormData({ ...formData, placement_type: e.target.value })}
-                className="w-full px-3 py-2 bg-white border border-gray-200 rounded-lg text-sm text-gray-900 focus:outline-none focus:ring-2 focus:ring-[#309605]/70 focus:border-[#309605]"
-                required
-              >
+              <div className="max-h-44 overflow-y-auto border border-gray-200 rounded-lg p-2 space-y-1 bg-white">
                 {placementOptions.map((placement) => (
-                  <option key={placement} value={placement}>
-                    {PLACEMENT_LABELS[placement]}
-                  </option>
+                  <label key={placement} className="flex items-center gap-2 px-1 py-1 rounded hover:bg-gray-50">
+                    <input
+                      type="checkbox"
+                      checked={selectedPlacementTypes.includes(placement)}
+                      onChange={(e) => {
+                        const checked = e.target.checked;
+                        setSelectedPlacementTypes((prev) => {
+                          if (checked) {
+                            if (prev.includes(placement)) return prev;
+                            return [...prev, placement];
+                          }
+                          return prev.filter((item) => item !== placement);
+                        });
+                      }}
+                    />
+                    <span className="text-sm text-gray-800">{PLACEMENT_LABELS[placement]}</span>
+                  </label>
                 ))}
-              </select>
+              </div>
+              <p className="mt-1 text-[11px] text-gray-500">
+                Selected: {selectedPlacementTypes.length}
+              </p>
               {selectedMediaType === 'audio' ? (
                 <p className="mt-1 text-[11px] text-gray-500">
                   Audio ads are limited to player placements.

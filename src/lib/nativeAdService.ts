@@ -11,6 +11,7 @@ export interface NativeAdCard {
   click_url: string;
   advertiser_name: string;
   placement_type: string;
+  placement_types?: string[] | null;
   priority: number;
   is_active: boolean;
   impression_count: number;
@@ -53,8 +54,9 @@ export async function getNativeAdsForPlacement(
     let query = supabase
       .from('native_ad_cards')
       .select('*')
-      .eq('placement_type', placementType)
       .eq('is_active', true)
+      // Support both legacy single-placement field and new multi-placement array.
+      .or(`placement_type.eq.${placementType},placement_types.cs.{${placementType}}`)
       .or('expires_at.is.null,expires_at.gt.' + new Date().toISOString())
       .order('priority', { ascending: false })
       .order('created_at', { ascending: false })
