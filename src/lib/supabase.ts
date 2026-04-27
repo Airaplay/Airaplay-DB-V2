@@ -1,4 +1,6 @@
 import { createClient } from '@supabase/supabase-js';
+import { Capacitor } from '@capacitor/core';
+import { Preferences } from '@capacitor/preferences';
 import { cache } from './cache';
 import { smartCache } from './smartCache';
 import { enhancedFetch, cacheInvalidation } from './enhancedDataFetching';
@@ -6,9 +8,6 @@ import { favoritesCache } from './favoritesCache';
 import { followsCache } from './followsCache';
 import { logger } from './logger';
 import { sanitizeForFilter } from './filterSecurity';
-
-// Session storage keys (kept here so they stay consistent across the app).
-export const SESSION_KEY_PENDING_BROWSER_OAUTH = 'airaplay:pending_browser_oauth';
 
 // Utility function to format treat amounts
 export const formatTreats = (amount: number): string => {
@@ -25,18 +24,45 @@ export const formatTreats = (amount: number): string => {
 // These must be set in .env file - no fallback credentials for security
 const supabaseUrl = import.meta.env.VITE_SUPABASE_URL;
 const supabaseAnonKey = import.meta.env.VITE_SUPABASE_ANON_KEY;
-const hasValidSupabaseConfig = Boolean(supabaseUrl && supabaseAnonKey);
 
-if (!hasValidSupabaseConfig) {
-  console.error('[Supabase] Missing required environment variables VITE_SUPABASE_URL or VITE_SUPABASE_ANON_KEY. App will not connect until .env is configured.');
+if (!supabaseUrl || !supabaseAnonKey) {
+  console.error('[Supabase] CRITICAL: Missing required environment variables VITE_SUPABASE_URL or VITE_SUPABASE_ANON_KEY');
+  throw new Error('Supabase configuration missing. Please check your .env file.');
 }
 
-// Do not crash the entire app on boot when env is missing.
-// This keeps admin/login routes renderable and surfaces recoverable UI errors instead of a blank screen.
-const safeSupabaseUrl = supabaseUrl || 'https://invalid-project.supabase.co';
-const safeSupabaseAnonKey = supabaseAnonKey || 'invalid-anon-key';
+/**
+ * Google OAuth "Authorized redirect URI" for the **Web** OAuth client whose Client ID + secret
+ * are pasted in Supabase Dashboard → Authentication → Providers → Google.
+ * (If you use a Supabase custom auth domain, copy the callback URL from that Google provider page instead.)
+ */
+export const SUPABASE_GOOGLE_OAUTH_REDIRECT_URI = `${String(supabaseUrl).replace(/\/$/, '')}/auth/v1/callback`;
 
-export const supabase = createClient(safeSupabaseUrl, safeSupabaseAnonKey, {
+/** Set in sessionStorage while browser/Custom-Tab OAuth is in flight so App can close the auth modal after `SIGNED_IN` even if the WebView remounts (Capacitor). */
+export const SESSION_KEY_PENDING_BROWSER_OAUTH = 'airaplay_pending_browser_oauth';
+
+const SB_AUTH_PREF_PREFIX = 'sb.auth.';
+
+/** Native-only: PKCE `code_verifier` + session must survive WebView reload after `airaplay://` OAuth return (localStorage is often cleared). */
+const capacitorSupabaseAuthStorage = {
+  getItem: (key: string) =>
+    Preferences.get({ key: SB_AUTH_PREF_PREFIX + key }).then(({ value }) => value ?? null),
+  setItem: (key: string, value: string) => Preferences.set({ key: SB_AUTH_PREF_PREFIX + key, value }),
+  removeItem: (key: string) => Preferences.remove({ key: SB_AUTH_PREF_PREFIX + key }),
+};
+
+function resolveAuthStorage() {
+  if (typeof window === 'undefined') return undefined;
+  try {
+    if (Capacitor.isNativePlatform()) {
+      return capacitorSupabaseAuthStorage;
+    }
+  } catch {
+    /* ignore */
+  }
+  return window.localStorage;
+}
+
+export const supabase = createClient(supabaseUrl, supabaseAnonKey, {
   auth: {
     autoRefreshToken: true,
     persistSession: true,
@@ -46,7 +72,7 @@ export const supabase = createClient(safeSupabaseUrl, safeSupabaseAnonKey, {
     // Android app links commonly drop URL fragments, breaking auth/recovery flows in-app.
     flowType: 'pkce',
     // Increase session refresh buffer to prevent premature expiration
-    storage: typeof window !== 'undefined' ? window.localStorage : undefined,
+    storage: resolveAuthStorage(),
   },
 });
 
@@ -1841,7 +1867,7 @@ export const getVideoDetails = async (videoId: string): Promise<any> => {
         )
       `)
       .eq('id', videoId)
-      .in('content_type', ['video', 'short_clip'])
+      .eq('content_type', 'video')
       .single();
 
     if (error) throw error;
@@ -2582,35 +2608,148 @@ export const getTreatTransactions = async (limit: number = 50): Promise<any[]> =
 };
 
 export const sendTreatTip = async (
-  recipientId: string, 
-  amount: number, 
+  recipientId: string,
+  amount: number,
+  securityPin: string,
   message?: string,
   contentId?: string,
   contentType?: string
-): Promise<any> => {
+): Promise<{ id: string }> => {
   try {
     const { data: { user }, error: authError } = await supabase.auth.getUser();
     if (authError || !user) throw new Error('User not authenticated');
 
-    const { data, error } = await supabase
-      .from('treat_tips')
-      .insert({
-        sender_id: user.id,
-        recipient_id: recipientId,
-        amount: amount,
-        message: message || null,
-        content_id: contentId || null,
-        content_type: contentType || null
-      })
-      .select()
-      .single();
+    const { data, error } = await supabase.rpc('send_treat_tip_with_security_pin', {
+      p_recipient_id: recipientId,
+      p_amount: amount,
+      p_message: message ?? null,
+      p_content_id: contentId ?? null,
+      p_content_type: contentType ?? null,
+      p_security_pin: securityPin,
+    });
 
     if (error) throw error;
 
-    return data;
+    const row = data as { success?: boolean; id?: string; error?: string } | null;
+    if (!row?.success) {
+      throw new Error(row?.error || 'Failed to send tip');
+    }
+    if (!row.id) throw new Error('Tip did not return an id');
+
+    return { id: row.id };
   } catch (error) {
     console.error('Error sending treat tip:', error);
     throw error;
+  }
+};
+
+function parseSecurityPinRpcResult(data: unknown): { success?: boolean; error?: string } | null {
+  if (data == null) return null;
+  if (typeof data === 'string') {
+    try {
+      return JSON.parse(data) as { success?: boolean; error?: string };
+    } catch {
+      return null;
+    }
+  }
+  if (typeof data === 'object') return data as { success?: boolean; error?: string };
+  return null;
+}
+
+export const setSecurityPinRpc = async (pin: string, confirm: string): Promise<void> => {
+  const { data, error } = await supabase.rpc('set_security_pin', {
+    p_pin: pin,
+    p_confirm: confirm,
+  });
+  if (error) {
+    const msg = [error.message, (error as { details?: string }).details].filter(Boolean).join(' — ');
+    throw new Error(msg || 'Could not set Security PIN');
+  }
+  const row = parseSecurityPinRpcResult(data);
+  if (!row?.success) {
+    throw new Error(row?.error || 'Could not set Security PIN');
+  }
+};
+
+/** Requires `change_security_pin` RPC — apply CHANGE_SECURITY_PIN_RPC.sql in Supabase. */
+export const changeSecurityPinRpc = async (
+  currentPin: string,
+  newPin: string,
+  confirm: string
+): Promise<void> => {
+  const { data, error } = await supabase.rpc('change_security_pin', {
+    p_current_pin: currentPin,
+    p_new_pin: newPin,
+    p_confirm: confirm,
+  });
+  if (error) {
+    const msg = [error.message, (error as { details?: string }).details].filter(Boolean).join(' — ');
+    throw new Error(msg || 'Could not change Security PIN');
+  }
+  const row = parseSecurityPinRpcResult(data);
+  if (!row?.success) {
+    throw new Error(row?.error || 'Could not change Security PIN');
+  }
+};
+
+export const fetchHasSecurityPin = async (): Promise<boolean> => {
+  const { data, error } = await supabase.rpc('has_security_pin');
+  if (error) throw error;
+  return Boolean(data);
+};
+
+export interface MyAgeInfo {
+  date_of_birth: string | null;
+  age_years: number | null;
+  is_adult: boolean;
+  is_signup_eligible: boolean;
+}
+
+export const getMyAgeInfo = async (): Promise<MyAgeInfo> => {
+  const { data, error } = await supabase.rpc('get_my_age_info');
+  if (error) throw error;
+  const row = (data || {}) as Partial<MyAgeInfo>;
+  return {
+    date_of_birth: typeof row.date_of_birth === 'string' ? row.date_of_birth : null,
+    age_years: typeof row.age_years === 'number' ? row.age_years : null,
+    is_adult: row.is_adult === true,
+    is_signup_eligible: row.is_signup_eligible === true,
+  };
+};
+
+export const requestAccountDeletion = async (reason?: string): Promise<{
+  success: boolean;
+  already_pending: boolean;
+  request_id: string | null;
+}> => {
+  const { data, error } = await supabase.rpc('request_account_deletion', {
+    p_reason: reason?.trim() || null,
+  });
+  if (error) throw error;
+  const row = (data || {}) as {
+    success?: boolean;
+    already_pending?: boolean;
+    request_id?: string | null;
+  };
+  return {
+    success: row.success === true,
+    already_pending: row.already_pending === true,
+    request_id: typeof row.request_id === 'string' ? row.request_id : null,
+  };
+};
+
+/** Server-side PIN check (uses `verify_security_pin_for_session` RPC). Apply VERIFY_SECURITY_PIN_SESSION_RPC.sql if missing. */
+export const verifySecurityPinForSession = async (pin: string): Promise<void> => {
+  const { data, error } = await supabase.rpc('verify_security_pin_for_session', {
+    p_pin: pin,
+  });
+  if (error) {
+    const msg = [error.message, (error as { details?: string }).details].filter(Boolean).join(' — ');
+    throw new Error(msg || 'Could not verify Security PIN');
+  }
+  const row = parseSecurityPinRpcResult(data);
+  if (!row?.success) {
+    throw new Error(row?.error || 'Incorrect Security PIN');
   }
 };
 
@@ -2801,14 +2940,24 @@ export const adminDeletePayoutSetting = async (settingId: string): Promise<any> 
   }
 };
 
-export const withdrawUserFunds = async (amount: number, methodId?: string): Promise<any> => {
+export const withdrawUserFunds = async (
+  amount: number,
+  methodId: string | undefined,
+  securityPin: string
+): Promise<any> => {
   try {
     const { data, error } = await supabase.rpc('withdraw_user_funds', {
       withdrawal_amount: amount,
-      method_id: methodId || null
+      method_id: methodId || null,
+      security_pin: securityPin,
     });
 
     if (error) throw error;
+
+    const row = data as { success?: boolean; error?: string } | null;
+    if (row && row.success === false) {
+      throw new Error(row.error || 'Withdrawal failed');
+    }
 
     return data;
   } catch (error) {
