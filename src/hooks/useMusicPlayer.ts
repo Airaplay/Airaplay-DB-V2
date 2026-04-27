@@ -97,6 +97,9 @@ function resolveNativePlayerPlacementFromContext(context: string | undefined): s
   return 'music_player';
 }
 
+// Play one audio ad after every N completed songs per player context.
+const AUDIO_AD_INSERTION_INTERVAL_SONGS = 5;
+
 export const useMusicPlayer = () => {
   const { session } = useAuth();
 
@@ -136,6 +139,7 @@ export const useMusicPlayer = () => {
   const hasTrackedSongCompleteRef = useRef(false);
   const currentSongGenreRef = useRef<string | null>(null);
   const currentSongArtistPlaysRef = useRef<number | null>(null);
+  const completedSongsSinceLastAudioAdRef = useRef<Record<string, number>>({});
 
   // Keep stateRef in sync with state
   useEffect(() => {
@@ -372,17 +376,26 @@ export const useMusicPlayer = () => {
       }
 
       // Attempt to play native audio ads between songs for player placements.
+      // Audio ad insertion is cadence-based (every 5 completed songs), not display-style.
       // Any ad failure must not block autoplay progression.
       try {
         const placementType = resolveNativePlayerPlacementFromContext(currentState.playlistContext);
+        const currentCount = completedSongsSinceLastAudioAdRef.current[placementType] ?? 0;
+        const nextCount = currentCount + 1;
+        completedSongsSinceLastAudioAdRef.current[placementType] = nextCount;
+
+        if (nextCount >= AUDIO_AD_INSERTION_INTERVAL_SONGS) {
         const userCountry =
           typeof session?.user?.user_metadata?.country === 'string'
             ? session.user.user_metadata.country
             : null;
-        await playNativeAudioAdForPlacement(placementType, userCountry, undefined, {
-          maxDurationMs: 35_000,
-          minIntervalMs: 45_000,
-        });
+          await playNativeAudioAdForPlacement(placementType, userCountry, undefined, {
+            maxDurationMs: 35_000,
+            // Song-count cadence drives insertion timing.
+            minIntervalMs: 0,
+          });
+          completedSongsSinceLastAudioAdRef.current[placementType] = 0;
+        }
       } catch (adError) {
         logger.warn('Audio ad between songs failed; continuing playback', adError);
       }
