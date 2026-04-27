@@ -201,7 +201,9 @@ export const NativeAdsSection = (): JSX.Element => {
       const fileExt = file.name.split('.').pop() || 'mp3';
       const safeExt = fileExt.toLowerCase().replace(/[^a-z0-9]/g, '');
       const fileName = `${Date.now()}-${Math.random().toString(36).slice(2, 10)}.${safeExt}`;
-      const filePath = `native-ads/${userId}/${fileName}`;
+      // Keep userId as first folder segment to satisfy storage RLS policies
+      // that scope uploads to auth.uid() prefix.
+      const filePath = `${userId}/native-ads/${fileName}`;
       const candidateBuckets = ['content-media', 'thumbnails', 'covers'] as const;
       const errors: string[] = [];
 
