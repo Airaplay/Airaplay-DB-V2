@@ -4,6 +4,8 @@ import { supabase } from '../../lib/supabase';
 import type { NativeAdCard } from '../../lib/nativeAdService';
 import { LoadingLogo } from '../../components/LoadingLogo';
 import { directUploadToBunny } from '../../lib/directBunnyUpload';
+import { jsPDF } from 'jspdf';
+import autoTable from 'jspdf-autotable';
 
 const AUDIO_AD_PLACEHOLDER_IMAGE_URL = 'https://placehold.co/1200x1200/111827/FFFFFF?text=Audio+Ad';
 const AUDIO_MIME_TYPES = ['audio/mpeg', 'audio/mp3', 'audio/mp4', 'audio/x-m4a', 'audio/aac', 'audio/wav', 'audio/x-wav', 'audio/ogg', 'audio/webm'];
@@ -11,6 +13,7 @@ const VISUAL_MIME_TYPES = ['image/jpeg', 'image/png', 'image/webp', 'image/jpg',
 
 type UploadedMediaType = 'visual' | 'audio';
 type ListFilterType = 'all' | 'visual' | 'audio';
+type StatusFilterType = 'all' | 'running' | 'finished';
 
 const PLAYER_ONLY_PLACEMENTS = ['music_player', 'album_player', 'playlist_player', 'daily_mix_player'] as const;
 const ALL_PLACEMENTS = [
@@ -56,6 +59,7 @@ export const NativeAdsSection = (): JSX.Element => {
   const [previewUrl, setPreviewUrl] = useState<string | null>(null);
   const [selectedMediaType, setSelectedMediaType] = useState<UploadedMediaType>('visual');
   const [listFilterType, setListFilterType] = useState<ListFilterType>('all');
+  const [statusFilterType, setStatusFilterType] = useState<StatusFilterType>('all');
 
   const [formData, setFormData] = useState({
     title: '',
@@ -418,12 +422,69 @@ export const NativeAdsSection = (): JSX.Element => {
   };
 
   const isAudioAd = (ad: NativeAdCard): boolean => !!ad.audio_url && ad.audio_url.trim().length > 0;
+  const isFinishedAd = (ad: NativeAdCard): boolean => {
+    const isExpired = !!ad.expires_at && new Date(ad.expires_at).getTime() <= Date.now();
+    return isExpired || !ad.is_active;
+  };
 
   const filteredAds = ads.filter((ad) => {
-    if (listFilterType === 'all') return true;
-    if (listFilterType === 'audio') return isAudioAd(ad);
-    return !isAudioAd(ad);
+    const passesType =
+      listFilterType === 'all' ? true : listFilterType === 'audio' ? isAudioAd(ad) : !isAudioAd(ad);
+    const passesStatus =
+      statusFilterType === 'all'
+        ? true
+        : statusFilterType === 'finished'
+          ? isFinishedAd(ad)
+          : !isFinishedAd(ad);
+    return passesType && passesStatus;
   });
+
+  const downloadPdfReport = () => {
+    const now = new Date();
+    const runningCount = ads.filter((ad) => !isFinishedAd(ad)).length;
+    const finishedCount = ads.filter((ad) => isFinishedAd(ad)).length;
+    const visualCount = ads.filter((ad) => !isAudioAd(ad)).length;
+    const audioCount = ads.filter((ad) => isAudioAd(ad)).length;
+
+    const doc = new jsPDF({ unit: 'pt', format: 'a4' });
+    doc.setFontSize(16);
+    doc.text('Native Ads Report', 40, 42);
+    doc.setFontSize(10);
+    doc.text(`Generated: ${now.toLocaleString()}`, 40, 60);
+    doc.text(`Total Ads: ${ads.length} | Running: ${runningCount} | Finished: ${finishedCount} | Visual: ${visualCount} | Audio: ${audioCount}`, 40, 76);
+
+    const rows = ads.map((ad) => {
+      const status = isFinishedAd(ad) ? 'Finished' : 'Running';
+      return [
+        ad.title,
+        ad.advertiser_name,
+        isAudioAd(ad) ? 'Audio' : 'Visual',
+        PLACEMENT_LABELS[ad.placement_type] || ad.placement_type,
+        status,
+        String(ad.impression_count ?? 0),
+        String(ad.click_count ?? 0),
+        `${calculateCTR(ad)}%`,
+      ];
+    });
+
+    autoTable(doc, {
+      startY: 92,
+      head: [['Title', 'Advertiser', 'Type', 'Placement', 'Status', 'Impressions', 'Clicks', 'CTR']],
+      body: rows,
+      styles: { fontSize: 8, cellPadding: 4 },
+      headStyles: { fillColor: [48, 150, 5] },
+      theme: 'grid',
+      margin: { left: 24, right: 24 },
+      didDrawPage: (data) => {
+        const pageNumber = doc.getNumberOfPages();
+        doc.setFontSize(8);
+        doc.text(`Page ${pageNumber}`, data.settings.margin.left, doc.internal.pageSize.getHeight() - 14);
+      },
+    });
+
+    const filename = `native-ads-report-${now.toISOString().slice(0, 10)}.pdf`;
+    doc.save(filename);
+  };
 
   const placementOptions =
     selectedMediaType === 'audio'
@@ -487,7 +548,8 @@ export const NativeAdsSection = (): JSX.Element => {
       )}
 
       {/* List Filter */}
-      <div className="flex items-center gap-2">
+      <div className="flex flex-wrap items-center justify-between gap-3">
+        <div className="flex flex-wrap items-center gap-2">
         <button
           type="button"
           onClick={() => setListFilterType('all')}
@@ -520,6 +582,47 @@ export const NativeAdsSection = (): JSX.Element => {
           }`}
         >
           Audio Ads
+        </button>
+          <button
+            type="button"
+            onClick={() => setStatusFilterType('all')}
+            className={`px-3 py-1.5 rounded-lg text-xs font-medium transition-colors ${
+              statusFilterType === 'all'
+                ? 'bg-[#0f172a] text-white'
+                : 'bg-gray-100 text-gray-700 hover:bg-gray-200'
+            }`}
+          >
+            All Status
+          </button>
+          <button
+            type="button"
+            onClick={() => setStatusFilterType('running')}
+            className={`px-3 py-1.5 rounded-lg text-xs font-medium transition-colors ${
+              statusFilterType === 'running'
+                ? 'bg-emerald-600 text-white'
+                : 'bg-gray-100 text-gray-700 hover:bg-gray-200'
+            }`}
+          >
+            Running
+          </button>
+          <button
+            type="button"
+            onClick={() => setStatusFilterType('finished')}
+            className={`px-3 py-1.5 rounded-lg text-xs font-medium transition-colors ${
+              statusFilterType === 'finished'
+                ? 'bg-amber-600 text-white'
+                : 'bg-gray-100 text-gray-700 hover:bg-gray-200'
+            }`}
+          >
+            Finished
+          </button>
+        </div>
+        <button
+          type="button"
+          onClick={downloadPdfReport}
+          className="px-3 py-1.5 rounded-lg text-xs font-medium bg-blue-600 hover:bg-blue-700 text-white transition-colors"
+        >
+          Download PDF Report
         </button>
       </div>
 
@@ -864,12 +967,26 @@ export const NativeAdsSection = (): JSX.Element => {
                       ) : (
                         <p className="text-xs text-gray-500 mt-1">Visual Ad</p>
                       )}
+                      {ad.expires_at ? (
+                        <p className="text-[11px] text-gray-500 mt-1">
+                          Expires: {new Date(ad.expires_at).toLocaleDateString()}
+                        </p>
+                      ) : (
+                        <p className="text-[11px] text-gray-500 mt-1">No expiry date</p>
+                      )}
                     </div>
                     <div className="flex items-center gap-2">
                       <span className={`px-2 py-1 rounded text-xs ${
                         ad.is_active ? 'bg-green-500/20 text-green-400' : 'bg-gray-500/20 text-gray-400'
                       }`}>
                         {ad.is_active ? 'Active' : 'Inactive'}
+                      </span>
+                      <span className={`px-2 py-1 rounded text-xs ${
+                        isFinishedAd(ad)
+                          ? 'bg-amber-500/20 text-amber-400'
+                          : 'bg-emerald-500/20 text-emerald-400'
+                      }`}>
+                        {isFinishedAd(ad) ? 'Finished' : 'Running'}
                       </span>
                       <span className="px-2 py-1 rounded text-xs bg-blue-500/20 text-blue-400">
                         Priority: {ad.priority}
