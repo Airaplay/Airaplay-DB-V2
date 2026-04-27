@@ -58,6 +58,8 @@ export const NativeAdsSection = (): JSX.Element => {
   const [formSuccess, setFormSuccess] = useState<string | null>(null);
   const [selectedFile, setSelectedFile] = useState<File | null>(null);
   const [previewUrl, setPreviewUrl] = useState<string | null>(null);
+  const [companionImageFile, setCompanionImageFile] = useState<File | null>(null);
+  const [companionImagePreviewUrl, setCompanionImagePreviewUrl] = useState<string | null>(null);
   const [selectedMediaType, setSelectedMediaType] = useState<UploadedMediaType>('visual');
   const [listFilterType, setListFilterType] = useState<ListFilterType>('all');
   const [statusFilterType, setStatusFilterType] = useState<StatusFilterType>('all');
@@ -186,6 +188,48 @@ export const NativeAdsSection = (): JSX.Element => {
     throw new Error(`Failed to upload media: ${uploadResult.error || 'Unknown upload error'}`);
   };
 
+  const uploadCompanionImage = async (file: File): Promise<string> => {
+    const { data: { session }, error: sessionError } = await supabase.auth.getSession();
+    if (sessionError || !session) {
+      throw new Error('Authentication session expired. Please sign in again.');
+    }
+
+    const uploadResult = await directUploadToBunny(file, {
+      userId: session.user.id,
+      contentType: 'image',
+      customPath: 'thumbnails',
+    });
+
+    if (!uploadResult.success || !uploadResult.publicUrl) {
+      throw new Error(uploadResult.error || 'Failed to upload companion image.');
+    }
+
+    return uploadResult.publicUrl;
+  };
+
+  const handleCompanionImageChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+
+    const allowedImageTypes = ['image/jpeg', 'image/png', 'image/webp', 'image/jpg'];
+    if (!allowedImageTypes.includes(file.type)) {
+      setError('Companion image must be JPG, PNG, or WEBP.');
+      return;
+    }
+    if (file.size > 20 * 1024 * 1024) {
+      setError('Companion image size must be less than 20MB.');
+      return;
+    }
+
+    setCompanionImageFile(file);
+    setError(null);
+
+    if (companionImagePreviewUrl && companionImagePreviewUrl.startsWith('blob:')) {
+      URL.revokeObjectURL(companionImagePreviewUrl);
+    }
+    setCompanionImagePreviewUrl(URL.createObjectURL(file));
+  };
+
   const uploadVideoToBunnyStream = async (file: File): Promise<string | null> => {
     try {
       const formData = new FormData();
@@ -294,13 +338,25 @@ export const NativeAdsSection = (): JSX.Element => {
         throw new Error('Ad media file is required');
       }
 
+      let companionImageUrl = selectedMediaType === 'audio'
+        ? (editingAd?.companion_image_url || formData.companion_image_url || '')
+        : '';
+
+      if (selectedMediaType === 'audio' && companionImageFile) {
+        companionImageUrl = await uploadCompanionImage(companionImageFile);
+      }
+
+      if (selectedMediaType === 'audio' && !companionImageUrl) {
+        throw new Error('Companion image is required for audio ads.');
+      }
+
       const adData = {
         title: formData.title,
         description: formData.description || null,
         image_url: finalImageUrl,
         audio_url: finalAudioUrl,
         companion_image_url: selectedMediaType === 'audio'
-          ? (formData.companion_image_url?.trim() || finalImageUrl)
+          ? companionImageUrl
           : null,
         companion_cta_text: selectedMediaType === 'audio'
           ? (formData.companion_cta_text?.trim() || 'Learn More')
@@ -378,8 +434,10 @@ export const NativeAdsSection = (): JSX.Element => {
     });
     setShowForm(true);
     setSelectedFile(null);
+    setCompanionImageFile(null);
     setSelectedMediaType(ad.audio_url ? 'audio' : 'visual');
     setPreviewUrl(ad.audio_url || ad.image_url);
+    setCompanionImagePreviewUrl(ad.companion_image_url || null);
   };
 
   const handleToggleActive = async (ad: NativeAdCard) => {
@@ -438,11 +496,16 @@ export const NativeAdsSection = (): JSX.Element => {
     setFormSuccess(null);
     setError(null);
     setSelectedFile(null);
+    setCompanionImageFile(null);
     setSelectedMediaType('visual');
     if (previewUrl && previewUrl.startsWith('blob:')) {
       URL.revokeObjectURL(previewUrl);
     }
+    if (companionImagePreviewUrl && companionImagePreviewUrl.startsWith('blob:')) {
+      URL.revokeObjectURL(companionImagePreviewUrl);
+    }
     setPreviewUrl(null);
+    setCompanionImagePreviewUrl(null);
   };
 
   const calculateCTR = (ad: NativeAdCard): string => {
@@ -913,16 +976,54 @@ export const NativeAdsSection = (): JSX.Element => {
             <div className="grid grid-cols-2 gap-4">
               <div>
                 <label className="block text-sm font-medium text-gray-700 mb-2">
-                  Companion Image URL (640x640 recommended) *
+                  Companion Image (640x640 recommended) *
                 </label>
-                <input
-                  type="url"
-                  value={formData.companion_image_url}
-                  onChange={(e) => setFormData({ ...formData, companion_image_url: e.target.value })}
-                  placeholder="https://.../companion-640x640.png"
-                  className="w-full px-3 py-2 bg-white border border-gray-200 rounded-lg text-sm text-gray-900 focus:outline-none focus:ring-2 focus:ring-[#309605]/70 focus:border-[#309605]"
-                  required={selectedMediaType === 'audio'}
-                />
+                <div className="space-y-2">
+                  {companionImagePreviewUrl ? (
+                    <div className="relative rounded-lg overflow-hidden bg-white/10 h-32 border border-gray-200">
+                      <img
+                        src={companionImagePreviewUrl}
+                        alt="Companion preview"
+                        className="w-full h-full object-cover"
+                      />
+                      <button
+                        type="button"
+                        className="absolute top-2 right-2 w-7 h-7 rounded-full bg-black/60 flex items-center justify-center"
+                        onClick={() => {
+                          setCompanionImageFile(null);
+                          if (companionImagePreviewUrl && companionImagePreviewUrl.startsWith('blob:')) {
+                            URL.revokeObjectURL(companionImagePreviewUrl);
+                          }
+                          setCompanionImagePreviewUrl(editingAd?.companion_image_url || null);
+                        }}
+                      >
+                        <X className="w-4 h-4 text-white" />
+                      </button>
+                    </div>
+                  ) : (
+                    <div className="relative">
+                      <input
+                        id="native-ad-companion-image"
+                        type="file"
+                        accept="image/jpeg,image/png,image/webp,image/jpg"
+                        className="hidden"
+                        onChange={handleCompanionImageChange}
+                      />
+                      <label
+                        htmlFor="native-ad-companion-image"
+                        className="flex flex-col items-center justify-center w-full h-32 bg-gray-50 border border-dashed border-gray-300 rounded-lg cursor-pointer hover:border-gray-400 transition"
+                      >
+                        <Upload className="w-5 h-5 text-gray-600 mb-1" />
+                        <span className="text-xs text-gray-800">
+                          Upload companion image
+                        </span>
+                        <span className="text-[11px] text-gray-500 mt-0.5">
+                          JPG / PNG / WEBP · Max 20MB
+                        </span>
+                      </label>
+                    </div>
+                  )}
+                </div>
                 <p className="mt-1 text-[11px] text-gray-500">
                   This image is shown on screen while the audio ad is playing.
                 </p>
