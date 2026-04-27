@@ -102,8 +102,20 @@ export const NativeAdsSection = (): JSX.Element => {
 
     const isVisual = VISUAL_MIME_TYPES.includes(file.type);
     const isAudio = AUDIO_MIME_TYPES.includes(file.type);
+    const expectedMimeTypes = selectedMediaType === 'audio' ? AUDIO_MIME_TYPES : VISUAL_MIME_TYPES;
+    const isTypeAllowed = expectedMimeTypes.includes(file.type);
+
     if (!isVisual && !isAudio) {
-      setError('Please select an image/video file or an audio file (max 20MB)');
+      setError('Unsupported file type. Please select a valid ad media file (max 20MB).');
+      return;
+    }
+
+    if (!isTypeAllowed) {
+      setError(
+        selectedMediaType === 'audio'
+          ? 'Audio ad selected: please upload an audio file (MP3, M4A, AAC, WAV, OGG, WEBM).'
+          : 'Visual ad selected: please upload an image/video file (JPG, PNG, WEBP, MP4, WEBM, MOV).'
+      );
       return;
     }
 
@@ -113,7 +125,6 @@ export const NativeAdsSection = (): JSX.Element => {
     }
 
     setSelectedFile(file);
-    setSelectedMediaType(isAudio ? 'audio' : 'visual');
     setError(null);
     if (previewUrl && previewUrl.startsWith('blob:')) {
       URL.revokeObjectURL(previewUrl);
@@ -522,6 +533,59 @@ export const NativeAdsSection = (): JSX.Element => {
             Upload visual or audio creative, set targeting and choose where this card appears.
           </p>
 
+          <div>
+            <label className="block text-sm font-medium text-gray-700 mb-2">
+              Ad Type *
+            </label>
+            <div className="flex items-center gap-2">
+              <button
+                type="button"
+                onClick={() => {
+                  setSelectedMediaType('visual');
+                  ensureValidPlacementForMediaType('visual');
+                  if (previewUrl && previewUrl.startsWith('blob:')) {
+                    URL.revokeObjectURL(previewUrl);
+                  }
+                  setPreviewUrl(editingAd?.image_url || null);
+                  setSelectedFile(null);
+                  setError(null);
+                }}
+                className={`px-3 py-1.5 rounded-lg text-xs font-medium transition-colors ${
+                  selectedMediaType === 'visual'
+                    ? 'bg-[#309605] text-white'
+                    : 'bg-gray-100 text-gray-700 hover:bg-gray-200'
+                }`}
+              >
+                Visual Ad
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  setSelectedMediaType('audio');
+                  ensureValidPlacementForMediaType('audio');
+                  if (previewUrl && previewUrl.startsWith('blob:')) {
+                    URL.revokeObjectURL(previewUrl);
+                  }
+                  setPreviewUrl(editingAd?.audio_url || null);
+                  setSelectedFile(null);
+                  setError(null);
+                }}
+                className={`px-3 py-1.5 rounded-lg text-xs font-medium transition-colors ${
+                  selectedMediaType === 'audio'
+                    ? 'bg-[#309605] text-white'
+                    : 'bg-gray-100 text-gray-700 hover:bg-gray-200'
+                }`}
+              >
+                Audio Ad
+              </button>
+            </div>
+            <p className="mt-1 text-[11px] text-gray-500">
+              {selectedMediaType === 'audio'
+                ? 'Audio ads require an audio file and player placement.'
+                : 'Visual ads require an image or video creative.'}
+            </p>
+          </div>
+
           <div className="grid grid-cols-2 gap-4">
             <div>
               <label className="block text-sm font-medium text-gray-700 mb-2">
@@ -565,7 +629,7 @@ export const NativeAdsSection = (): JSX.Element => {
           <div className="grid grid-cols-2 gap-4">
             <div>
               <label className="block text-sm font-medium text-gray-700 mb-2">
-                Ad Media (image/video/audio) *
+                {selectedMediaType === 'audio' ? 'Audio File *' : 'Visual Media (image/video) *'}
               </label>
               {previewUrl ? (
                 <div className="space-y-2">
@@ -612,14 +676,14 @@ export const NativeAdsSection = (): JSX.Element => {
                   <input
                     id="native-ad-media"
                     type="file"
-                    accept="image/jpeg,image/png,image/webp,image/jpg,video/mp4,video/webm,video/quicktime,audio/mpeg,audio/mp3,audio/mp4,audio/x-m4a,audio/aac,audio/wav,audio/ogg,audio/webm"
+                    accept={
+                      selectedMediaType === 'audio'
+                        ? 'audio/mpeg,audio/mp3,audio/mp4,audio/x-m4a,audio/aac,audio/wav,audio/ogg,audio/webm'
+                        : 'image/jpeg,image/png,image/webp,image/jpg,video/mp4,video/webm,video/quicktime'
+                    }
                     className="hidden"
                     onChange={(e) => {
                       handleFileChange(e);
-                      const file = e.target.files?.[0];
-                      if (!file) return;
-                      const nextType: UploadedMediaType = AUDIO_MIME_TYPES.includes(file.type) ? 'audio' : 'visual';
-                      ensureValidPlacementForMediaType(nextType);
                     }}
                   />
                   <label
@@ -627,8 +691,14 @@ export const NativeAdsSection = (): JSX.Element => {
                     className="flex flex-col items-center justify-center w-full h-32 bg-gray-50 border border-dashed border-gray-300 rounded-lg cursor-pointer hover:border-gray-400 transition"
                   >
                     <Upload className="w-5 h-5 text-gray-600 mb-1" />
-                    <span className="text-xs text-gray-800">Upload image, video, or audio ad</span>
-                    <span className="text-[11px] text-gray-500 mt-0.5">Max 20MB · MP4/WebM/MP3/M4A/AAC/WAV or JPG/PNG/WebP</span>
+                    <span className="text-xs text-gray-800">
+                      {selectedMediaType === 'audio' ? 'Upload audio ad file' : 'Upload image or video ad'}
+                    </span>
+                    <span className="text-[11px] text-gray-500 mt-0.5">
+                      {selectedMediaType === 'audio'
+                        ? 'Max 20MB · MP3/M4A/AAC/WAV/OGG/WEBM'
+                        : 'Max 20MB · JPG/PNG/WEBP/MP4/WEBM/MOV'}
+                    </span>
                   </label>
                 </div>
               )}
