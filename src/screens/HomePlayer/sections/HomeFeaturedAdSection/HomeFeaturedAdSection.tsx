@@ -18,7 +18,7 @@ export const HomeFeaturedAdSection = ({ placement }: HomeFeaturedAdSectionProps)
     let mounted = true;
 
     (async () => {
-      const ads = await getNativeAdsForPlacement(placement, null, null, 1, "visual");
+      const ads = await getNativeAdsForPlacement(placement, null, null, undefined, 1, "visual");
       if (!mounted) return;
       const firstAd = ads[0] ?? null;
       setAd(firstAd);

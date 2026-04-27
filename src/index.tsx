@@ -1,16 +1,17 @@
 import React, { StrictMode, useState, useEffect, useRef } from "react";
 import { createRoot } from "react-dom/client";
-import { BrowserRouter, Routes, Route, Navigate, useLocation, useNavigate } from "react-router-dom";
+import { BrowserRouter, Routes, Route, useLocation, useNavigate } from "react-router-dom";
 import { lazy, Suspense } from "react";
 import "./index.css";
 import "./lib/preloader";
-import { supabase, refreshSessionIfNeeded } from "./lib/supabase";
+import { supabase, refreshSessionIfNeeded, SESSION_KEY_PENDING_BROWSER_OAUTH } from "./lib/supabase";
 import { logger } from "./lib/logger";
 import { admobService } from "./lib/admobService";
 import { appInitializer } from "./lib/appInitializer";
 import { shouldSkipBackgroundPrefetch } from "./lib/networkAwareConfig";
 import { applyStatusBarTheme, subscribeStatusBarToSystemTheme } from "./lib/statusBarTheme";
 import { App as CapacitorApp } from "@capacitor/app";
+import { Browser } from "@capacitor/browser";
 import { Capacitor } from "@capacitor/core";
 import { BUILD_TARGET } from "./lib/buildTarget";
 import { HomePlayer } from "./screens/HomePlayer";
@@ -18,6 +19,7 @@ import { NavigationBarSection } from "./screens/HomePlayer/sections/NavigationBa
 import { AuthModal } from "./components/AuthModal";
 import { MusicPlayerScreen } from "./screens/MusicPlayerScreen";
 import { MiniMusicPlayer } from "./components/MiniMusicPlayer";
+import { AudioAdCompanionOverlay } from "./components/AudioAdCompanionOverlay";
 import { MusicPlayerProvider, useMusicPlayer } from "./contexts/MusicPlayerContext";
 import { AlertProvider } from "./contexts/AlertContext";
 import { HomeScreenDataProvider } from "./contexts/HomeScreenDataContext";
@@ -29,6 +31,12 @@ import UploadProgressModal from "./components/UploadProgressModal";
 import { VideoPlayerErrorBoundary } from "./components/VideoPlayerErrorBoundary";
 import { ScreenErrorBoundary } from "./components/ScreenErrorBoundary";
 import { useAdPlacement } from "./hooks/useAdPlacement";
+import {
+  DEFAULT_BOTTOM_BANNER_AD_UNIT_ID,
+  MAIN_APP_BOTTOM_BANNER_PLACEMENT,
+  resolveRewardedInterstitialAdUnitId,
+} from "./lib/adPlacementConstants";
+import { getBannerPreloadLeadTimeMs, getNextMainTabBannerAutoRefreshDelayMs } from "./lib/bannerRefreshConstants";
 import { BannerAdPosition } from "@capacitor-community/admob";
 
 // Lazy load screens for better performance
@@ -157,6 +165,7 @@ function App() {
     error: playerError,
     playlistContext,
     albumId,
+    playlistId,
     playSong,
     togglePlayPause,
     hideFullPlayer,
@@ -169,12 +178,11 @@ function App() {
   
   const location = useLocation();
   const navigate = useNavigate();
+  const { postLoginTransitionActive, startPostLoginTransition } = useAuth();
   const { showBanner, hideBanner, removeBanner, showInterstitial } = useAdPlacement('App');
   const adCallbacksRef = useRef({ showBanner, hideBanner, removeBanner });
   adCallbacksRef.current = { showBanner, hideBanner, removeBanner };
 
-  // Refresh main banner periodically so new ad creatives load more frequently (AdMob allows 30–60s).
-  const BANNER_REFRESH_INTERVAL_MS = 45 * 1000;
   const hasTriggeredAppOpenAdRef = useRef(false);
   const has15MinAdTriggeredRef = useRef(false);
 
@@ -345,8 +353,30 @@ function App() {
         if (url.includes('/auth/callback') || url.includes('/reset-password')) {
           try {
             const parsed = new URL(url);
-            if (!authAllowedOrigins.length || !authAllowedOrigins.includes(parsed.origin)) {
+            const isCustomAppScheme = parsed.protocol === 'airaplay:';
+            if (!isCustomAppScheme && (!authAllowedOrigins.length || !authAllowedOrigins.includes(parsed.origin))) {
               logger.warn('Deep link auth URL rejected: origin not allowed', { origin: parsed.origin });
+              navigate('/', { replace: true });
+              return;
+            }
+            if (isCustomAppScheme) {
+              // Close in-app browser from Google OAuth (iOS; Android Custom Tab usually dismisses with the intent).
+              void Browser.close().catch(() => {});
+              // Convert custom deep link to an internal route so the SPA callback screen can process it.
+              const internalPath =
+                parsed.host === 'localhost'
+                  ? `${parsed.pathname}${parsed.search}${parsed.hash}`
+                  : `/${parsed.host}${parsed.pathname}${parsed.search}${parsed.hash}`;
+              navigate(internalPath, { replace: true });
+              return;
+            }
+            // Recovery must run in the system browser (e.g. https://www.airaplay.com/reset-password), not the WebView.
+            if (
+              url.includes('/reset-password') &&
+              (parsed.protocol === 'https:' || parsed.protocol === 'http:') &&
+              authAllowedOrigins.includes(parsed.origin)
+            ) {
+              void Browser.open({ url: parsed.href });
               navigate('/', { replace: true });
               return;
             }
@@ -515,14 +545,17 @@ function App() {
                               isPlaylistPlayerRoute ||
                               isDailyMixPlayerRoute;
 
-  // Determine when to hide mini player
-  // Hide when: video player is active OR treat modals are open OR genre modal is open OR any full player screen is active OR financial screens OR artist registration OR single upload form
+  // Determine when to hide mini player.
+  // Full-screen player routes (album/playlist/daily-mix/music full player) must never show the mini player
+  // so the dedicated player UI + bottom banner can occupy the full experience without overlap or flicker.
   const shouldHideMiniPlayer = isVideoRoute ||
                               isTreatModalVisible ||
                               isGenreModalVisible ||
                               isFullPlayerVisible ||
                               isAlbumPlayerActive ||
                               isPlaylistPlayerActive ||
+                              isAlbumPlayerRoute ||
+                              isPlaylistPlayerRoute ||
                               isDailyMixPlayerRoute ||
                               isTreatAnalyticsModalVisible ||
                               isTreatTransactionsModalVisible ||
@@ -566,20 +599,34 @@ function App() {
   const bannerDisabledByEnv = import.meta.env.VITE_DISABLE_BOTTOM_BANNER === 'true' || import.meta.env.VITE_DISABLE_BOTTOM_BANNER === '1';
 
   // Banner never requires music to be playing.
-  // Full-screen players (music/album/playlist/video/daily-mix) use their own screen-level banners that show on mount.
+  // Full-screen players use distinct placement keys (see usePlayerBottomBanner + adPlacementConstants).
+  // admobService resolves a separate native ad unit from main_app_bottom_banner (or VITE_ADMOB_PLAYER_BANNER_ID).
+  const shouldUseMainBannerOnThisRoute = (navVisible && !fullScreenPlayerOpen) || isVideoRoute;
   const showMainBanner =
     !bannerDisabledByEnv &&
     !isOnMessageThread &&
     !isBlogRoute &&
     !isAdminRoute &&
-    !isVideoRoute &&
-    (navVisible && !fullScreenPlayerOpen);
+    shouldUseMainBannerOnThisRoute;
 
   // Approximate heights (in dp) for bottom navigation and mini player,
   // used to position the native banner so it sits directly above them.
   // Kept tight to avoid visible gap between banner and mini player.
-  const NAV_HEIGHT_DP = 64;
+  const NAV_HEIGHT_DP = 72;
   const MINI_PLAYER_HEIGHT_DP = 70;
+  const lastMainBannerMarginRef = useRef<number | null>(null);
+  const prevFullScreenPlayerOpenRef = useRef<boolean>(fullScreenPlayerOpen);
+  const shouldForceMainBannerShowRef = useRef<boolean>(false);
+  const repositionTimerRef = useRef<number | null>(null);
+
+  // Track full-screen player transitions so we can force a main-banner re-show after closing
+  // the full player, even if computed margin is unchanged.
+  useEffect(() => {
+    if (prevFullScreenPlayerOpenRef.current && !fullScreenPlayerOpen) {
+      shouldForceMainBannerShowRef.current = true;
+    }
+    prevFullScreenPlayerOpenRef.current = fullScreenPlayerOpen;
+  }, [fullScreenPlayerOpen]);
 
   // Only hide when we navigate TO a no-banner screen; never hide in cleanup so banner continues
   // when moving between two banner screens (e.g. Explore → Library).
@@ -604,7 +651,10 @@ function App() {
       }
       if (!showMainBanner) {
         if (!isFullScreenPlayerRoute) {
-          hb?.();
+          // Don't hide a modal-specific banner ad while treat/tipping modals are mounted.
+          if (!document.body.classList.contains('modal-ad-banner-active')) {
+            hb?.();
+          }
         }
         return;
       }
@@ -614,7 +664,16 @@ function App() {
         navVisible
           ? NAV_HEIGHT_DP + (isMiniPlayerVisible && !shouldHideMiniPlayer ? MINI_PLAYER_HEIGHT_DP : 0)
           : 0;
-      sb?.('main_app_bottom_banner', BannerAdPosition.BOTTOM_CENTER, undefined, margin)?.catch(() => {});
+      const didExitFullScreenPlayer = shouldForceMainBannerShowRef.current;
+      // Avoid duplicate calls (helps reduce visible "blink" on some devices).
+      if (lastMainBannerMarginRef.current === margin && !didExitFullScreenPlayer) return;
+      lastMainBannerMarginRef.current = margin;
+      shouldForceMainBannerShowRef.current = false;
+      if (didExitFullScreenPlayer) {
+        void admobService.repositionActiveBottomBanner(margin);
+      } else {
+        sb?.(MAIN_APP_BOTTOM_BANNER_PLACEMENT, BannerAdPosition.BOTTOM_CENTER, undefined, margin)?.catch(() => {});
+      }
     } catch (_) {
       // Banner logic must never crash the app
     }
@@ -629,41 +688,94 @@ function App() {
     if (bannerDisabledByEnv) return;
     if (!navVisible || !showMainBanner) return;
     if (fullScreenPlayerOpen) return;
-
-    const { showBanner: sb, hideBanner: hb } = adCallbacksRef.current;
     try {
       const margin =
         navVisible
           ? NAV_HEIGHT_DP + (miniActiveForBanner ? MINI_PLAYER_HEIGHT_DP : 0)
           : 0;
-      // Hide and immediately re-show so the native layer picks up the new margin safely.
-      hb?.();
-      sb?.('main_app_bottom_banner', BannerAdPosition.BOTTOM_CENTER, undefined, margin)?.catch(() => {});
+      // If the margin didn't change, don't touch the banner.
+      if (lastMainBannerMarginRef.current === margin) return;
+
+      // Debounce repositioning to avoid flicker when multiple UI flags change
+      // during a single navigation/animation frame (e.g. route change + mini player open).
+      if (repositionTimerRef.current != null) {
+        window.clearTimeout(repositionTimerRef.current);
+        repositionTimerRef.current = null;
+      }
+      repositionTimerRef.current = window.setTimeout(() => {
+        repositionTimerRef.current = null;
+        lastMainBannerMarginRef.current = margin;
+        // Reposition currently active banner so transition keeps the same visible ad surface.
+        void admobService.repositionActiveBottomBanner(margin);
+      }, 120);
     } catch (_) {
       // Reposition logic must never crash the app
     }
   }, [miniActiveForBanner, navVisible, showMainBanner, fullScreenPlayerOpen, bannerDisabledByEnv]);
 
-  // Refresh the main banner on an interval so new ad creatives display more frequently.
+  // Transition watchdog: on Home/main-tab with mini player visible, re-assert banner position
+  // for a short window so late full-player cleanup cannot leave the ad surface blank.
   useEffect(() => {
-    if (!showMainBanner || fullScreenPlayerOpen || bannerDisabledByEnv) return;
+    if (bannerDisabledByEnv) return;
+    if (!showMainBanner || !navVisible || fullScreenPlayerOpen) return;
+    if (!miniActiveForBanner) return;
 
-    const { showBanner: sb, removeBanner: rb } = adCallbacksRef.current;
-    const refresh = () => {
-      const margin =
-        navVisible
-          ? NAV_HEIGHT_DP + (miniActiveForBanner ? MINI_PLAYER_HEIGHT_DP : 0)
-          : 0;
-      rb?.();
-      // Small delay so native layer tears down before we re-show (avoids overlap).
-      setTimeout(() => {
-        sb?.('main_app_bottom_banner', BannerAdPosition.BOTTOM_CENTER, undefined, margin)?.catch(() => {});
-      }, 150);
+    const margin = NAV_HEIGHT_DP + MINI_PLAYER_HEIGHT_DP;
+    const t1 = window.setTimeout(() => {
+      void admobService.repositionActiveBottomBanner(margin);
+    }, 600);
+    const t2 = window.setTimeout(() => {
+      void admobService.repositionActiveBottomBanner(margin);
+    }, 1800);
+    const t3 = window.setTimeout(() => {
+      void admobService.repositionActiveBottomBanner(margin);
+    }, 3600);
+
+    return () => {
+      window.clearTimeout(t1);
+      window.clearTimeout(t2);
+      window.clearTimeout(t3);
+    };
+  }, [
+    miniActiveForBanner,
+    navVisible,
+    showMainBanner,
+    fullScreenPlayerOpen,
+    bannerDisabledByEnv,
+    location.pathname,
+  ]);
+
+  // Refresh the main tab banner faster + more persistently on Home.
+  useEffect(() => {
+    const shouldPauseMainRefresh = fullScreenPlayerOpen && !isVideoRoute;
+    if (!showMainBanner || shouldPauseMainRefresh || bannerDisabledByEnv) return;
+
+    // Faster + more persistent refresh for the Home experience:
+    // - preloadNextBannerRefresh pre-resolves params before the swap.
+    // - refreshBannerAd keeps `bannerShouldBeVisible` true and refreshes with no explicit remove step.
+    let refreshTimer: number | null = null;
+    let preloadTimer: number | null = null;
+    const scheduleNext = (): void => {
+      const refreshDelayMs = getNextMainTabBannerAutoRefreshDelayMs();
+      const preloadLeadMs = getBannerPreloadLeadTimeMs(refreshDelayMs);
+      preloadTimer = window.setTimeout(() => {
+        preloadTimer = null;
+        void admobService.preloadNextBannerRefresh().catch(() => {});
+      }, Math.max(500, refreshDelayMs - preloadLeadMs));
+      refreshTimer = window.setTimeout(() => {
+        refreshTimer = null;
+        void admobService.refreshBannerAd().catch(() => {});
+        scheduleNext();
+      }, refreshDelayMs);
     };
 
-    const interval = setInterval(refresh, BANNER_REFRESH_INTERVAL_MS);
-    return () => clearInterval(interval);
-  }, [showMainBanner, fullScreenPlayerOpen, bannerDisabledByEnv, navVisible, miniActiveForBanner]);
+    scheduleNext();
+
+    return () => {
+      if (refreshTimer != null) window.clearTimeout(refreshTimer);
+      if (preloadTimer != null) window.clearTimeout(preloadTimer);
+    };
+  }, [showMainBanner, fullScreenPlayerOpen, isVideoRoute, bannerDisabledByEnv, navVisible, miniActiveForBanner]);
 
   // Listen for auth state changes globally to clear any cached data
   // IMPORTANT: Callback must NOT be async to avoid deadlocks (per Supabase docs)
@@ -686,6 +798,17 @@ function App() {
           }
         });
       } else if (event === 'SIGNED_IN' && session) {
+        // Capacitor OAuth often remounts the WebView: AuthModal's ref is lost but the global modal flag stays true.
+        try {
+          if (sessionStorage.getItem(SESSION_KEY_PENDING_BROWSER_OAUTH) === '1') {
+            sessionStorage.removeItem(SESSION_KEY_PENDING_BROWSER_OAUTH);
+            startPostLoginTransition();
+            setShowGlobalAuthModal(false);
+          }
+        } catch {
+          /* ignore */
+        }
+
         import('./lib/prefetchOnLogin').then(({ prefetchOnLogin: prefetch }) => prefetch(session.user.id));
 
         if (session.user.app_metadata?.provider === 'google') {
@@ -715,7 +838,7 @@ function App() {
     });
 
     return () => subscription.unsubscribe();
-  }, [hideMiniPlayer, hideFullPlayer]);
+  }, [hideMiniPlayer, hideFullPlayer, startPostLoginTransition]);
 
   const handleGlobalAuthSuccess = () => {
     setShowGlobalAuthModal(false);
@@ -750,18 +873,39 @@ function App() {
 
   return (
     <div className="bg-gradient-to-b from-[#0a0a0a] via-[#0d0d0d] to-[#111111] flex flex-row justify-center w-full min-h-screen min-h-[100dvh]">
-      {BUILD_TARGET === 'web' ? (
-        // Web desktop target: hide the main app and show admin only.
+      {postLoginTransitionActive && (
+        <div
+          className="fixed inset-0 z-[10050] bg-gradient-to-b from-[#0a0a0a] via-[#0d0d0d] to-[#111111] flex items-center justify-center"
+          aria-hidden
+        >
+          <div className="relative">
+            <img
+              src="/official_airaplay_logo.png"
+              alt=""
+              className="w-32 h-32 object-contain drop-shadow-2xl"
+              style={{ animation: 'breathe 3s ease-in-out infinite' }}
+            />
+            <div className="absolute inset-0 -z-10 blur-3xl opacity-30 bg-white scale-75 animate-pulse" />
+          </div>
+          <style>{`
+            @keyframes breathe {
+              0%, 100% { transform: scale(1); opacity: 1; }
+              50% { transform: scale(1.05); opacity: 0.9; }
+            }
+          `}</style>
+        </div>
+      )}
+      {isAdminRoute && BUILD_TARGET === 'web' ? (
+        // Admin routes - Only available in web build
         <Suspense fallback={<ScreenLoader />}>
           <Routes>
+            <Route path="/admin" element={AdminDashboardScreen ? <AdminDashboardScreen /> : <div>Admin not available</div>} />
             <Route path="/admin/login" element={AdminLoginScreen ? <AdminLoginScreen /> : <div>Admin not available</div>} />
-            <Route path="/admin/*" element={AdminDashboardScreen ? <AdminDashboardScreen /> : <div>Admin not available</div>} />
-            <Route path="*" element={<Navigate to="/admin/login" replace />} />
           </Routes>
         </Suspense>
       ) : (
-        // App routes - constrained width; fixed height so inner content can scroll
-        <div className="flex flex-col bg-transparent w-full max-w-[390px] relative h-[100dvh] min-h-0">
+        // App routes - responsive shell width; fixed height so inner content can scroll
+        <div className="app-shell flex flex-col bg-transparent relative h-[100dvh] min-h-0">
           <div className="flex-1 flex flex-col min-h-0 overflow-hidden">
             <Suspense fallback={<ScreenLoader />}>
               <Routes>
@@ -803,6 +947,7 @@ function App() {
               <Route path="/upload/single" element={<SingleUploadScreen />} />
               <Route path="/upload/album" element={<AlbumUploadScreen />} />
               <Route path="/song/:songId" element={<SongScreen />} />
+              <Route path="/mood-discovery/:moodId" element={<MoodDiscoveryScreen />} />
               <Route path="/mood-discovery" element={<MoodDiscoveryScreen />} />
               <Route path="/genre/:genreId" element={<GenreSongsScreen />} />
               <Route path="/collaborate" element={<CollaborateScreen />} />
@@ -814,10 +959,13 @@ function App() {
       )}
 
       {/* Bottom Navigation Bar - Positioned outside container for edge-to-edge rendering */}
-      {BUILD_TARGET !== 'web' && !shouldHideNavigation && !isAdminRoute && <NavigationBarSection />}
+      {!shouldHideNavigation && !isAdminRoute && <NavigationBarSection />}
+
+      {/* Audio ad companion display (during audio ad breaks) */}
+      {BUILD_TARGET !== "web" && !isAdminRoute && <AudioAdCompanionOverlay />}
 
       {/* Mini Music Player */}
-      {BUILD_TARGET !== 'web' && (() => {
+      {(() => {
         const shouldShow = isMiniPlayerVisible && currentSong && !shouldHideMiniPlayer;
 
         return shouldShow ? (
@@ -829,6 +977,7 @@ function App() {
             duration={duration}
             error={playerError}
             albumId={albumId}
+            playlistId={playlistId}
             playlistContext={playlistContext}
             onTogglePlayPause={togglePlayPause}
             onExpand={() => {
@@ -841,7 +990,7 @@ function App() {
         ) : null;
       })()}
 
-      {BUILD_TARGET !== 'web' && isFullPlayerVisible && currentSong && (
+      {isFullPlayerVisible && currentSong && (
         <MusicPlayerScreen
           song={currentSong}
           playlist={playlist}
@@ -877,6 +1026,34 @@ function AppWithRouter() {
   const [showSplash, setShowSplash] = useState(true);
   const [isAppReady, setIsAppReady] = useState(false);
 
+  // Block copy/cut flows globally so app content cannot be copied.
+  useEffect(() => {
+    const stopEvent = (event: Event) => {
+      event.preventDefault();
+    };
+
+    const stopCopyShortcut = (event: KeyboardEvent) => {
+      const key = event.key.toLowerCase();
+      if ((event.ctrlKey || event.metaKey) && (key === "c" || key === "x")) {
+        event.preventDefault();
+      }
+    };
+
+    document.addEventListener("copy", stopEvent);
+    document.addEventListener("cut", stopEvent);
+    document.addEventListener("contextmenu", stopEvent);
+    document.addEventListener("selectstart", stopEvent);
+    document.addEventListener("keydown", stopCopyShortcut);
+
+    return () => {
+      document.removeEventListener("copy", stopEvent);
+      document.removeEventListener("cut", stopEvent);
+      document.removeEventListener("contextmenu", stopEvent);
+      document.removeEventListener("selectstart", stopEvent);
+      document.removeEventListener("keydown", stopCopyShortcut);
+    };
+  }, []);
+
   useEffect(() => {
     const initializeApp = async () => {
       try {
@@ -891,9 +1068,20 @@ function AppWithRouter() {
       const initAdMob = () => {
         try {
           admobService.initialize({
-            bannerAdId: import.meta.env.MODE === 'development' ? 'ca-app-pub-3940256099942544/6300978111' : import.meta.env.VITE_ADMOB_BANNER_ID,
+            bannerAdId:
+              import.meta.env.MODE === 'development'
+                ? 'ca-app-pub-3940256099942544/6300978111'
+                : import.meta.env.VITE_ADMOB_BANNER_ID || DEFAULT_BOTTOM_BANNER_AD_UNIT_ID,
+            /** Full-screen players: optional `VITE_ADMOB_PLAYER_BANNER_ID`; defaults to main bottom unit. */
+            playerBannerAdId:
+              import.meta.env.MODE === 'development'
+                ? 'ca-app-pub-3940256099942544/6300978111'
+                : import.meta.env.VITE_ADMOB_PLAYER_BANNER_ID ||
+                  import.meta.env.VITE_ADMOB_BANNER_ID ||
+                  DEFAULT_BOTTOM_BANNER_AD_UNIT_ID,
             interstitialAdId: import.meta.env.MODE === 'development' ? 'ca-app-pub-3940256099942544/1033173712' : import.meta.env.VITE_ADMOB_INTERSTITIAL_ID,
             rewardedAdId: import.meta.env.MODE === 'development' ? 'ca-app-pub-3940256099942544/5224354917' : import.meta.env.VITE_ADMOB_REWARDED_ID,
+            rewardedInterstitialAdId: resolveRewardedInterstitialAdUnitId(),
             testMode: import.meta.env.MODE === 'development',
           }).catch((err) => {
             logger.error('App: AdMob initialization error', err);
@@ -1035,4 +1223,3 @@ if (!appElement) {
     `;
   }
 }
- 

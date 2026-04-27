@@ -385,15 +385,32 @@ export const useMusicPlayer = () => {
         completedSongsSinceLastAudioAdRef.current[placementType] = nextCount;
 
         if (nextCount >= AUDIO_AD_INSERTION_INTERVAL_SONGS) {
-        const userCountry =
-          typeof session?.user?.user_metadata?.country === 'string'
-            ? session.user.user_metadata.country
-            : null;
-          await playNativeAudioAdForPlacement(placementType, userCountry, undefined, {
-            maxDurationMs: 35_000,
-            // Song-count cadence drives insertion timing.
-            minIntervalMs: 0,
-          });
+          const userCountry =
+            typeof session?.user?.user_metadata?.country === 'string'
+              ? session.user.user_metadata.country
+              : null;
+
+          const userAge =
+            typeof session?.user?.user_metadata?.age === 'number'
+              ? session.user.user_metadata.age
+              : null;
+
+          const userGender =
+            typeof session?.user?.user_metadata?.gender === 'string'
+              ? session.user.user_metadata.gender
+              : null;
+
+          await playNativeAudioAdForPlacement(
+            placementType,
+            userCountry,
+            undefined,
+            { userAge, userGender },
+            {
+              maxDurationMs: 30_000,
+              // Song-count cadence drives insertion timing.
+              minIntervalMs: 0,
+            }
+          );
           completedSongsSinceLastAudioAdRef.current[placementType] = 0;
         }
       } catch (adError) {

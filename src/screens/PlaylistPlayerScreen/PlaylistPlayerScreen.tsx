@@ -276,7 +276,7 @@ const PlaylistPlayer: React.FC<PlaylistPlayerScreenProps & {
     let mounted = true;
     (async () => {
       try {
-        const ads = await getNativeAdsForPlacement('playlist_player', null, null, 1);
+        const ads = await getNativeAdsForPlacement('playlist_player', null, null, undefined, 1);
         if (!mounted) return;
         setInlineAd(ads[0] ?? null);
       } catch {

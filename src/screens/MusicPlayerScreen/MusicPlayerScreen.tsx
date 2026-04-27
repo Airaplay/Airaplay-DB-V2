@@ -238,7 +238,7 @@ export const MusicPlayerScreen: React.FC<MusicPlayerScreenProps> = ({
     let mounted = true;
     (async () => {
       try {
-        const ads = await getNativeAdsForPlacement('music_player', userCountry ?? null, null, 1);
+        const ads = await getNativeAdsForPlacement('music_player', userCountry ?? null, null, undefined, 1);
         if (!mounted) return;
         setInlineAd(ads[0] ?? null);
       } catch {

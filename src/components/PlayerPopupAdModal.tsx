@@ -23,7 +23,7 @@ export const PlayerPopupAdModal = ({ placementType, triggerKey, userCountry }: P
 
     (async () => {
       try {
-        const ads = await getNativeAdsForPlacement(placementType, safeCountry, null, 1, 'visual');
+        const ads = await getNativeAdsForPlacement(placementType, safeCountry, null, undefined, 1, 'visual');
         if (!mounted) return;
         const nextAd = ads[0] ?? null;
         if (!nextAd) return;
