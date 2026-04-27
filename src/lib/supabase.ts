@@ -7,6 +7,9 @@ import { followsCache } from './followsCache';
 import { logger } from './logger';
 import { sanitizeForFilter } from './filterSecurity';
 
+// Session storage keys (kept here so they stay consistent across the app).
+export const SESSION_KEY_PENDING_BROWSER_OAUTH = 'airaplay:pending_browser_oauth';
+
 // Utility function to format treat amounts
 export const formatTreats = (amount: number): string => {
   if (amount >= 1000000) {
