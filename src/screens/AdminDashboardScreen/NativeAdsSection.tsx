@@ -465,103 +465,61 @@ export const NativeAdsSection = (): JSX.Element => {
     doc.text(subtitle, 68, 54);
   };
 
-  const downloadPdfReport = async () => {
+  const downloadPdfReportForAd = async (ad: NativeAdCard) => {
     const now = new Date();
-    const runningCount = ads.filter((ad) => !isFinishedAd(ad)).length;
-    const finishedCount = ads.filter((ad) => isFinishedAd(ad)).length;
-    const visualCount = ads.filter((ad) => !isAudioAd(ad)).length;
-    const audioCount = ads.filter((ad) => isAudioAd(ad)).length;
     const logoDataUrl = await loadLogoDataUrl();
 
     const doc = new jsPDF({ unit: 'pt', format: 'a4' });
-    drawReportHeader(doc, logoDataUrl, 'Native Ads Report', `Generated: ${now.toLocaleString()}`);
-    doc.setFontSize(10);
-    doc.text(
-      `Total Ads: ${ads.length} | Running: ${runningCount} | Finished: ${finishedCount} | Visual: ${visualCount} | Audio: ${audioCount}`,
-      24,
-      72
-    );
+    drawReportHeader(doc, logoDataUrl, 'Native Ad Report', `${ad.title} • Generated: ${now.toLocaleString()}`);
 
-    const rows = ads.map((ad) => {
-      const status = isFinishedAd(ad) ? 'Finished' : 'Running';
-      return [
-        ad.title,
-        ad.advertiser_name,
-        isAudioAd(ad) ? 'Audio' : 'Visual',
-        PLACEMENT_LABELS[ad.placement_type] || ad.placement_type,
-        status,
-        String(ad.impression_count ?? 0),
-        String(ad.click_count ?? 0),
-        `${calculateCTR(ad)}%`,
-      ];
-    });
+    const status = isFinishedAd(ad) ? 'Finished' : 'Running';
+    const type = isAudioAd(ad) ? 'Audio' : 'Visual';
+    const placement = PLACEMENT_LABELS[ad.placement_type] || ad.placement_type;
+    const expiresLabel = ad.expires_at ? new Date(ad.expires_at).toLocaleString() : 'No expiry date';
 
     autoTable(doc, {
       startY: 84,
-      head: [['Title', 'Advertiser', 'Type', 'Placement', 'Status', 'Impressions', 'Clicks', 'CTR']],
-      body: rows,
-      styles: { fontSize: 8, cellPadding: 4 },
+      head: [['Field', 'Value']],
+      body: [
+        ['Ad ID', ad.id],
+        ['Title', ad.title],
+        ['Advertiser', ad.advertiser_name],
+        ['Type', type],
+        ['Placement', placement],
+        ['Status', status],
+        ['Priority', String(ad.priority)],
+        ['Impressions', String(ad.impression_count ?? 0)],
+        ['Clicks', String(ad.click_count ?? 0)],
+        ['CTR', `${calculateCTR(ad)}%`],
+        ['Active Flag', ad.is_active ? 'Active' : 'Inactive'],
+        ['Expires At', expiresLabel],
+        ['Target Countries', ad.target_countries?.join(', ') || 'All'],
+        ['Target Genres', ad.target_genres?.join(', ') || 'All'],
+        ['Click URL', ad.click_url],
+      ],
+      styles: { fontSize: 9, cellPadding: 5 },
       headStyles: { fillColor: [48, 150, 5] },
       theme: 'grid',
       margin: { left: 24, right: 24 },
       didDrawPage: (data) => {
-        drawReportHeader(doc, logoDataUrl, 'Native Ads Report', `Generated: ${now.toLocaleString()}`);
+        drawReportHeader(doc, logoDataUrl, 'Native Ad Report', `${ad.title} • Generated: ${now.toLocaleString()}`);
         const pageNumber = doc.getNumberOfPages();
         doc.setFontSize(8);
         doc.text(`Page ${pageNumber}`, data.settings.margin.left, doc.internal.pageSize.getHeight() - 14);
       },
     });
 
-    // Add a per-ad breakdown section (one page per ad) so each ad has its own report block.
-    ads.forEach((ad, index) => {
-      doc.addPage();
-      drawReportHeader(doc, logoDataUrl, `Ad Report ${index + 1}/${ads.length}`, ad.title);
+    if (ad.description) {
+      const finalY = (doc as any).lastAutoTable?.finalY || 360;
+      doc.setFontSize(10);
+      doc.text('Description:', 24, finalY + 24);
+      doc.setFontSize(9);
+      const wrapped = doc.splitTextToSize(ad.description, 540);
+      doc.text(wrapped, 24, finalY + 40);
+    }
 
-      const status = isFinishedAd(ad) ? 'Finished' : 'Running';
-      const type = isAudioAd(ad) ? 'Audio' : 'Visual';
-      const placement = PLACEMENT_LABELS[ad.placement_type] || ad.placement_type;
-      const expiresLabel = ad.expires_at ? new Date(ad.expires_at).toLocaleString() : 'No expiry date';
-
-      autoTable(doc, {
-        startY: 84,
-        head: [['Field', 'Value']],
-        body: [
-          ['Ad ID', ad.id],
-          ['Title', ad.title],
-          ['Advertiser', ad.advertiser_name],
-          ['Type', type],
-          ['Placement', placement],
-          ['Status', status],
-          ['Priority', String(ad.priority)],
-          ['Impressions', String(ad.impression_count ?? 0)],
-          ['Clicks', String(ad.click_count ?? 0)],
-          ['CTR', `${calculateCTR(ad)}%`],
-          ['Active Flag', ad.is_active ? 'Active' : 'Inactive'],
-          ['Expires At', expiresLabel],
-          ['Target Countries', ad.target_countries?.join(', ') || 'All'],
-          ['Target Genres', ad.target_genres?.join(', ') || 'All'],
-          ['Click URL', ad.click_url],
-        ],
-        styles: { fontSize: 9, cellPadding: 5 },
-        headStyles: { fillColor: [48, 150, 5] },
-        theme: 'grid',
-        margin: { left: 24, right: 24 },
-      });
-
-      if (ad.description) {
-        const finalY = (doc as any).lastAutoTable?.finalY || 360;
-        doc.setFontSize(10);
-        doc.text('Description:', 24, finalY + 24);
-        doc.setFontSize(9);
-        const wrapped = doc.splitTextToSize(ad.description, 540);
-        doc.text(wrapped, 24, finalY + 40);
-      }
-
-      doc.setFontSize(8);
-      doc.text(`Page ${doc.getNumberOfPages()}`, 24, doc.internal.pageSize.getHeight() - 14);
-    });
-
-    const filename = `native-ads-report-${now.toISOString().slice(0, 10)}.pdf`;
+    const safeTitle = ad.title.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '') || 'ad';
+    const filename = `native-ad-report-${safeTitle}-${now.toISOString().slice(0, 10)}.pdf`;
     doc.save(filename);
   };
 
@@ -696,13 +654,6 @@ export const NativeAdsSection = (): JSX.Element => {
             Finished
           </button>
         </div>
-        <button
-          type="button"
-          onClick={downloadPdfReport}
-          className="px-3 py-1.5 rounded-lg text-xs font-medium bg-blue-600 hover:bg-blue-700 text-white transition-colors"
-        >
-          Download PDF Report
-        </button>
       </div>
 
       {/* Form */}
@@ -1113,6 +1064,12 @@ export const NativeAdsSection = (): JSX.Element => {
                     >
                       <Trash2 className="w-3 h-3" />
                       Delete
+                    </button>
+                    <button
+                      onClick={() => { void downloadPdfReportForAd(ad); }}
+                      className="px-3 py-1.5 bg-blue-500/20 hover:bg-blue-500/30 text-blue-400 rounded transition-colors"
+                    >
+                      Download PDF Report
                     </button>
                   </div>
                 </div>
