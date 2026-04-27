@@ -8,6 +8,7 @@ import { jsPDF } from 'jspdf';
 import autoTable from 'jspdf-autotable';
 
 const AUDIO_AD_PLACEHOLDER_IMAGE_URL = 'https://placehold.co/1200x1200/111827/FFFFFF?text=Audio+Ad';
+const AUDIO_AD_DEFAULT_CLICK_URL = 'https://airaplay.com';
 const AUDIO_MIME_TYPES = ['audio/mpeg', 'audio/mp3', 'audio/mp4', 'audio/x-m4a', 'audio/aac', 'audio/wav', 'audio/x-wav', 'audio/ogg', 'audio/webm'];
 const VISUAL_MIME_TYPES = ['image/jpeg', 'image/png', 'image/webp', 'image/jpg', 'video/mp4', 'video/webm', 'video/quicktime'];
 
@@ -293,7 +294,9 @@ export const NativeAdsSection = (): JSX.Element => {
         description: formData.description || null,
         image_url: finalImageUrl,
         audio_url: finalAudioUrl,
-        click_url: formData.click_url,
+        click_url: selectedMediaType === 'audio'
+          ? (formData.click_url?.trim() || AUDIO_AD_DEFAULT_CLICK_URL)
+          : formData.click_url,
         advertiser_name: formData.advertiser_name,
         placement_type: formData.placement_type,
         priority: formData.priority,
@@ -681,6 +684,13 @@ export const NativeAdsSection = (): JSX.Element => {
                   }
                   setPreviewUrl(editingAd?.image_url || null);
                   setSelectedFile(null);
+                  setFormData((prev) => ({
+                    ...prev,
+                    click_url:
+                      prev.click_url === AUDIO_AD_DEFAULT_CLICK_URL && !editingAd?.audio_url
+                        ? ''
+                        : prev.click_url,
+                  }));
                   setError(null);
                 }}
                 className={`px-3 py-1.5 rounded-lg text-xs font-medium transition-colors ${
@@ -701,6 +711,10 @@ export const NativeAdsSection = (): JSX.Element => {
                   }
                   setPreviewUrl(editingAd?.audio_url || null);
                   setSelectedFile(null);
+                  setFormData((prev) => ({
+                    ...prev,
+                    click_url: prev.click_url || AUDIO_AD_DEFAULT_CLICK_URL,
+                  }));
                   setError(null);
                 }}
                 className={`px-3 py-1.5 rounded-lg text-xs font-medium transition-colors ${
@@ -837,18 +851,36 @@ export const NativeAdsSection = (): JSX.Element => {
               )}
             </div>
 
-            <div>
-              <label className="block text-sm font-medium text-gray-700 mb-2">
-                Click URL *
-              </label>
-              <input
-                type="url"
-                value={formData.click_url}
-                onChange={(e) => setFormData({ ...formData, click_url: e.target.value })}
-                className="w-full px-3 py-2 bg-white border border-gray-200 rounded-lg text-sm text-gray-900 focus:outline-none focus:ring-2 focus:ring-[#309605]/70 focus:border-[#309605]"
-                required
-              />
-            </div>
+            {selectedMediaType === 'visual' ? (
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-2">
+                  Click URL *
+                </label>
+                <input
+                  type="url"
+                  value={formData.click_url}
+                  onChange={(e) => setFormData({ ...formData, click_url: e.target.value })}
+                  className="w-full px-3 py-2 bg-white border border-gray-200 rounded-lg text-sm text-gray-900 focus:outline-none focus:ring-2 focus:ring-[#309605]/70 focus:border-[#309605]"
+                  required
+                />
+              </div>
+            ) : (
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-2">
+                  Click URL (Optional for audio)
+                </label>
+                <input
+                  type="url"
+                  value={formData.click_url}
+                  onChange={(e) => setFormData({ ...formData, click_url: e.target.value })}
+                  className="w-full px-3 py-2 bg-white border border-gray-200 rounded-lg text-sm text-gray-900 focus:outline-none focus:ring-2 focus:ring-[#309605]/70 focus:border-[#309605]"
+                  placeholder={AUDIO_AD_DEFAULT_CLICK_URL}
+                />
+                <p className="mt-1 text-[11px] text-gray-500">
+                  Audio ads do not require a click URL. A default value is used when empty.
+                </p>
+              </div>
+            )}
           </div>
 
           <div className="grid grid-cols-3 xl:grid-cols-4 gap-4">
