@@ -258,6 +258,46 @@ export async function playNativeAudioAdForPlacement(
     // Record impression right before playback attempt.
     void recordNativeAdImpression(ad.id);
 
+    const companionImageUrl = (ad.image_url ?? '').trim();
+    const companionClickUrl = (ad.click_url ?? '').trim();
+    const hasCompanionImage = companionImageUrl.length > 0 && !companionImageUrl.includes('placehold.co');
+    const showCompanionOverlay = () => {
+      if (!hasCompanionImage) return;
+      try {
+        window.dispatchEvent(
+          new CustomEvent('airaplay:audioAdCompanion', {
+            detail: {
+              action: 'show',
+              ad: {
+                id: ad.id,
+                title: ad.title,
+                advertiserName: ad.advertiser_name,
+                imageUrl: companionImageUrl.length > 0 ? companionImageUrl : null,
+                clickUrl: companionClickUrl.length > 0 ? companionClickUrl : null,
+              },
+            },
+          })
+        );
+      } catch {
+        // Companion UI should never block ad playback.
+      }
+    };
+    const hideCompanionOverlay = () => {
+      if (!hasCompanionImage) return;
+      try {
+        window.dispatchEvent(
+          new CustomEvent('airaplay:audioAdCompanion', {
+            detail: {
+              action: 'hide',
+              adId: ad.id,
+            },
+          })
+        );
+      } catch {
+        // Companion UI should never block ad playback.
+      }
+    };
+
     const adAudio = new Audio(audioUrl);
     adAudio.preload = 'auto';
 
@@ -270,6 +310,7 @@ export async function playNativeAudioAdForPlacement(
         adAudio.removeEventListener('ended', onEnded);
         adAudio.removeEventListener('error', onError);
         window.clearTimeout(timeoutId);
+        hideCompanionOverlay();
       };
 
       const settle = (value: boolean) => {
@@ -302,6 +343,7 @@ export async function playNativeAudioAdForPlacement(
       adAudio.play().catch(() => {
         settle(false);
       });
+      showCompanionOverlay();
     });
 
     if (completed) {
