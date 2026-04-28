@@ -6,6 +6,7 @@ export interface NativeAdCard {
   description: string | null;
   image_url: string;
   audio_url?: string | null;
+  audio_insertion_interval_songs?: number | null;
   click_url: string;
   advertiser_name: string;
   placement_type: string;
@@ -23,11 +24,8 @@ type NativeAdVariant = 'visual' | 'audio' | 'any';
 
 const lastAudioAdPlaybackAtByPlacement = new Map<string, number>();
 const audioAdRoundRobinIndexByPlacement = new Map<string, number>();
-const AUDIO_AD_INSERTION_INTERVAL_DEFAULT = 5;
-const audioAdIntervalCache: { value: number; fetchedAtMs: number } = {
-  value: AUDIO_AD_INSERTION_INTERVAL_DEFAULT,
-  fetchedAtMs: 0,
-};
+const completedSongCountByPlacement = new Map<string, number>();
+const lastServedSongCountByAd = new Map<string, number>();
 const AUDIO_AD_PLACEMENT_FALLBACKS: Record<string, string[]> = {
   music_player: ['music_player', 'music_player_popup'],
   album_player: ['album_player', 'album_player_popup'],
@@ -221,40 +219,17 @@ export async function getAdFrequencyConfig(): Promise<number> {
   }
 }
 
-export async function getAudioAdInsertionIntervalSongs(): Promise<number> {
-  const now = Date.now();
-  if (now - audioAdIntervalCache.fetchedAtMs < 60_000) {
-    return audioAdIntervalCache.value;
-  }
-
-  try {
-    const { data, error } = await supabase
-      .from('native_ad_audio_settings')
-      .select('insertion_interval_songs')
-      .eq('id', true)
-      .maybeSingle();
-
-    if (error) {
-      return audioAdIntervalCache.value;
-    }
-
-    const value = Number(data?.insertion_interval_songs);
-    if ([2, 3, 5, 6, 8, 10].includes(value)) {
-      audioAdIntervalCache.value = value;
-    } else {
-      audioAdIntervalCache.value = AUDIO_AD_INSERTION_INTERVAL_DEFAULT;
-    }
-    audioAdIntervalCache.fetchedAtMs = now;
-    return audioAdIntervalCache.value;
-  } catch {
-    return audioAdIntervalCache.value;
-  }
-}
-
 function normalizeAudioUrl(url: string | null | undefined): string | null {
   if (!url) return null;
   const trimmed = url.trim();
   return trimmed.length > 0 ? trimmed : null;
+}
+
+function normalizeAudioAdInterval(value: number | null | undefined): number {
+  if (value == null) return 5;
+  const rounded = Math.round(Number(value));
+  if ([2, 3, 5, 6, 8, 10].includes(rounded)) return rounded;
+  return 5;
 }
 
 /**
@@ -277,13 +252,21 @@ export async function playNativeAudioAdForPlacement(
     if (now - lastPlayedAt < minIntervalMs) {
       return false;
     }
+    const completedSongs = (completedSongCountByPlacement.get(placementType) ?? 0) + 1;
+    completedSongCountByPlacement.set(placementType, completedSongs);
 
     const candidatePlacements = AUDIO_AD_PLACEMENT_FALLBACKS[placementType] ?? [placementType];
     let ad: NativeAdCard | undefined;
 
     for (const candidatePlacement of candidatePlacements) {
       const ads = await getNativeAdsForPlacement(candidatePlacement, userCountry, genreId, 5, 'audio');
-      const eligibleAds = ads.filter((item) => normalizeAudioUrl(item.audio_url) != null);
+      const eligibleAds = ads.filter((item) => {
+        if (normalizeAudioUrl(item.audio_url) == null) return false;
+        const interval = normalizeAudioAdInterval(item.audio_insertion_interval_songs);
+        const adKey = `${placementType}:${item.id}`;
+        const lastServedSongCount = lastServedSongCountByAd.get(adKey) ?? 0;
+        return completedSongs - lastServedSongCount >= interval;
+      });
       if (eligibleAds.length === 0) {
         continue;
       }
@@ -292,6 +275,10 @@ export async function playNativeAudioAdForPlacement(
       const selectedIndex = currentIndex % eligibleAds.length;
       ad = eligibleAds[selectedIndex];
       audioAdRoundRobinIndexByPlacement.set(candidatePlacement, selectedIndex + 1);
+      if (ad) {
+        const selectedAdKey = `${placementType}:${ad.id}`;
+        lastServedSongCountByAd.set(selectedAdKey, completedSongs);
+      }
       if (ad) break;
     }
 
