@@ -278,7 +278,9 @@ const PlaylistPlayer: React.FC<PlaylistPlayerScreenProps & {
       try {
         const ads = await getNativeAdsForPlacement('playlist_player', null, null, undefined, 1);
         if (!mounted) return;
-        setInlineAd(ads[0] ?? null);
+        const visualOnlyAd =
+          ads.find((ad) => !ad.audio_url || ad.audio_url.trim().length === 0) ?? null;
+        setInlineAd(visualOnlyAd);
       } catch {
         if (!mounted) return;
         setInlineAd(null);

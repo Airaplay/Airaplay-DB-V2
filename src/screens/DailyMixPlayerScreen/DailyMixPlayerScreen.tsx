@@ -73,6 +73,7 @@ export const DailyMixPlayerScreen: React.FC = () => {
   const nativeAdTimersRef = useRef<{ show?: number; hide?: number }>({});
   const songsPlayedSinceInterstitialRef = useRef(0);
   const interstitialTimeoutRef = useRef<number | null>(null);
+  const dailyMixPlaybackContext = useMemo(() => (mixId ? `daily-mix-${mixId}` : 'daily-mix-unknown'), [mixId]);
 
   const displayTitle = useMemo(() => {
     if (!mix) return '';
@@ -217,9 +218,11 @@ export const DailyMixPlayerScreen: React.FC = () => {
     let mounted = true;
     (async () => {
       try {
-        const ads = await getNativeAdsForPlacement('daily_mix_player', null, null, undefined, 1);
+        const ads = await getNativeAdsForPlacement('daily_mix_player', null, null, 1);
         if (!mounted) return;
-        setInlineAd(ads[0] ?? null);
+        const visualOnlyAd =
+          ads.find((ad) => !ad.audio_url || ad.audio_url.trim().length === 0) ?? null;
+        setInlineAd(visualOnlyAd);
       } catch {
         if (!mounted) return;
         setInlineAd(null);
@@ -517,7 +520,7 @@ export const DailyMixPlayerScreen: React.FC = () => {
       false,
       playlist,
       0,
-      `AI Daily Mix ${mix?.mix_number || ''}`,
+      dailyMixPlaybackContext,
       null
     );
   };
@@ -539,7 +542,7 @@ export const DailyMixPlayerScreen: React.FC = () => {
       false,
       playlist,
       index,
-      `AI Daily Mix ${mix?.mix_number || ''}`,
+      dailyMixPlaybackContext,
       null
     );
   };
