@@ -307,6 +307,11 @@ export const NativeAdsSection = (): JSX.Element => {
     }
   };
 
+  const isPlacementTypesSchemaError = (error: unknown): boolean => {
+    const message = error instanceof Error ? error.message : String(error ?? '');
+    return message.toLowerCase().includes("could not find the 'placement_types' column");
+  };
+
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -390,18 +395,37 @@ export const NativeAdsSection = (): JSX.Element => {
 
       if (editingAd) {
         // Update existing ad
-        const { error: updateError } = await supabase
+        let { error: updateError } = await supabase
           .from('native_ad_cards')
           .update(adData)
           .eq('id', editingAd.id);
+
+        // Backward compatibility: if DB migration not applied yet, retry without placement_types.
+        if (updateError && isPlacementTypesSchemaError(updateError)) {
+          const { placement_types, ...legacyPayload } = adData;
+          const retry = await supabase
+            .from('native_ad_cards')
+            .update(legacyPayload)
+            .eq('id', editingAd.id);
+          updateError = retry.error;
+        }
 
         if (updateError) throw updateError;
         setFormSuccess('Native ad updated successfully!');
       } else {
         // Create new ad
-        const { error: insertError } = await supabase
+        let { error: insertError } = await supabase
           .from('native_ad_cards')
           .insert(adData);
+
+        // Backward compatibility: if DB migration not applied yet, retry without placement_types.
+        if (insertError && isPlacementTypesSchemaError(insertError)) {
+          const { placement_types, ...legacyPayload } = adData;
+          const retry = await supabase
+            .from('native_ad_cards')
+            .insert(legacyPayload);
+          insertError = retry.error;
+        }
 
         if (insertError) throw insertError;
         setFormSuccess('Native ad created successfully!');
