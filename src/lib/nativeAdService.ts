@@ -22,6 +22,12 @@ export interface NativeAdCard {
 type NativeAdVariant = 'visual' | 'audio' | 'any';
 
 const lastAudioAdPlaybackAtByPlacement = new Map<string, number>();
+const audioAdRoundRobinIndexByPlacement = new Map<string, number>();
+const AUDIO_AD_INSERTION_INTERVAL_DEFAULT = 5;
+const audioAdIntervalCache: { value: number; fetchedAtMs: number } = {
+  value: AUDIO_AD_INSERTION_INTERVAL_DEFAULT,
+  fetchedAtMs: 0,
+};
 const AUDIO_AD_PLACEMENT_FALLBACKS: Record<string, string[]> = {
   music_player: ['music_player', 'music_player_popup'],
   album_player: ['album_player', 'album_player_popup'],
@@ -77,6 +83,9 @@ export async function getNativeAdsForPlacement(
         }
       } else if (adVariant === 'visual') {
         if (!ad.image_url || ad.image_url.trim().length === 0) {
+          return false;
+        }
+        if (ad.audio_url && ad.audio_url.trim().length > 0) {
           return false;
         }
       }
@@ -212,6 +221,36 @@ export async function getAdFrequencyConfig(): Promise<number> {
   }
 }
 
+export async function getAudioAdInsertionIntervalSongs(): Promise<number> {
+  const now = Date.now();
+  if (now - audioAdIntervalCache.fetchedAtMs < 60_000) {
+    return audioAdIntervalCache.value;
+  }
+
+  try {
+    const { data, error } = await supabase
+      .from('native_ad_audio_settings')
+      .select('insertion_interval_songs')
+      .eq('id', true)
+      .maybeSingle();
+
+    if (error) {
+      return audioAdIntervalCache.value;
+    }
+
+    const value = Number(data?.insertion_interval_songs);
+    if ([2, 3, 5, 6, 8, 10].includes(value)) {
+      audioAdIntervalCache.value = value;
+    } else {
+      audioAdIntervalCache.value = AUDIO_AD_INSERTION_INTERVAL_DEFAULT;
+    }
+    audioAdIntervalCache.fetchedAtMs = now;
+    return audioAdIntervalCache.value;
+  } catch {
+    return audioAdIntervalCache.value;
+  }
+}
+
 function normalizeAudioUrl(url: string | null | undefined): string | null {
   if (!url) return null;
   const trimmed = url.trim();
@@ -244,7 +283,15 @@ export async function playNativeAudioAdForPlacement(
 
     for (const candidatePlacement of candidatePlacements) {
       const ads = await getNativeAdsForPlacement(candidatePlacement, userCountry, genreId, 5, 'audio');
-      ad = ads.find((item) => normalizeAudioUrl(item.audio_url) != null);
+      const eligibleAds = ads.filter((item) => normalizeAudioUrl(item.audio_url) != null);
+      if (eligibleAds.length === 0) {
+        continue;
+      }
+
+      const currentIndex = audioAdRoundRobinIndexByPlacement.get(candidatePlacement) ?? 0;
+      const selectedIndex = currentIndex % eligibleAds.length;
+      ad = eligibleAds[selectedIndex];
+      audioAdRoundRobinIndexByPlacement.set(candidatePlacement, selectedIndex + 1);
       if (ad) break;
     }
 

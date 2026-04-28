@@ -64,6 +64,8 @@ export const NativeAdsSection = (): JSX.Element => {
   const [selectedPlacementTypes, setSelectedPlacementTypes] = useState<string[]>(['trending_near_you_grid']);
   const [listFilterType, setListFilterType] = useState<ListFilterType>('all');
   const [statusFilterType, setStatusFilterType] = useState<StatusFilterType>('all');
+  const [audioAdIntervalSongs, setAudioAdIntervalSongs] = useState<number>(5);
+  const [isSavingAudioAdInterval, setIsSavingAudioAdInterval] = useState(false);
 
   const [formData, setFormData] = useState({
     title: '',
@@ -86,7 +88,47 @@ export const NativeAdsSection = (): JSX.Element => {
 
   useEffect(() => {
     fetchNativeAds();
+    void loadAudioAdIntervalSetting();
   }, []);
+
+  const loadAudioAdIntervalSetting = async () => {
+    try {
+      const { data, error: settingsError } = await supabase
+        .from('native_ad_audio_settings')
+        .select('insertion_interval_songs')
+        .eq('id', true)
+        .maybeSingle();
+      if (settingsError) {
+        return;
+      }
+      const value = Number(data?.insertion_interval_songs);
+      if ([2, 3, 5, 6, 8, 10].includes(value)) {
+        setAudioAdIntervalSongs(value);
+      }
+    } catch {
+      // Keep default when table is not available yet.
+    }
+  };
+
+  const saveAudioAdIntervalSetting = async () => {
+    try {
+      setIsSavingAudioAdInterval(true);
+      setError(null);
+      const { error: upsertError } = await supabase
+        .from('native_ad_audio_settings')
+        .upsert({
+          id: true,
+          insertion_interval_songs: audioAdIntervalSongs,
+          updated_at: new Date().toISOString(),
+        });
+      if (upsertError) throw upsertError;
+      setFormSuccess(`Audio ads will now play after every ${audioAdIntervalSongs} songs.`);
+    } catch (saveError: any) {
+      setError(saveError?.message || 'Failed to save audio ad interval.');
+    } finally {
+      setIsSavingAudioAdInterval(false);
+    }
+  };
 
   const fetchNativeAds = async () => {
     try {
@@ -787,6 +829,34 @@ export const NativeAdsSection = (): JSX.Element => {
             }`}
           >
             Finished
+          </button>
+        </div>
+      </div>
+
+      <div className="bg-white rounded-lg p-4 border border-gray-100 shadow-sm">
+        <p className="text-sm font-semibold text-gray-900">Audio Ad Playback Interval</p>
+        <p className="text-xs text-gray-500 mt-0.5">
+          Control how often audio ads play between songs across players.
+        </p>
+        <div className="mt-3 flex flex-wrap items-center gap-3">
+          <select
+            value={audioAdIntervalSongs}
+            onChange={(e) => setAudioAdIntervalSongs(Number(e.target.value))}
+            className="px-3 py-2 bg-white border border-gray-200 rounded-lg text-sm text-gray-900 focus:outline-none focus:ring-2 focus:ring-[#309605]/70 focus:border-[#309605]"
+          >
+            {[2, 3, 5, 6, 8, 10].map((value) => (
+              <option key={value} value={value}>
+                After {value} songs
+              </option>
+            ))}
+          </select>
+          <button
+            type="button"
+            onClick={() => void saveAudioAdIntervalSetting()}
+            disabled={isSavingAudioAdInterval}
+            className="px-4 py-2 bg-[#309605] hover:bg-[#3ba208] text-white rounded-lg transition-colors disabled:opacity-50 text-sm font-medium"
+          >
+            {isSavingAudioAdInterval ? 'Saving...' : 'Save Interval'}
           </button>
         </div>
       </div>

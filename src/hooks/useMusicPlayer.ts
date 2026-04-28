@@ -18,7 +18,7 @@ import {
   setMediaSessionPositionState,
   setMediaSessionActionHandlers,
 } from '../lib/mediaSession';
-import { playNativeAudioAdForPlacement } from '../lib/nativeAdService';
+import { getAudioAdInsertionIntervalSongs, playNativeAudioAdForPlacement } from '../lib/nativeAdService';
 
 interface Song {
   id: string;
@@ -97,8 +97,7 @@ function resolveNativePlayerPlacementFromContext(context: string | undefined): s
   return 'music_player';
 }
 
-// Play one audio ad after every N completed songs per player context.
-const AUDIO_AD_INSERTION_INTERVAL_SONGS = 5;
+const AUDIO_AD_INSERTION_INTERVAL_SONGS_FALLBACK = 5;
 
 export const useMusicPlayer = () => {
   const { session } = useAuth();
@@ -376,35 +375,26 @@ export const useMusicPlayer = () => {
       }
 
       // Attempt to play native audio ads between songs for player placements.
-      // Audio ad insertion is cadence-based (every 5 completed songs), not display-style.
+      // Audio ad cadence is admin-configurable (2/3/5/6/8/10 songs).
       // Any ad failure must not block autoplay progression.
       try {
         const placementType = resolveNativePlayerPlacementFromContext(currentState.playlistContext);
         const currentCount = completedSongsSinceLastAudioAdRef.current[placementType] ?? 0;
         const nextCount = currentCount + 1;
         completedSongsSinceLastAudioAdRef.current[placementType] = nextCount;
+        const insertionIntervalSongs =
+          await getAudioAdInsertionIntervalSongs().catch(() => AUDIO_AD_INSERTION_INTERVAL_SONGS_FALLBACK);
 
-        if (nextCount >= AUDIO_AD_INSERTION_INTERVAL_SONGS) {
+        if (nextCount >= insertionIntervalSongs) {
           const userCountry =
             typeof session?.user?.user_metadata?.country === 'string'
               ? session.user.user_metadata.country
-              : null;
-
-          const userAge =
-            typeof session?.user?.user_metadata?.age === 'number'
-              ? session.user.user_metadata.age
-              : null;
-
-          const userGender =
-            typeof session?.user?.user_metadata?.gender === 'string'
-              ? session.user.user_metadata.gender
               : null;
 
           await playNativeAudioAdForPlacement(
             placementType,
             userCountry,
             undefined,
-            { userAge, userGender },
             {
               maxDurationMs: 30_000,
               // Song-count cadence drives insertion timing.
