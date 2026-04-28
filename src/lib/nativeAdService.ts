@@ -6,21 +6,15 @@ export interface NativeAdCard {
   description: string | null;
   image_url: string;
   audio_url?: string | null;
-  companion_image_url?: string | null;
-  companion_cta_text?: string | null;
   click_url: string;
   advertiser_name: string;
   placement_type: string;
-  placement_types?: string[] | null;
   priority: number;
   is_active: boolean;
   impression_count: number;
   click_count: number;
   target_countries: string[] | null;
   target_genres: string[] | null;
-  target_genders?: string[] | null;
-  target_age_min?: number | null;
-  target_age_max?: number | null;
   created_at: string;
   expires_at: string | null;
 }
@@ -28,6 +22,12 @@ export interface NativeAdCard {
 type NativeAdVariant = 'visual' | 'audio' | 'any';
 
 const lastAudioAdPlaybackAtByPlacement = new Map<string, number>();
+const AUDIO_AD_PLACEMENT_FALLBACKS: Record<string, string[]> = {
+  music_player: ['music_player', 'music_player_popup'],
+  album_player: ['album_player', 'album_player_popup'],
+  playlist_player: ['playlist_player', 'playlist_player_popup'],
+  daily_mix_player: ['daily_mix_player', 'daily_mix_player_popup'],
+};
 
 export interface GridItem {
   id: string;
@@ -43,10 +43,6 @@ export async function getNativeAdsForPlacement(
   placementType: string,
   userCountry?: string | null,
   genreId?: string | null,
-  targeting?: {
-    userAge?: number | null;
-    userGender?: string | null;
-  },
   limit: number = 10,
   adVariant: NativeAdVariant = 'visual'
 ): Promise<NativeAdCard[]> {
@@ -54,9 +50,8 @@ export async function getNativeAdsForPlacement(
     let query = supabase
       .from('native_ad_cards')
       .select('*')
+      .eq('placement_type', placementType)
       .eq('is_active', true)
-      // Support both legacy single-placement field and new multi-placement array.
-      .or(`placement_type.eq.${placementType},placement_types.cs.{${placementType}}`)
       .or('expires_at.is.null,expires_at.gt.' + new Date().toISOString())
       .order('priority', { ascending: false })
       .order('created_at', { ascending: false })
@@ -96,26 +91,6 @@ export async function getNativeAdsForPlacement(
       // Check genre targeting
       if (ad.target_genres && ad.target_genres.length > 0 && genreId) {
         if (!ad.target_genres.includes(genreId)) {
-          return false;
-        }
-      }
-
-      const userAge = targeting?.userAge ?? null;
-      const userGender = targeting?.userGender ?? null;
-
-      // Check gender targeting
-      if (ad.target_genders && ad.target_genders.length > 0 && userGender) {
-        if (!ad.target_genders.includes(userGender)) {
-          return false;
-        }
-      }
-
-      // Check age targeting
-      if (typeof userAge === 'number' && Number.isFinite(userAge)) {
-        if (ad.target_age_min != null && userAge < ad.target_age_min) {
-          return false;
-        }
-        if (ad.target_age_max != null && userAge > ad.target_age_max) {
           return false;
         }
       }
@@ -251,10 +226,6 @@ export async function playNativeAudioAdForPlacement(
   placementType: string,
   userCountry?: string | null,
   genreId?: string | null,
-  targeting?: {
-    userAge?: number | null;
-    userGender?: string | null;
-  },
   options?: {
     maxDurationMs?: number;
     minIntervalMs?: number;
@@ -268,8 +239,15 @@ export async function playNativeAudioAdForPlacement(
       return false;
     }
 
-    const ads = await getNativeAdsForPlacement(placementType, userCountry, genreId, targeting, 5, 'audio');
-    const ad = ads.find((item) => normalizeAudioUrl(item.audio_url) != null);
+    const candidatePlacements = AUDIO_AD_PLACEMENT_FALLBACKS[placementType] ?? [placementType];
+    let ad: NativeAdCard | undefined;
+
+    for (const candidatePlacement of candidatePlacements) {
+      const ads = await getNativeAdsForPlacement(candidatePlacement, userCountry, genreId, 5, 'audio');
+      ad = ads.find((item) => normalizeAudioUrl(item.audio_url) != null);
+      if (ad) break;
+    }
+
     if (!ad) {
       return false;
     }
@@ -283,8 +261,7 @@ export async function playNativeAudioAdForPlacement(
     const adAudio = new Audio(audioUrl);
     adAudio.preload = 'auto';
 
-    // Audio ad spec: 15–30s.
-    const maxDurationMs = options?.maxDurationMs ?? 30_000;
+    const maxDurationMs = options?.maxDurationMs ?? 35_000;
 
     const completed = await new Promise<boolean>((resolve) => {
       let settled = false;
@@ -299,16 +276,6 @@ export async function playNativeAudioAdForPlacement(
         if (settled) return;
         settled = true;
         cleanup();
-        // Hide companion display when audio finishes/fails.
-        try {
-          window.dispatchEvent(
-            new CustomEvent('airaplay:audioAdCompanion', {
-              detail: { action: 'hide', adId: ad.id },
-            })
-          );
-        } catch {
-          // Ignore event errors.
-        }
         resolve(value);
       };
 
@@ -331,27 +298,6 @@ export async function playNativeAudioAdForPlacement(
 
       adAudio.addEventListener('ended', onEnded, { once: true });
       adAudio.addEventListener('error', onError, { once: true });
-
-      // Show companion display right before playback attempt.
-      try {
-        window.dispatchEvent(
-          new CustomEvent('airaplay:audioAdCompanion', {
-            detail: {
-              action: 'show',
-              ad: {
-                id: ad.id,
-                title: ad.title,
-                imageUrl: ad.companion_image_url ?? ad.image_url,
-                ctaText: ad.companion_cta_text ?? 'Learn More',
-                clickUrl: ad.click_url,
-                advertiserName: ad.advertiser_name,
-              },
-            },
-          })
-        );
-      } catch {
-        // Ignore event errors.
-      }
 
       adAudio.play().catch(() => {
         settle(false);
