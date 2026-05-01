@@ -70,7 +70,7 @@ export const NativeAdsSection = (): JSX.Element => {
     description: '',
     image_url: '',
     companion_image_url: '',
-    companion_cta_text: 'Learn More',
+    companion_cta_text: '',
     click_url: '',
     advertiser_name: '',
     placement_type: 'trending_near_you_grid',
@@ -418,7 +418,7 @@ export const NativeAdsSection = (): JSX.Element => {
           ? companionImageUrl
           : null,
         companion_cta_text: shouldPersistAudioSettings
-          ? (formData.companion_cta_text?.trim() || 'Learn More')
+          ? (formData.companion_cta_text?.trim() || null)
           : null,
         click_url: shouldPersistAudioSettings
           ? (formData.click_url?.trim() || AUDIO_AD_DEFAULT_CLICK_URL)
@@ -501,7 +501,7 @@ export const NativeAdsSection = (): JSX.Element => {
       description: ad.description || '',
       image_url: ad.image_url,
       companion_image_url: ad.companion_image_url || '',
-      companion_cta_text: ad.companion_cta_text || 'Learn More',
+      companion_cta_text: ad.companion_cta_text ?? '',
       click_url: ad.click_url,
       advertiser_name: ad.advertiser_name,
       placement_type: ad.placement_type,
@@ -579,7 +579,7 @@ export const NativeAdsSection = (): JSX.Element => {
       description: '',
       image_url: '',
       companion_image_url: '',
-      companion_cta_text: 'Learn More',
+      companion_cta_text: '',
       click_url: '',
       advertiser_name: '',
       placement_type: 'trending_near_you_grid',
@@ -1141,16 +1141,18 @@ export const NativeAdsSection = (): JSX.Element => {
               </div>
               <div>
                 <label className="block text-sm font-medium text-gray-700 mb-2">
-                  CTA Text *
+                  CTA Text <span className="font-normal text-gray-500">(optional)</span>
                 </label>
                 <input
                   type="text"
                   value={formData.companion_cta_text}
                   onChange={(e) => setFormData({ ...formData, companion_cta_text: e.target.value })}
-                  placeholder="Learn More / Buy Now / Sign up"
+                  placeholder="Learn More / Buy Now / Sign up — leave blank for app default"
                   className="w-full px-3 py-2 bg-white border border-gray-200 rounded-lg text-sm text-gray-900 focus:outline-none focus:ring-2 focus:ring-[#309605]/70 focus:border-[#309605]"
-                  required={selectedMediaType === 'audio'}
                 />
+                <p className="mt-1 text-[11px] text-gray-500">
+                  If empty, the player uses its default label on the companion button.
+                </p>
               </div>
               <div>
                 <label className="block text-sm font-medium text-gray-700 mb-2">

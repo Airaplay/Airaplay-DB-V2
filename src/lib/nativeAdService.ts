@@ -21,6 +21,7 @@ export interface NativeAdCard {
   target_genres: string[] | null;
   created_at: string;
   expires_at: string | null;
+  placement_types?: string[] | null;
 }
 
 type NativeAdVariant = 'visual' | 'audio' | 'any';
@@ -54,17 +55,33 @@ export async function getNativeAdsForPlacement(
   adVariant: NativeAdVariant = 'visual'
 ): Promise<NativeAdCard[]> {
   try {
-    let query = supabase
+    const nowIso = new Date().toISOString();
+    // Prefer dual-field matching so ads saved with placement_types[] are served
+    // even when legacy placement_type does not match the active player surface.
+    let { data, error } = await supabase
       .from('native_ad_cards')
       .select('*')
-      .eq('placement_type', placementType)
+      .or(`placement_type.eq.${placementType},placement_types.cs.{${placementType}}`)
       .eq('is_active', true)
-      .or('expires_at.is.null,expires_at.gt.' + new Date().toISOString())
+      .or('expires_at.is.null,expires_at.gt.' + nowIso)
       .order('priority', { ascending: false })
       .order('created_at', { ascending: false })
       .limit(limit);
 
-    const { data, error } = await query;
+    // Backward compatibility for databases that have not yet added placement_types.
+    if (error && String(error.message || '').toLowerCase().includes("could not find the 'placement_types' column")) {
+      const fallback = await supabase
+        .from('native_ad_cards')
+        .select('*')
+        .eq('placement_type', placementType)
+        .eq('is_active', true)
+        .or('expires_at.is.null,expires_at.gt.' + nowIso)
+        .order('priority', { ascending: false })
+        .order('created_at', { ascending: false })
+        .limit(limit);
+      data = fallback.data;
+      error = fallback.error;
+    }
 
     if (error) {
       console.error('Error fetching native ads:', error);
@@ -77,6 +94,13 @@ export async function getNativeAdsForPlacement(
 
     // Filter ads by targeting rules
     const filteredAds = data.filter((ad: NativeAdCard) => {
+      const placements = ad.placement_types && ad.placement_types.length > 0
+        ? ad.placement_types
+        : [ad.placement_type];
+      if (!placements.includes(placementType)) {
+        return false;
+      }
+
       // Filter by ad asset variant when requested.
       if (adVariant === 'audio') {
         if (!ad.audio_url || ad.audio_url.trim().length === 0) {

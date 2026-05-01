@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useMemo, useRef } from 'react';
-import { useParams, useNavigate } from 'react-router-dom';
-import { ArrowLeft, Play, Music, Sparkles } from 'lucide-react';
+import { useParams, useNavigate, useLocation } from 'react-router-dom';
+import { ArrowLeft, Play, Pause, Music, Sparkles } from 'lucide-react';
 import { supabase } from '../../lib/supabase';
 import { useAuth } from '../../contexts/AuthContext';
 import { useMusicPlayer } from '../../contexts/MusicPlayerContext';
@@ -59,8 +59,9 @@ interface SongWithArtist {
 export const DailyMixPlayerScreen: React.FC = () => {
   const { mixId } = useParams<{ mixId: string }>();
   const navigate = useNavigate();
+  const location = useLocation();
   const { user } = useAuth();
-  const { playSong, currentSong, isPlaying: contextIsPlaying, playlistContext } = useMusicPlayer();
+  const { playSong, currentSong, isPlaying: contextIsPlaying, playlistContext, togglePlayPause } = useMusicPlayer();
 
   const [mix, setMix] = useState<DailyMix | null>(null);
   const [isLoading, setIsLoading] = useState(true);
@@ -77,7 +78,11 @@ export const DailyMixPlayerScreen: React.FC = () => {
   const nativeAdTimersRef = useRef<{ show?: number; hide?: number }>({});
   const songsPlayedSinceInterstitialRef = useRef(0);
   const interstitialTimeoutRef = useRef<number | null>(null);
-  const dailyMixPlaybackContext = useMemo(() => (mixId ? `daily-mix-${mixId}` : 'daily-mix-unknown'), [mixId]);
+  const dailyMixPlaybackContext = useMemo(() => {
+    if (!mixId) return 'daily-mix-unknown';
+    const isGlobalRoute = location.pathname.includes('/daily-mix/global/');
+    return isGlobalRoute ? `daily-mix-global-${mixId}` : `daily-mix-${mixId}`;
+  }, [mixId, location.pathname]);
 
   const displayTitle = useMemo(() => {
     if (!mix) return '';
@@ -159,7 +164,10 @@ export const DailyMixPlayerScreen: React.FC = () => {
   // Auto interstitial: every 2 songs played in Daily Mix (trigger mid-way through the 2nd song).
   useEffect(() => {
     if (!mixId) return;
-    if (playlistContext !== `daily-mix-${mixId}`) return;
+    const matchesDailyMixContext =
+      playlistContext === `daily-mix-${mixId}` ||
+      playlistContext === `daily-mix-global-${mixId}`;
+    if (!matchesDailyMixContext) return;
     const s = currentSong;
     if (!s?.id) return;
 
@@ -571,6 +579,18 @@ export const DailyMixPlayerScreen: React.FC = () => {
     return count.toString();
   };
 
+  const isDailyMixContextActive =
+    playlistContext === `daily-mix-${mixId}` || playlistContext === `daily-mix-global-${mixId}`;
+  const isDailyMixPlaying = isDailyMixContextActive && !!currentSong && contextIsPlaying;
+
+  const handlePlayButtonTap = () => {
+    if (isDailyMixContextActive && currentSong) {
+      togglePlayPause();
+      return;
+    }
+    handlePlayMix();
+  };
+
   return (
     <div className="flex flex-col min-h-screen bg-gradient-to-b from-[#0a0a0a] via-[#0d0d0d] to-[#111111]">
       {/* Header - Solid so scroll content doesn't show through */}
@@ -664,11 +684,15 @@ export const DailyMixPlayerScreen: React.FC = () => {
 
               <div className="relative z-10 p-6 pb-7 min-h-[200px] flex flex-col justify-end">
                 <button
-                  onClick={handlePlayMix}
-                  className="absolute top-5 right-5 w-12 h-12 rounded-full bg-[#00ad74] hover:bg-[#009c68] active:bg-[#008a5d] flex items-center justify-center shadow-lg shadow-[#00ad74]/30 transition-all active:scale-90"
-                  aria-label="Play all"
+                  onClick={handlePlayButtonTap}
+                  className="absolute top-5 right-5 w-12 h-12 rounded-full bg-white hover:bg-white/90 active:bg-white/80 flex items-center justify-center shadow-lg shadow-black/30 transition-all active:scale-90"
+                  aria-label={isDailyMixPlaying ? 'Pause' : 'Play all'}
                 >
-                  <Play className="w-5 h-5 text-white ml-0.5" fill="white" />
+                  {isDailyMixPlaying ? (
+                    <Pause className="w-5 h-5 text-black" />
+                  ) : (
+                    <Play className="w-5 h-5 text-black ml-0.5" fill="black" />
+                  )}
                 </button>
 
                 <h2 className="font-['Inter',sans-serif] font-bold text-white text-2xl leading-tight mb-2">
