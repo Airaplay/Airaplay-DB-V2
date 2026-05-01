@@ -53,7 +53,7 @@ const TippingModal = lazy(() => import('../../components/TippingModal').then(m =
 const ReportModal = lazy(() => import('../../components/ReportModal').then(m => ({ default: m.ReportModal })));
 const AuthModal = lazy(() => import('../../components/AuthModal').then(m => ({ default: m.AuthModal })));
 const prefetchContentComments = (contentId: string, contentType: string) =>
-  import('../../lib/contentCommentsCache').then((m) => m.prefetchContentComments(contentId, contentType));
+  import('../../components/CommentsModal').then((m) => m.prefetchContentComments(contentId, contentType));
 
 interface VideoData {
   id: string;
@@ -99,6 +99,18 @@ interface Comment {
 interface VideoPlayerScreenProps {
   onPlayerVisibilityChange?: (isVisible: boolean) => void;
 }
+
+const getAvatarUrl = (
+  avatarUrl?: string | null,
+  metadata?: Record<string, any> | null
+): string | undefined => {
+  const metadataAvatar =
+    metadata?.avatar_url ||
+    metadata?.profile_image_url ||
+    metadata?.profile_photo_url ||
+    metadata?.picture;
+  return avatarUrl || metadataAvatar || undefined;
+};
 
 export const VideoPlayerScreen: React.FC<VideoPlayerScreenProps> = ({ onPlayerVisibilityChange }) => {
   const { videoId } = useParams<{ videoId: string }>();
@@ -1135,6 +1147,7 @@ export const VideoPlayerScreen: React.FC<VideoPlayerScreenProps> = ({ onPlayerVi
   const displayedComments = useMemo(() => {
     return showAllComments ? comments : comments.slice(0, 1);
   }, [showAllComments, comments]);
+  const canSubmitComment = newComment.trim().length > 0 && !isSubmittingComment;
 
   if (!isLoading && (error || !videoData)) {
     return (
@@ -1626,14 +1639,8 @@ export const VideoPlayerScreen: React.FC<VideoPlayerScreenProps> = ({ onPlayerVi
                   <div className="space-y-4">
                     {/* Comment input - 44px min height, clear focus */}
                     {isAuthenticated && (
-                      <form onSubmit={handleAddComment} className="flex items-end gap-3">
-                        <Avatar className="w-9 h-9 flex-shrink-0 ring-2 ring-white/10 rounded-full overflow-hidden">
-                          <AvatarImage src={user?.user_metadata?.avatar_url} />
-                          <AvatarFallback className="bg-white/10 text-white/70 text-sm">
-                            {user?.email?.charAt(0).toUpperCase()}
-                          </AvatarFallback>
-                        </Avatar>
-                        <div className="flex-1 flex items-center gap-2 bg-white/[0.08] rounded-2xl border border-white/10 px-4 min-h-[48px] focus-within:border-[#309605]/50 focus-within:ring-1 focus-within:ring-[#309605]/30 transition-colors">
+                      <form onSubmit={handleAddComment} className="flex items-end">
+                        <div className="w-full flex items-center gap-2 bg-white/[0.08] rounded-2xl border border-white/10 px-4 min-h-[48px] focus-within:border-[#309605]/50 focus-within:ring-1 focus-within:ring-[#309605]/30 transition-colors">
                           <textarea
                             ref={newCommentRef}
                             value={newComment}
@@ -1646,22 +1653,22 @@ export const VideoPlayerScreen: React.FC<VideoPlayerScreenProps> = ({ onPlayerVi
                             onKeyDown={(e) => {
                               if (e.key === 'Enter' && !e.shiftKey) {
                                 e.preventDefault();
-                                if (newComment.trim() && !isSubmittingComment) {
-                                  handleAddComment(e as any);
+                                if (canSubmitComment) {
+                                  (e.currentTarget.form as HTMLFormElement | null)?.requestSubmit();
                                 }
                               }
                             }}
                           />
                           <button
                             type="submit"
-                            disabled={!newComment.trim() || isSubmittingComment}
+                            disabled={!canSubmitComment}
                             aria-label="Send comment"
-                            className="min-w-[44px] min-h-[44px] w-11 h-11 flex items-center justify-center rounded-full bg-[#309605] text-white disabled:bg-white/15 disabled:opacity-60 disabled:cursor-not-allowed active:scale-95 transition-transform focus-visible:ring-2 focus-visible:ring-[#309605] focus-visible:ring-offset-2 focus-visible:ring-offset-black"
+                            className="flex-shrink-0 w-9 h-9 flex items-center justify-center rounded-full bg-white disabled:bg-white/15 disabled:cursor-not-allowed active:scale-95 transition-all self-end mb-0.5"
                           >
                             {isSubmittingComment ? (
-                              <div className="w-5 h-5 border-2 border-white/30 border-t-white rounded-full animate-spin" />
+                              <div className="w-3.5 h-3.5 border-2 border-black/30 border-t-black rounded-full animate-spin" />
                             ) : (
-                              <Send className="w-4 h-4" />
+                              <Send className="w-3.5 h-3.5 text-black" />
                             )}
                           </button>
                         </div>
@@ -1684,7 +1691,7 @@ export const VideoPlayerScreen: React.FC<VideoPlayerScreenProps> = ({ onPlayerVi
                           {comments[0] && (
                             <div className="flex items-start gap-3 p-3 bg-white/5 rounded-xl">
                               <Avatar className="w-8 h-8 flex-shrink-0">
-                                <AvatarImage src={comments[0].users?.avatar_url || undefined} />
+                                <AvatarImage src={getAvatarUrl(comments[0].users?.avatar_url)} />
                                 <AvatarFallback className="bg-[#309605] text-white text-xs">
                                   {(comments[0].users?.display_name ?? '').charAt(0) || '?'}
                                 </AvatarFallback>
@@ -1810,7 +1817,7 @@ export const VideoPlayerScreen: React.FC<VideoPlayerScreenProps> = ({ onPlayerVi
                           {showAllComments && comments.slice(1).map((comment) => (
                             <div key={comment.id} className="flex items-start gap-3 p-3 bg-white/5 rounded-xl">
                               <Avatar className="w-8 h-8 flex-shrink-0">
-                                <AvatarImage src={comment.users?.avatar_url || undefined} />
+                                <AvatarImage src={getAvatarUrl(comment.users?.avatar_url)} />
                                 <AvatarFallback className="bg-[#309605] text-white text-xs">
                                   {(comment.users?.display_name ?? '').charAt(0) || '?'}
                                 </AvatarFallback>

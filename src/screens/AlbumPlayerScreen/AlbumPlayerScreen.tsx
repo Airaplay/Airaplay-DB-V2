@@ -8,6 +8,7 @@ import {
   Share2,
   MessageCircle,
   X,
+  ChevronDown,
   SkipForward,
   SkipBack,
   Gift,
@@ -55,7 +56,11 @@ import { favoritesCache } from '../../lib/favoritesCache';
 import { followsCache } from '../../lib/followsCache';
 import { recordContribution } from '../../lib/contributionService';
 import { isReleased, formatReleaseDateDisplay } from '../../lib/releaseDateUtils';
-import { getNativeAdsForPlacement, NativeAdCard } from '../../lib/nativeAdService';
+import {
+  getNativeAdsForPlacement,
+  prefetchAudioAdCompanionForPlacement,
+  type NativeAdCard,
+} from '../../lib/nativeAdService';
 import { PlayerStaticAdBanner } from '../../components/PlayerStaticAdBanner';
 
 interface AlbumTrack {
@@ -232,6 +237,13 @@ const AlbumPlayer: React.FC<AlbumPlayerScreenProps & {
 
   useEffect(() => {
     if (!isInitialized) return;
+
+    if (albumData?.tracks?.length) {
+      setTracks(prev => prev.map(track => ({
+        ...track,
+        isFavorited: track.isFavorited ?? favoritesCache.isSongFavorited(track.id)
+      })));
+    }
 
     // Load favorite status in background — don't block display (cache already set initial state)
     loadTrackFavoriteStatus().catch(() => {});
@@ -471,6 +483,14 @@ const AlbumPlayer: React.FC<AlbumPlayerScreenProps & {
     };
   }, [inlineAd, albumData.id]);
 
+  // Preload likely audio-ad companion art for album placement so the first overlay paints faster.
+  useEffect(() => {
+    if (!albumData?.id) return;
+    const country =
+      typeof user?.user_metadata?.country === 'string' ? user.user_metadata.country : null;
+    void prefetchAudioAdCompanionForPlacement('album_player', country);
+  }, [albumData?.id, user?.user_metadata?.country]);
+
   // Load user country and static ad
   // Static inline banner ads removed from full-screen album player to avoid floating banners over scrolling content
 
@@ -629,61 +649,13 @@ const AlbumPlayer: React.FC<AlbumPlayerScreenProps & {
     }
   };
 
-  const getCurrentPlaylist = () => {
-    return isShuffleEnabled ? shuffledPlaylist : originalPlaylist;
-  };
-
   const playNextTrack = () => {
-    const currentPlaylist = getCurrentPlaylist();
-    if (currentPlaylist.length === 0) return;
-
-    const currentIdx = currentPlaylist.findIndex(t => t.id === currentTrack?.id);
-
-    // Handle repeat one mode
-    if (repeatMode === 'one') {
-      if (audioElement) {
-        audioElement.currentTime = 0;
-        audioElement.play().catch(err => console.error('Error replaying:', err));
-      }
-      return;
-    }
-
-    let nextIndex: number;
-    if (currentIdx === currentPlaylist.length - 1) {
-      if (repeatMode === 'all') {
-        nextIndex = 0;
-      } else {
-        return; // End of album
-      }
-    } else {
-      nextIndex = currentIdx + 1;
-    }
-
-    const nextTrack = currentPlaylist[nextIndex];
-    if (nextTrack) {
-      const originalIndex = tracks.findIndex(t => t.id === nextTrack.id);
-      playTrack(originalIndex >= 0 ? originalIndex : nextIndex);
-    }
+    // Use global player next so audio-ad insertion cadence matches MusicPlayerScreen.
+    globalPlayNext();
   };
 
   const playPreviousTrack = () => {
-    const currentPlaylist = getCurrentPlaylist();
-    if (currentPlaylist.length === 0) return;
-
-    const currentIdx = currentPlaylist.findIndex(t => t.id === currentTrack?.id);
-
-    let prevIndex: number;
-    if (currentIdx <= 0) {
-      prevIndex = currentPlaylist.length - 1;
-    } else {
-      prevIndex = currentIdx - 1;
-    }
-
-    const prevTrack = currentPlaylist[prevIndex];
-    if (prevTrack) {
-      const originalIndex = tracks.findIndex(t => t.id === prevTrack.id);
-      playTrack(originalIndex >= 0 ? originalIndex : prevIndex);
-    }
+    globalPlayPrevious();
   };
 
   const handleToggleShuffle = () => {
@@ -764,39 +736,29 @@ const AlbumPlayer: React.FC<AlbumPlayerScreenProps & {
       return;
     }
 
-    const trackIndex = tracks.findIndex(t => t.id === trackId);
-    if (trackIndex < 0) return;
+    const track = tracks.find(t => t.id === trackId);
+    if (!track) return;
+    const previousFavoritedState = Boolean(track.isFavorited);
 
-    const previousFavoritedState = tracks[trackIndex].isFavorited;
-
-    const updatedTracks = [...tracks];
-    updatedTracks[trackIndex] = {
-      ...updatedTracks[trackIndex],
-      isFavorited: !previousFavoritedState
-    };
-    setTracks(updatedTracks);
+    setTracks(prev =>
+      prev.map(t => (t.id === trackId ? { ...t, isFavorited: !previousFavoritedState } : t))
+    );
 
     try {
       const newFavoriteStatus = await toggleSongFavorite(trackId);
 
-      const finalTracks = [...tracks];
-      finalTracks[trackIndex] = {
-        ...finalTracks[trackIndex],
-        isFavorited: newFavoriteStatus
-      };
-      setTracks(finalTracks);
+      setTracks(prev =>
+        prev.map(t => (t.id === trackId ? { ...t, isFavorited: newFavoriteStatus } : t))
+      );
 
       // Track engagement contribution when user likes track
       if (newFavoriteStatus && !previousFavoritedState) {
         recordContribution('song_like', trackId, 'song').catch(console.error);
       }
     } catch (error) {
-      const revertedTracks = [...tracks];
-      revertedTracks[trackIndex] = {
-        ...revertedTracks[trackIndex],
-        isFavorited: previousFavoritedState
-      };
-      setTracks(revertedTracks);
+      setTracks(prev =>
+        prev.map(t => (t.id === trackId ? { ...t, isFavorited: previousFavoritedState } : t))
+      );
 
       console.error('Error toggling track favorite:', error);
       alert('Failed to update favorite status');
@@ -901,6 +863,16 @@ const AlbumPlayer: React.FC<AlbumPlayerScreenProps & {
     }
   };
 
+  const handleOpenArtistProfile = () => {
+    if (!artistUserId) return;
+    hideFullPlayer();
+    onPlayerVisibilityChange?.(false);
+    window.dispatchEvent(new CustomEvent('albumPlayerVisibilityChange', {
+      detail: { isVisible: false }
+    }));
+    navigate(`/user/${artistUserId}`);
+  };
+
   const handleAddToPlaylist = async () => {
     if (!isAuthenticated) {
       setShowAuthModal(true);
@@ -972,58 +944,63 @@ const AlbumPlayer: React.FC<AlbumPlayerScreenProps & {
     return num.toString();
   };
 
+  const shouldShowFollowButton = Boolean(albumData.artistId) && Boolean(user?.id) && user?.id !== artistUserId;
+
   return (
     <div className="fixed inset-0 z-50 flex flex-col bg-[#0a0a0a] animate-in fade-in duration-300 touch-manipulation overflow-hidden pb-[env(safe-area-inset-bottom,0px)]">
-      {/* Header — properly grouped and centered with equal-width side columns */}
-      <header className="flex-shrink-0 z-20 bg-[#0a0a0a]" style={{ paddingTop: 'calc(1.25rem + env(safe-area-inset-top, 0px) * 0.25)', paddingBottom: '1.25rem' }}>
-        <div className="flex flex-row items-center px-3 py-1 min-h-[40px]">
-          {/* Left — fixed width for balance */}
-          <div className="w-[72px] flex items-center justify-start">
-            <button
-              onClick={handleClose}
-              className="p-2 rounded-full text-white/80 hover:text-white hover:bg-white/10 transition-all active:scale-95"
-              aria-label="Close player"
-            >
-              <X className="w-5 h-5" />
-            </button>
-          </div>
-
-          {/* Center — artist info, truly centered */}
-          <div
-            className="flex-1 flex items-center justify-center gap-2 min-w-0 cursor-pointer active:scale-95 transition-transform"
-            onClick={() => {
-              if (artistUserId) {
-                handleClose();
-                navigate(`/user/${artistUserId}`);
-              }
-            }}
-          >
-            <Avatar className="w-8 h-8 flex-shrink-0">
-              <AvatarImage src={artistProfile?.avatar_url || artistProfile?.profile_photo_url || undefined} />
-              <AvatarFallback className="bg-[#00ad74] text-white font-semibold text-xs">
-                {(albumData.artist || 'A').charAt(0).toUpperCase()}
-              </AvatarFallback>
-            </Avatar>
-            <div className="min-w-0 text-left">
-              <h3 className="font-bold text-white text-sm truncate leading-tight">
-                {albumData.artist || 'Unknown Artist'}
-              </h3>
-              <p className="text-white/60 text-[11px] truncate">
-                {formatNumber(artistFollowerCount)} followers
-              </p>
+      {/* Main Content — scrollable, seamless with header */}
+      <div
+        className="flex-1 flex flex-col min-h-0 overflow-y-auto overflow-x-hidden scrollbar-hide"
+        style={{ paddingBottom: 'calc(5rem + env(safe-area-inset-bottom, 0px))' }}
+      >
+        <div
+          className="flex-1 flex flex-col px-3 pb-4"
+          style={{ paddingTop: 'calc(1.25rem + env(safe-area-inset-top, 0px) * 0.25)' }}
+        >
+          <div className="-ml-1 px-3 mb-4 flex items-center justify-between gap-3">
+            <div className="min-w-0 flex items-center gap-2">
+              <button
+                onClick={handleClose}
+                className="p-2 rounded-full text-white/80 hover:text-white hover:bg-white/10 transition-all active:scale-95 flex-shrink-0"
+                aria-label="Close player"
+              >
+                <ChevronDown className="w-5 h-5" />
+              </button>
+              <div
+                className="min-w-0 flex items-center gap-2 cursor-pointer active:scale-95 transition-transform"
+                onClick={handleOpenArtistProfile}
+              >
+                <Avatar className="w-9 h-9 flex-shrink-0">
+                  <AvatarImage src={artistProfile?.avatar_url || artistProfile?.profile_photo_url || undefined} />
+                  <AvatarFallback className="bg-[#00ad74] text-white font-semibold text-xs">
+                    {(albumData.artist || 'A').charAt(0).toUpperCase()}
+                  </AvatarFallback>
+                </Avatar>
+                <div className="min-w-0 text-left">
+                  <h3 className="font-bold text-white text-sm truncate leading-tight">
+                    {albumData.artist || 'Unknown Artist'}
+                  </h3>
+                  <p className="text-white/60 text-[11px] truncate">
+                    {formatNumber(artistFollowerCount)} followers
+                  </p>
+                </div>
+              </div>
             </div>
-          </div>
 
-          {/* Right — fixed width for balance */}
-          <div className="w-[72px] flex items-center justify-end">
-            {albumData.artistId && user?.id !== artistUserId ? (
+            {shouldShowFollowButton ? (
               <button
                 onClick={handleToggleFollow}
-                disabled={isLoadingFollow}
-                aria-label={isAuthenticated && isFollowingArtist ? "Unfollow artist" : "Follow artist"}
+                disabled={isLoadingFollow || !artistUserId}
+                aria-label={
+                  !artistUserId
+                    ? 'Loading follow status'
+                    : isAuthenticated && isFollowingArtist
+                      ? 'Unfollow artist'
+                      : 'Follow artist'
+                }
                 className="inline-flex items-center justify-center px-3 py-1.5 rounded-full font-semibold text-[11px] bg-white text-[#0a0a0a] hover:opacity-90 active:scale-95 transition-all disabled:opacity-50 disabled:cursor-not-allowed"
               >
-                {isLoadingFollow ? (
+                {isLoadingFollow || !artistUserId ? (
                   <Spinner size={12} className="text-[#0a0a0a]" />
                 ) : (
                   isAuthenticated && isFollowingArtist ? 'Following' : 'Follow'
@@ -1031,24 +1008,16 @@ const AlbumPlayer: React.FC<AlbumPlayerScreenProps & {
               </button>
             ) : null}
           </div>
-        </div>
-      </header>
 
-      {/* Main Content — scrollable, seamless with header */}
-      <div
-        className="flex-1 flex flex-col min-h-0 overflow-y-auto overflow-x-hidden scrollbar-hide"
-        style={{ paddingBottom: 'calc(5rem + env(safe-area-inset-bottom, 0px))' }}
-      >
-        <div className="flex-1 flex flex-col px-4 pt-0 pb-4">
           {/* Album Artwork / Inline Native Ad Slot */}
-          <div className="px-5 py-4 flex-1 min-h-0">
+          <div className="px-3 py-4 flex-1 min-h-0">
             {inlineAd && showInlineAd ? (
               <PlayerStaticAdBanner
                 ad={inlineAd}
-                className="max-w-[280px] mx-auto rounded-2xl shadow-lg"
+                className="w-full rounded-2xl shadow-lg"
               />
             ) : (
-              <div className="relative rounded-2xl overflow-hidden bg-white/5 w-full aspect-square max-w-[280px] mx-auto shadow-lg">
+              <div className="relative rounded-2xl overflow-hidden bg-white/5 w-full aspect-square shadow-lg">
                 {albumData.coverImageUrl ? (
                   <img
                     src={albumData.coverImageUrl}
@@ -1066,7 +1035,7 @@ const AlbumPlayer: React.FC<AlbumPlayerScreenProps & {
           </div>
 
           {/* Album Information */}
-          <div className="px-5 flex items-start justify-between gap-3">
+          <div className="px-3 flex items-start justify-between gap-3">
             <div className="min-w-0 flex-1">
               <h2 className="text-lg font-bold text-white truncate leading-tight">
                 {albumData.title}
@@ -1087,7 +1056,7 @@ const AlbumPlayer: React.FC<AlbumPlayerScreenProps & {
           </div>
 
           {/* Playback Controls */}
-          <div className="flex items-center justify-center gap-6 px-5 pt-4 pb-2">
+          <div className="flex items-center justify-center gap-6 px-3 pt-4 pb-2">
             <button
               onClick={handleToggleAlbumFavorite}
               className={cn(
@@ -1132,7 +1101,7 @@ const AlbumPlayer: React.FC<AlbumPlayerScreenProps & {
           </div>
 
           {/* Actions row — white icons; report red */}
-          <div className="flex items-center justify-between px-5 pb-5">
+          <div className="flex items-center justify-between px-3 pb-5">
             <div className="flex items-center gap-1">
               <div className="relative" ref={playlistDropdownRef}>
                 <button
@@ -1242,8 +1211,8 @@ const AlbumPlayer: React.FC<AlbumPlayerScreenProps & {
           {showSongBonusPrompt && (
             <div className="mt-3 mb-2 flex items-center justify-between gap-3 rounded-2xl bg-white/10 border border-white/15 px-3 py-2 shadow-lg">
               <div className="flex flex-col">
-                <span className="text-xs font-semibold text-white">Get bonus score</span>
-                <span className="text-[11px] text-white/70">Watch a short ad to earn extra treats.</span>
+                <span className="text-[11px] font-semibold text-white">Get bonus score</span>
+                <span className="text-[10px] text-white/70">Watch a short ad to earn extra listener score.</span>
               </div>
               <button
                 type="button"
@@ -1252,7 +1221,7 @@ const AlbumPlayer: React.FC<AlbumPlayerScreenProps & {
                   if (!currentTrack?.id) return;
                   showSongBonusRewarded({ contentId: currentTrack.id }).catch(() => {});
                 }}
-                className="px-3 py-1.5 rounded-full bg-white text-xs font-semibold text-black active:scale-95 hover:opacity-90 transition-all"
+                className="px-3 py-1.5 rounded-full bg-white text-[11px] font-semibold text-black active:scale-95 hover:opacity-90 transition-all"
               >
                 Claim
               </button>
@@ -1261,7 +1230,7 @@ const AlbumPlayer: React.FC<AlbumPlayerScreenProps & {
 
           {/* Track List */}
           <div className="rounded-2xl bg-white/[0.04] overflow-hidden">
-            <div className="px-5 py-4">
+            <div className="px-3 py-4">
               <div className="flex items-center justify-between mb-4">
                 <h2 className="font-sans font-bold text-white text-lg">Tracks</h2>
                 <button

@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { useLocation, useNavigate } from 'react-router-dom';
 import { Spinner } from '../../components/Spinner';
-import { Heart, ArrowDownToLine, SkipBack, SkipForward, Play, Pause, Share2, MessageCircle, Gift, Plus, Check, Flag, X } from 'lucide-react';
+import { Heart, ArrowDownToLine, SkipBack, SkipForward, Play, Pause, Share2, MessageCircle, Gift, Plus, Check, Flag, X, ChevronDown } from 'lucide-react';
 import { Avatar, AvatarFallback, AvatarImage } from '../../components/ui/avatar';
 import { recordPlayback } from '../../lib/playbackTracker';
 import { supabase, isSongFavorited, toggleSongFavorite, recordShareEvent, isFollowing, followUser, unfollowUser, getRandomSongs, getFollowerCount, getUserPlaylistsForSong, toggleSongInPlaylist, getContentCommentsCount } from '../../lib/supabase';
@@ -632,8 +632,8 @@ export const MusicPlayerScreen: React.FC<MusicPlayerScreenProps> = ({
   };
 
   const handleAutoPlayNext = async () => {
-    console.log('[Smart Autoplay] Song ended. Context:', _playlistContext, 'Playlist length:', playlist.length, 'Current index:', currentIndex, 'Repeat:', repeatMode);
-    console.log('[Smart Autoplay] globalRepeatMode:', globalRepeatMode, 'local repeatMode:', repeatMode);
+    console.log('[Smart Autoplay] Song ended. Context:', _playlistContext, 'Playlist length:', playlist.length, 'Current index:', currentIndex, 'Repeat:', globalRepeatMode);
+    console.log('[Smart Autoplay] globalRepeatMode:', globalRepeatMode);
 
     // Always use the global repeat mode from context, not the local state
     const currentRepeatMode = globalRepeatMode;
@@ -1097,85 +1097,87 @@ export const MusicPlayerScreen: React.FC<MusicPlayerScreenProps> = ({
     onClose();
   };
 
+  const shouldShowFollowButton = Boolean(song.artistId) && Boolean(currentUserId) && currentUserId !== artistUserId;
+
   return (
     <div className="music-player-root fixed inset-0 z-50 flex flex-col bg-[#0a0a0a] animate-in fade-in duration-300 touch-manipulation overflow-hidden pb-[env(safe-area-inset-bottom,0px)]">
-      {/* Header — properly grouped and centered with equal-width side columns */}
-      <header className="flex-shrink-0 z-20 bg-[#0a0a0a]" style={{ paddingTop: 'calc(1.25rem + env(safe-area-inset-top, 0px) * 0.25)', paddingBottom: '1.25rem' }}>
-        <div className="flex flex-row items-center px-3 py-1 min-h-[40px]">
-          {/* Left — fixed width for balance */}
-          <div className="w-[72px] flex items-center justify-start">
-            <button
-              onClick={handleClose}
-              className="p-2 rounded-full text-white/80 hover:text-white hover:bg-white/10 transition-all active:scale-95"
-              aria-label="Close player"
-            >
-              <X className="w-5 h-5" />
-            </button>
-          </div>
-
-          {/* Center — artist info, truly centered */}
-          <div
-            className="flex-1 flex items-center justify-center gap-2 min-w-0 cursor-pointer active:scale-95 transition-transform"
-            onClick={() => {
-              if (artistUserId) {
-                handleClose();
-                navigate(`/user/${artistUserId}`);
-              }
-            }}
-          >
-            <Avatar className="w-8 h-8 flex-shrink-0">
-              <AvatarImage src={artistProfile?.avatar_url || artistProfile?.profile_photo_url || undefined} />
-              <AvatarFallback className="bg-[#00ad74] text-white font-semibold text-xs">
-                {(song.artist || 'A').charAt(0).toUpperCase()}
-              </AvatarFallback>
-            </Avatar>
-            <div className="min-w-0 text-left">
-              <h3 className="font-bold text-white text-sm truncate leading-tight">
-                {song.artist || 'Unknown Artist'}
-              </h3>
-              <p className="text-white/60 text-[11px] truncate">
-                {formatNumber(artistFollowerCount)} followers
-              </p>
-            </div>
-          </div>
-
-          {/* Right — fixed width for balance */}
-          <div className="w-[72px] flex items-center justify-end">
-            {artistUserId && currentUserId !== artistUserId ? (
-              <button
-                onClick={handleToggleFollow}
-                disabled={isLoadingFollow}
-                aria-label={isAuthenticated && isFollowingArtist ? "Unfollow artist" : "Follow artist"}
-                className="inline-flex items-center justify-center px-3 py-1.5 rounded-full font-semibold text-[11px] bg-white text-[#0a0a0a] hover:opacity-90 active:scale-95 transition-all disabled:opacity-50 disabled:cursor-not-allowed"
-              >
-                {isLoadingFollow ? (
-                  <Spinner size={12} className="text-[#0a0a0a]" />
-                ) : (
-                  isAuthenticated && isFollowingArtist ? 'Following' : 'Follow'
-                )}
-              </button>
-            ) : null}
-          </div>
-        </div>
-      </header>
-
       {/* Main Content — scrollable, seamless with header */}
       <div
         className="flex-1 flex flex-col min-h-0 overflow-y-auto overflow-x-hidden scrollbar-hide"
         style={{ paddingBottom: 'calc(5rem + env(safe-area-inset-bottom, 0px))' }}
       >
-        <div className="flex-1 flex flex-col px-4 pt-0 pb-4">
+        <div
+          className="flex-1 flex flex-col px-3 pb-4"
+          style={{ paddingTop: 'calc(1.25rem + env(safe-area-inset-top, 0px) * 0.25)' }}
+        >
           {/* Player block — seamless, no card background */}
           <div className="min-h-0 flex flex-col overflow-hidden">
+            <div className="-ml-1 px-3 mb-4 flex items-center justify-between gap-3">
+              <div className="min-w-0 flex items-center gap-2">
+                <button
+                  onClick={handleClose}
+                  className="p-2 rounded-full text-white/80 hover:text-white hover:bg-white/10 transition-all active:scale-95 flex-shrink-0"
+                  aria-label="Close player"
+                >
+                  <ChevronDown className="w-5 h-5" />
+                </button>
+                <div
+                  className="min-w-0 flex items-center gap-2 cursor-pointer active:scale-95 transition-transform"
+                  onClick={() => {
+                    if (artistUserId) {
+                      handleClose();
+                      navigate(`/user/${artistUserId}`);
+                    }
+                  }}
+                >
+                  <Avatar className="w-9 h-9 flex-shrink-0">
+                    <AvatarImage src={artistProfile?.avatar_url || artistProfile?.profile_photo_url || undefined} />
+                    <AvatarFallback className="bg-[#00ad74] text-white font-semibold text-xs">
+                      {(song.artist || 'A').charAt(0).toUpperCase()}
+                    </AvatarFallback>
+                  </Avatar>
+                  <div className="min-w-0 text-left">
+                    <h3 className="font-bold text-white text-sm truncate leading-tight">
+                      {song.artist || 'Unknown Artist'}
+                    </h3>
+                    <p className="text-white/60 text-[11px] truncate">
+                      {formatNumber(artistFollowerCount)} followers
+                    </p>
+                  </div>
+                </div>
+              </div>
+
+              {shouldShowFollowButton ? (
+                <button
+                  onClick={handleToggleFollow}
+                  disabled={isLoadingFollow || !artistUserId}
+                  aria-label={
+                    !artistUserId
+                      ? 'Loading follow status'
+                      : isAuthenticated && isFollowingArtist
+                        ? 'Unfollow artist'
+                        : 'Follow artist'
+                  }
+                  className="inline-flex items-center justify-center px-3 py-1.5 rounded-full font-semibold text-[11px] bg-white text-[#0a0a0a] hover:opacity-90 active:scale-95 transition-all disabled:opacity-50 disabled:cursor-not-allowed"
+                >
+                  {isLoadingFollow || !artistUserId ? (
+                    <Spinner size={12} className="text-[#0a0a0a]" />
+                  ) : (
+                    isAuthenticated && isFollowingArtist ? 'Following' : 'Follow'
+                  )}
+                </button>
+              ) : null}
+            </div>
+
             {/* Artwork / Inline Native Ad Slot */}
-            <div className="px-5 py-4 flex-1 min-h-0">
+            <div className="px-3 py-4 flex-1 min-h-0">
               {inlineAd && showInlineAd ? (
                 <PlayerStaticAdBanner
                   ad={inlineAd}
-                  className="max-w-[280px] mx-auto rounded-2xl shadow-lg"
+                  className="w-full rounded-2xl shadow-lg"
                 />
               ) : (
-                <div className="relative rounded-2xl overflow-hidden bg-white/5 w-full aspect-square max-w-[280px] mx-auto shadow-lg">
+                <div className="relative rounded-2xl overflow-hidden bg-white/5 w-full aspect-square shadow-lg">
                   {song.coverImageUrl ? (
                     <img src={song.coverImageUrl} alt={song.title} className="w-full h-full object-cover" draggable={false} />
                   ) : (
@@ -1188,7 +1190,7 @@ export const MusicPlayerScreen: React.FC<MusicPlayerScreenProps> = ({
             </div>
 
             {/* Track info */}
-            <div className="px-5 flex items-start justify-between gap-3">
+            <div className="px-3 flex items-start justify-between gap-3">
               <div className="min-w-0 flex-1">
                 <h2 className="text-lg font-bold text-white truncate leading-tight">
                   {song.title}
@@ -1211,10 +1213,10 @@ export const MusicPlayerScreen: React.FC<MusicPlayerScreenProps> = ({
 
             {/* song_bonus ~every 1.5 songs; rewarded interstitial every 3 — separate counters. Claim → VITE_ADMOB_REWARDED_ID */}
             {showSongBonusPrompt && (
-              <div className="mx-5 mt-3 mb-1 flex items-center justify-between gap-3 rounded-2xl bg-white/10 border border-white/15 px-3 py-2 shadow-lg">
+              <div className="mx-3 mt-3 mb-1 flex items-center justify-between gap-3 rounded-2xl bg-white/10 border border-white/15 px-3 py-2 shadow-lg">
                 <div className="flex flex-col">
-                  <span className="text-xs font-semibold text-white">Get bonus score</span>
-                  <span className="text-[11px] text-white/70">Watch a short ad to earn extra treats.</span>
+                  <span className="text-[11px] font-semibold text-white">Get bonus score</span>
+                  <span className="text-[10px] text-white/70">Watch a short ad to earn extra listener score.</span>
                 </div>
                 <button
                   type="button"
@@ -1223,7 +1225,7 @@ export const MusicPlayerScreen: React.FC<MusicPlayerScreenProps> = ({
                     if (!song?.id) return;
                     showSongBonusRewarded({ contentId: song.id }).catch(() => {});
                   }}
-                  className="px-3 py-1.5 rounded-full bg-white text-xs font-semibold text-black active:scale-95 hover:opacity-90 transition-all"
+                  className="px-3 py-1.5 rounded-full bg-white text-[11px] font-semibold text-black active:scale-95 hover:opacity-90 transition-all"
                 >
                   Claim
                 </button>
@@ -1231,7 +1233,7 @@ export const MusicPlayerScreen: React.FC<MusicPlayerScreenProps> = ({
             )}
 
             {/* Progress */}
-            <div className="px-5 mt-4">
+            <div className="px-3 mt-4">
               <div className="relative mb-2">
                 <input
                   type="range"
@@ -1250,7 +1252,7 @@ export const MusicPlayerScreen: React.FC<MusicPlayerScreenProps> = ({
             </div>
 
             {/* Playback controls */}
-            <div className="flex items-center justify-center gap-6 px-5 pt-4 pb-2">
+            <div className="flex items-center justify-center gap-6 px-3 pt-4 pb-2">
               <button
                 onClick={handleToggleFavorite}
                 className={cn(
@@ -1296,7 +1298,7 @@ export const MusicPlayerScreen: React.FC<MusicPlayerScreenProps> = ({
             </div>
 
             {/* Actions row — white icons; report red */}
-            <div className="flex items-center justify-between px-5 pb-5">
+            <div className="flex items-center justify-between px-3 pb-5">
               <div className="flex items-center gap-1">
                 <div className="relative" ref={playlistDropdownRef}>
                   <button

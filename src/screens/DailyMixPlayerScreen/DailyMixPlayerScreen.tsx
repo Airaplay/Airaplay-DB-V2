@@ -9,7 +9,11 @@ import { recordMixPlay } from '../../lib/dailyMixGenerator';
 import { getCreativeMixTitle } from '../../lib/dailyMixTitles';
 import { useAdPlacement } from '../../hooks/useAdPlacement';
 import { BannerAdPosition } from '@capacitor-community/admob';
-import { getNativeAdsForPlacement, NativeAdCard } from '../../lib/nativeAdService';
+import {
+  getNativeAdsForPlacement,
+  prefetchAudioAdCompanionForPlacement,
+  type NativeAdCard,
+} from '../../lib/nativeAdService';
 import { PlayerStaticAdBanner } from '../../components/PlayerStaticAdBanner';
 
 interface DailyMix {
@@ -259,6 +263,14 @@ export const DailyMixPlayerScreen: React.FC = () => {
       nativeAdTimersRef.current = {};
     };
   }, [inlineAd, mixId]);
+
+  // Preload likely audio-ad companion art for daily mix placement so the first overlay paints faster.
+  useEffect(() => {
+    if (!mixId) return;
+    const country =
+      typeof user?.user_metadata?.country === 'string' ? user.user_metadata.country : null;
+    void prefetchAudioAdCompanionForPlacement('daily_mix_player', country);
+  }, [mixId, user?.user_metadata?.country]);
 
   const loadMix = async (isGlobal: boolean) => {
     if (!mixId) return;
@@ -680,8 +692,8 @@ export const DailyMixPlayerScreen: React.FC = () => {
             {showSongBonusPrompt && (
               <div className="mx-1 mt-1 mb-2 flex items-center justify-between gap-3 rounded-2xl bg-white/10 border border-white/15 px-3 py-2 shadow-lg">
                 <div className="flex flex-col">
-                  <span className="text-xs font-semibold text-white">Get bonus score</span>
-                  <span className="text-[11px] text-white/70">Watch a short ad to earn extra treats.</span>
+                  <span className="text-[11px] font-semibold text-white">Get bonus score</span>
+                  <span className="text-[10px] text-white/70">Watch a short ad to earn extra listener score.</span>
                 </div>
                 <button
                   type="button"
@@ -694,7 +706,7 @@ export const DailyMixPlayerScreen: React.FC = () => {
                       contentType: 'song',
                     }).catch(() => {});
                   }}
-                  className="px-3 py-1.5 rounded-full bg-white text-xs font-semibold text-black active:scale-95 hover:opacity-90 transition-all"
+                  className="px-3 py-1.5 rounded-full bg-white text-[11px] font-semibold text-black active:scale-95 hover:opacity-90 transition-all"
                 >
                   Claim
                 </button>

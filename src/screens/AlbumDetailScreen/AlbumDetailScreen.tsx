@@ -1,10 +1,13 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useCallback } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
-import { ArrowLeft, Play, Share2, Music } from 'lucide-react';
+import { ArrowLeft, Play, Share2, Music, Calendar } from 'lucide-react';
 import { supabase, recordShareEvent } from '../../lib/supabase';
 import { shareSong } from '../../lib/shareService';
 import { LazyImage } from '../../components/LazyImage';
 import { useMusicPlayer } from '../../contexts/MusicPlayerContext';
+import { useEngagementSync } from '../../hooks/useEngagementSync';
+import { isReleased, formatReleaseDateDisplay } from '../../lib/releaseDateUtils';
+import { cn } from '../../lib/utils';
 
 interface AlbumSong {
   id: string;
@@ -32,11 +35,17 @@ export const AlbumDetailScreen = (): JSX.Element => {
   const { albumId } = useParams<{ albumId: string }>();
   const navigate = useNavigate();
   const { playSong } = useMusicPlayer();
-
   const [isLoading, setIsLoading] = useState(true);
   const [albumData, setAlbumData] = useState<AlbumData | null>(null);
   const [songs, setSongs] = useState<AlbumSong[]>([]);
   const [isMiniPlayerActive, setIsMiniPlayerActive] = useState(false);
+  const [isUnreleasedForVisitor, setIsUnreleasedForVisitor] = useState(false);
+
+  useEngagementSync(useCallback((update) => {
+    if (update.metric === 'play_count' && update.contentType === 'song') {
+      setSongs(prev => prev.map(s => s.id === update.contentId ? { ...s, playCount: update.value } : s));
+    }
+  }, []));
 
   useEffect(() => {
     if (albumId) {
@@ -95,6 +104,21 @@ export const AlbumDetailScreen = (): JSX.Element => {
 
       setAlbumData(albumWithArtistName);
 
+      if (album.release_date && !isReleased(album.release_date)) {
+        const { data: { user: currentUser } } = await supabase.auth.getUser();
+        if (!currentUser) {
+          setIsUnreleasedForVisitor(true);
+        } else {
+          const { data: profile } = await supabase
+            .from('artist_profiles')
+            .select('artist_id')
+            .eq('user_id', currentUser.id)
+            .maybeSingle();
+          const isOwner = profile?.artist_id === album.artist_id;
+          if (!isOwner) setIsUnreleasedForVisitor(true);
+        }
+      }
+
       const { data: albumSongs, error: songsError } = await supabase
         .from('songs')
         .select('id, title, audio_url, duration_seconds, cover_image_url, artist_id, play_count')
@@ -127,6 +151,7 @@ export const AlbumDetailScreen = (): JSX.Element => {
   };
 
   const handlePlaySong = (song: AlbumSong) => {
+    if (isUnreleasedForVisitor) return;
     if (song.audioUrl) {
       playSong(
         {
@@ -184,9 +209,9 @@ export const AlbumDetailScreen = (): JSX.Element => {
     <div className="flex flex-col min-h-screen bg-gradient-to-b from-[#0a0a0a] via-[#0d0d0d] to-[#111111]">
       {/* Header - Fixed at top */}
       <div className="sticky top-0 z-10 bg-gradient-to-b from-[#0a0a0a] to-transparent backdrop-blur-md">
-        <div className="flex items-center justify-between p-4 pt-[calc(env(safe-area-inset-top,0px)+1rem)]">
+        <div className="flex items-center justify-between p-4" style={{ paddingTop: 'calc(1.25rem + env(safe-area-inset-top, 0px) * 0.25)', paddingBottom: '1.25rem' }}>
           <button
-            onClick={() => navigate(-1)}
+            onClick={() => (window.history.length > 1 ? navigate(-1) : navigate('/'))}
             className="min-w-[44px] min-h-[44px] flex items-center justify-center bg-white/10 hover:bg-white/20 active:bg-white/30 rounded-full transition-all active:scale-95"
             aria-label="Go back"
           >
@@ -204,8 +229,8 @@ export const AlbumDetailScreen = (): JSX.Element => {
         className="flex-1 overflow-y-auto px-4 pb-4"
         style={{
           paddingBottom: isMiniPlayerActive
-            ? 'calc(8.5rem + env(safe-area-inset-bottom, 0px))'
-            : 'calc(4rem + env(safe-area-inset-bottom, 0px))'
+            ? 'calc(12.5rem + env(safe-area-inset-bottom, 0px))'
+            : 'calc(8rem + env(safe-area-inset-bottom, 0px))'
         }}
       >
         {isLoading ? (
@@ -259,6 +284,15 @@ export const AlbumDetailScreen = (): JSX.Element => {
               </div>
             )}
 
+            {isUnreleasedForVisitor && albumData?.release_date && (
+              <div className="flex items-center gap-3 rounded-xl bg-amber-500/15 border border-amber-500/30 px-4 py-3">
+                <Calendar className="w-5 h-5 text-amber-400 flex-shrink-0" />
+                <p className="font-['Inter',sans-serif] text-amber-200 text-sm">
+                  This album releases on {formatReleaseDateDisplay(albumData.release_date)}. You can't play it until then.
+                </p>
+              </div>
+            )}
+
             {/* Track List */}
             <div className="flex flex-col gap-2">
               <h4 className="font-['Inter',sans-serif] font-semibold text-white text-sm px-1 mb-1">
@@ -276,7 +310,10 @@ export const AlbumDetailScreen = (): JSX.Element => {
                   {songs.map((song) => (
                     <div
                       key={song.id}
-                      className="group bg-white/5 hover:bg-white/10 active:bg-white/15 rounded-xl p-4 transition-all cursor-pointer"
+                      className={cn(
+                        'group rounded-xl p-4 transition-all',
+                        isUnreleasedForVisitor ? 'bg-white/5 cursor-not-allowed opacity-75' : 'bg-white/5 hover:bg-white/10 active:bg-white/15 cursor-pointer'
+                      )}
                       onClick={() => handlePlaySong(song)}
                     >
                       <div className="flex items-center gap-3">
@@ -285,7 +322,7 @@ export const AlbumDetailScreen = (): JSX.Element => {
                           <span className="font-['Inter',sans-serif] text-white/60 text-sm group-hover:hidden">
                             {song.trackNumber}
                           </span>
-                          <Play className="w-4 h-4 text-white hidden group-hover:block" fill="white" />
+                          {!isUnreleasedForVisitor && <Play className="w-4 h-4 text-white hidden group-hover:block" fill="white" />}
                         </div>
 
                         {/* Song Info */}

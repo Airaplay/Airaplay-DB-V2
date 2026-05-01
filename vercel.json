@@ -6,6 +6,10 @@
       "handle": "filesystem"
     },
     {
+      "src": "/share/song/(.*)",
+      "dest": "/api/share/song/$1"
+    },
+    {
       "src": "/(.*)",
       "dest": "/index.html"
     }

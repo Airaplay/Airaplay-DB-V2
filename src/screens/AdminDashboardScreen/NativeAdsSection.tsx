@@ -89,6 +89,25 @@ export const NativeAdsSection = (): JSX.Element => {
     fetchNativeAds();
   }, []);
 
+  const openCreateForm = () => {
+    if (showForm) {
+      setShowForm(false);
+      return;
+    }
+    // When admin is currently on the Audio Ads filter, default new ad form to audio mode.
+    // This keeps "Audio tab" intent aligned with create flow.
+    if (!editingAd && listFilterType === 'audio') {
+      setSelectedMediaType('audio');
+      setFormData((prev) => ({
+        ...prev,
+        click_url: prev.click_url || AUDIO_AD_DEFAULT_CLICK_URL,
+      }));
+    } else if (!editingAd) {
+      setSelectedMediaType('visual');
+    }
+    setShowForm(true);
+  };
+
   const fetchNativeAds = async () => {
     try {
       setIsLoading(true);
@@ -349,15 +368,17 @@ export const NativeAdsSection = (): JSX.Element => {
         throw new Error('Ad media file is required');
       }
 
-      let companionImageUrl = selectedMediaType === 'audio'
+      const shouldPersistAudioSettings = isAudioAd || selectedMediaType === 'audio';
+
+      let companionImageUrl = shouldPersistAudioSettings
         ? (editingAd?.companion_image_url || formData.companion_image_url || '')
         : '';
 
-      if (selectedMediaType === 'audio' && companionImageFile) {
+      if (shouldPersistAudioSettings && companionImageFile) {
         companionImageUrl = await uploadCompanionImage(companionImageFile);
       }
 
-      if (selectedMediaType === 'audio' && !companionImageUrl) {
+      if (shouldPersistAudioSettings && !companionImageUrl) {
         throw new Error('Companion image is required for audio ads.');
       }
 
@@ -366,13 +387,13 @@ export const NativeAdsSection = (): JSX.Element => {
         description: formData.description || null,
         image_url: finalImageUrl,
         audio_url: finalAudioUrl,
-        companion_image_url: selectedMediaType === 'audio'
+        companion_image_url: shouldPersistAudioSettings
           ? companionImageUrl
           : null,
-        companion_cta_text: selectedMediaType === 'audio'
+        companion_cta_text: shouldPersistAudioSettings
           ? (formData.companion_cta_text?.trim() || 'Learn More')
           : null,
-        click_url: selectedMediaType === 'audio'
+        click_url: shouldPersistAudioSettings
           ? (formData.click_url?.trim() || AUDIO_AD_DEFAULT_CLICK_URL)
           : formData.click_url,
         advertiser_name: formData.advertiser_name,
@@ -388,7 +409,7 @@ export const NativeAdsSection = (): JSX.Element => {
           : null,
         target_age_min: formData.target_age_min ? Number(formData.target_age_min) : null,
         target_age_max: formData.target_age_max ? Number(formData.target_age_max) : null,
-        audio_insertion_interval_songs: selectedMediaType === 'audio'
+        audio_insertion_interval_songs: shouldPersistAudioSettings
           ? Number(formData.audio_insertion_interval_songs || 5)
           : null,
         target_genres: formData.target_genres
@@ -707,7 +728,7 @@ export const NativeAdsSection = (): JSX.Element => {
           </div>
         </div>
         <button
-          onClick={() => setShowForm(!showForm)}
+          onClick={openCreateForm}
           className="px-4 py-2 bg-[#309605] hover:bg-[#3ba208] text-white rounded-lg transition-colors flex items-center gap-2"
         >
           <Plus className="w-4 h-4" />

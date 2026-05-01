@@ -68,7 +68,8 @@ export const DailyMixSection: React.FC = () => {
       }
 
       // Load global mixes for non-auth users or when personal mixes unavailable
-      const globalMixes = await getGlobalDailyMixes();
+      // Force-refresh here to avoid stale cached empty arrays masking newly generated mixes.
+      const globalMixes = await getGlobalDailyMixes(true);
       if (globalMixes && globalMixes.length > 0) {
         const enrichedMixes = await enrichMixes(globalMixes, true);
         setMixes(enrichedMixes);
@@ -204,14 +205,15 @@ export const DailyMixSection: React.FC = () => {
   useEffect(() => {
     loadDailyMixes();
 
+    const refreshMs = mixes.length > 0 ? 10 * 60 * 1000 : 30 * 1000;
     refreshIntervalRef.current = setInterval(() => {
       loadDailyMixes(false); // Don't auto-generate on interval refreshes
-    }, 10 * 60 * 1000); // 10 min (reduces DB/egress)
+    }, refreshMs);
 
     return () => {
       if (refreshIntervalRef.current) clearInterval(refreshIntervalRef.current);
     };
-  }, [loadDailyMixes]);
+  }, [loadDailyMixes, mixes.length]);
 
   const handleMixClick = (mix: DailyMix) => {
     if (mix.is_global) {
@@ -233,12 +235,6 @@ export const DailyMixSection: React.FC = () => {
     return gradients[(mixNumber - 1) % gradients.length];
   };
 
-  // Show section for everyone - auth users get personalized, non-auth get global
-  // Only hide if still loading or truly no mixes available
-  if (isLoading || mixes.length === 0) {
-    return null;
-  }
-
   return (
     <section className="w-full py-6 px-6">
       <div className="flex items-center justify-between mb-6">
@@ -252,6 +248,7 @@ export const DailyMixSection: React.FC = () => {
         </div>
       </div>
 
+      {isLoading || mixes.length === 0 ? null : (
       <ScrollArea className="w-full">
         <div className="flex gap-4 pb-4">
           {mixes.map((mix) => (
@@ -337,6 +334,7 @@ export const DailyMixSection: React.FC = () => {
         </div>
         <ScrollBar orientation="horizontal" className="opacity-0" />
       </ScrollArea>
+      )}
     </section>
   );
 };

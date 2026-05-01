@@ -1,10 +1,13 @@
 import { supabase } from './supabase';
+import { getOptimizedImageUrl } from './imageOptimization';
 
 export interface NativeAdCard {
   id: string;
   title: string;
   description: string | null;
   image_url: string;
+  companion_image_url?: string | null;
+  companion_cta_text?: string | null;
   audio_url?: string | null;
   audio_insertion_interval_songs?: number | null;
   click_url: string;
@@ -225,11 +228,126 @@ function normalizeAudioUrl(url: string | null | undefined): string | null {
   return trimmed.length > 0 ? trimmed : null;
 }
 
+function normalizeOptionalText(value: string | null | undefined): string | null {
+  if (!value) return null;
+  const trimmed = value.trim();
+  return trimmed.length > 0 ? trimmed : null;
+}
+
 function normalizeAudioAdInterval(value: number | null | undefined): number {
   if (value == null) return 5;
   const rounded = Math.round(Number(value));
   if ([2, 3, 5, 6, 8, 10].includes(rounded)) return rounded;
   return 5;
+}
+
+function warmImageInBrowserCache(url: string | null): void {
+  if (!url || typeof window === 'undefined') return;
+  try {
+    const img = new Image();
+    img.decoding = 'async';
+    img.loading = 'eager';
+    img.src = url;
+  } catch {
+    // Warming cache must never affect ad flow.
+  }
+}
+
+const COMPANION_PRELOAD_LINK_ID = 'airaplay-audio-ad-companion-preload';
+
+function setCompanionImagePreloadLink(url: string | null): void {
+  if (typeof document === 'undefined') return;
+  const existing = document.getElementById(COMPANION_PRELOAD_LINK_ID) as HTMLLinkElement | null;
+  if (!url) {
+    existing?.remove();
+    return;
+  }
+  const link =
+    existing ??
+    (() => {
+      const el = document.createElement('link');
+      el.id = COMPANION_PRELOAD_LINK_ID;
+      el.rel = 'preload';
+      el.as = 'image';
+      document.head.appendChild(el);
+      return el;
+    })();
+  link.href = url;
+}
+
+function preloadImageUrl(url: string | null, timeoutMs: number): Promise<void> {
+  if (!url) return Promise.resolve();
+  return new Promise((resolve) => {
+    const done = () => resolve();
+    const t = window.setTimeout(done, timeoutMs);
+    const img = new Image();
+    img.onload = () => {
+      window.clearTimeout(t);
+      done();
+    };
+    img.onerror = () => {
+      window.clearTimeout(t);
+      done();
+    };
+    img.src = url;
+  });
+}
+
+function waitAudioCanPlay(audio: HTMLAudioElement, timeoutMs: number): Promise<void> {
+  return new Promise((resolve) => {
+    if (audio.readyState >= HTMLMediaElement.HAVE_CURRENT_DATA) {
+      resolve();
+      return;
+    }
+    const t = window.setTimeout(resolve, timeoutMs);
+    const finish = () => {
+      window.clearTimeout(t);
+      resolve();
+    };
+    audio.addEventListener('canplay', finish, { once: true });
+    audio.addEventListener('error', finish, { once: true });
+    try {
+      audio.load();
+    } catch {
+      finish();
+    }
+  });
+}
+
+/**
+ * Warm likely companion art for a placement (e.g. when opening album player) so the first ad paints faster.
+ */
+export async function prefetchAudioAdCompanionForPlacement(
+  placementType: string,
+  userCountry?: string | null,
+  genreId?: string | null
+): Promise<void> {
+  try {
+    const candidatePlacements = AUDIO_AD_PLACEMENT_FALLBACKS[placementType] ?? [placementType];
+    for (const candidatePlacement of candidatePlacements) {
+      const ads = await getNativeAdsForPlacement(candidatePlacement, userCountry, genreId, 4, 'audio');
+      const first = ads.find((item) => {
+        const raw =
+          normalizeOptionalText(item.companion_image_url) ?? normalizeOptionalText(item.image_url);
+        return raw != null && !raw.includes('placehold.co');
+      });
+      if (!first) continue;
+      const raw =
+        normalizeOptionalText(first.companion_image_url) ?? normalizeOptionalText(first.image_url);
+      if (!raw) continue;
+      const opt = getOptimizedImageUrl(raw, {
+        width: 768,
+        height: 768,
+        quality: 78,
+        format: 'webp',
+      });
+      setCompanionImagePreloadLink(opt);
+      warmImageInBrowserCache(opt);
+      break;
+    }
+  } catch {
+    // Prefetch must never throw.
+  }
 }
 
 /**
@@ -292,11 +410,34 @@ export async function playNativeAudioAdForPlacement(
     // Record impression right before playback attempt.
     void recordNativeAdImpression(ad.id);
 
-    const companionImageUrl = (ad.image_url ?? '').trim();
-    const companionClickUrl = (ad.click_url ?? '').trim();
-    const hasCompanionImage = companionImageUrl.length > 0 && !companionImageUrl.includes('placehold.co');
+    const companionImageUrl =
+      normalizeOptionalText(ad.companion_image_url) ??
+      normalizeOptionalText(ad.image_url);
+    const companionClickUrl = normalizeOptionalText(ad.click_url);
+    const companionCtaText = normalizeOptionalText(ad.companion_cta_text);
+    const shouldSuppressCompanionImage =
+      companionImageUrl != null && companionImageUrl.includes('placehold.co');
+    const hasCompanionContent =
+      (companionImageUrl != null && !shouldSuppressCompanionImage) ||
+      companionClickUrl != null;
+
+    const companionDisplayUrl =
+      !shouldSuppressCompanionImage && companionImageUrl
+        ? getOptimizedImageUrl(companionImageUrl, {
+            width: 768,
+            height: 768,
+            quality: 78,
+            format: 'webp',
+          })
+        : null;
+
+    if (companionDisplayUrl) {
+      setCompanionImagePreloadLink(companionDisplayUrl);
+      warmImageInBrowserCache(companionDisplayUrl);
+    }
+
     const showCompanionOverlay = () => {
-      if (!hasCompanionImage) return;
+      if (!hasCompanionContent) return;
       try {
         window.dispatchEvent(
           new CustomEvent('airaplay:audioAdCompanion', {
@@ -306,8 +447,9 @@ export async function playNativeAudioAdForPlacement(
                 id: ad.id,
                 title: ad.title,
                 advertiserName: ad.advertiser_name,
-                imageUrl: companionImageUrl.length > 0 ? companionImageUrl : null,
-                clickUrl: companionClickUrl.length > 0 ? companionClickUrl : null,
+                imageUrl: companionDisplayUrl,
+                clickUrl: companionClickUrl,
+                ctaText: companionCtaText,
               },
             },
           })
@@ -317,7 +459,8 @@ export async function playNativeAudioAdForPlacement(
       }
     };
     const hideCompanionOverlay = () => {
-      if (!hasCompanionImage) return;
+      setCompanionImagePreloadLink(null);
+      if (!hasCompanionContent) return;
       try {
         window.dispatchEvent(
           new CustomEvent('airaplay:audioAdCompanion', {
@@ -334,6 +477,14 @@ export async function playNativeAudioAdForPlacement(
 
     const adAudio = new Audio(audioUrl);
     adAudio.preload = 'auto';
+
+    await Promise.race([
+      Promise.all([
+        preloadImageUrl(companionDisplayUrl, 6000),
+        waitAudioCanPlay(adAudio, 6000),
+      ]),
+      new Promise<void>((r) => window.setTimeout(r, 2000)),
+    ]);
 
     const maxDurationMs = options?.maxDurationMs ?? 35_000;
 

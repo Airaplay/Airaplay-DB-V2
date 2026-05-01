@@ -80,7 +80,8 @@ export const shareSong = async (
   songTitle: string,
   artistName: string
 ): Promise<void> => {
-  const shareUrl = `${PRODUCTION_ORIGIN}/song/${songId}`;
+  // Use server-rendered share landing page so social previews can show song cover artwork.
+  const shareUrl = `${PRODUCTION_ORIGIN}/share/song/${songId}`;
   const shareText = `Check out "${songTitle}" by ${artistName} on Airaplay!`;
 
   await shareContent({

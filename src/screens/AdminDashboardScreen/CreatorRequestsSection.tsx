@@ -47,10 +47,14 @@ export const CreatorRequestsSection: React.FC = () => {
   const [badgeFile, setBadgeFile] = useState<File | null>(null);
   const [badgePreview, setBadgePreview] = useState('');
   const [uploadingBadge, setUploadingBadge] = useState(false);
+  const [approvalMode, setApprovalMode] = useState<'manual' | 'automatic'>('manual');
+  const [approvalModeLoading, setApprovalModeLoading] = useState(true);
+  const [updatingApprovalMode, setUpdatingApprovalMode] = useState(false);
 
   useEffect(() => {
     fetchRequests();
     fetchBadgeConfig();
+    fetchApprovalMode();
   }, []);
 
   useEffect(() => {
@@ -105,6 +109,56 @@ export const CreatorRequestsSection: React.FC = () => {
       }
     } catch (error) {
       console.error('Error fetching badge config:', error);
+    }
+  };
+
+  const fetchApprovalMode = async () => {
+    try {
+      setApprovalModeLoading(true);
+      const { data, error } = await supabase
+        .from('creator_request_settings')
+        .select('approval_mode')
+        .eq('single_row_marker', 1)
+        .maybeSingle();
+
+      if (error) {
+        console.warn('Error fetching creator request approval mode:', error);
+        return;
+      }
+
+      if (data?.approval_mode === 'automatic' || data?.approval_mode === 'manual') {
+        setApprovalMode(data.approval_mode);
+      }
+    } catch (error) {
+      console.error('Error fetching creator request approval mode:', error);
+    } finally {
+      setApprovalModeLoading(false);
+    }
+  };
+
+  const handleApprovalModeChange = async (mode: 'manual' | 'automatic') => {
+    if (mode === approvalMode || updatingApprovalMode) return;
+
+    try {
+      setUpdatingApprovalMode(true);
+
+      const { error } = await supabase
+        .from('creator_request_settings')
+        .update({
+          approval_mode: mode,
+          updated_at: new Date().toISOString()
+        })
+        .eq('single_row_marker', 1);
+
+      if (error) throw error;
+
+      setApprovalMode(mode);
+      alert(`Creator request mode updated to ${mode}.`);
+    } catch (error: any) {
+      console.error('Error updating creator request approval mode:', error);
+      alert(error?.message || 'Failed to update creator request mode');
+    } finally {
+      setUpdatingApprovalMode(false);
     }
   };
 
@@ -495,6 +549,57 @@ export const CreatorRequestsSection: React.FC = () => {
             </div>
             <p className="text-xs text-gray-400 mt-1.5">Recommended: PNG or SVG, 24x24px or larger</p>
           </div>
+        </div>
+      </div>
+
+      {/* Creator Request Approval Mode */}
+      <div className="bg-white rounded-xl border border-gray-100 shadow-sm p-5">
+        <div className="flex items-start justify-between gap-4">
+          <div>
+            <h3 className="text-sm font-semibold text-gray-900 leading-tight">Creator Request Mode</h3>
+            <p className="text-xs text-gray-400 mt-0.5">
+              Choose whether new creator requests require admin review or are approved instantly
+            </p>
+          </div>
+          {approvalModeLoading ? (
+            <span className="text-xs text-gray-400">Loading mode...</span>
+          ) : (
+            <span
+              className={`px-2.5 py-1 rounded-full text-xs font-semibold ${
+                approvalMode === 'automatic'
+                  ? 'bg-green-100 text-green-700'
+                  : 'bg-amber-100 text-amber-700'
+              }`}
+            >
+              {approvalMode === 'automatic' ? 'Automatic' : 'Manual'}
+            </span>
+          )}
+        </div>
+
+        <div className="mt-4 grid grid-cols-1 sm:grid-cols-2 gap-3">
+          <button
+            onClick={() => handleApprovalModeChange('manual')}
+            disabled={approvalModeLoading || updatingApprovalMode}
+            className={`px-4 py-2.5 rounded-lg border text-sm font-medium transition-colors ${
+              approvalMode === 'manual'
+                ? 'border-[#309605] bg-[#e6f7f1] text-[#1f6e03]'
+                : 'border-gray-200 bg-white text-gray-600 hover:bg-gray-50'
+            } disabled:opacity-50 disabled:cursor-not-allowed`}
+          >
+            Manual Review
+          </button>
+
+          <button
+            onClick={() => handleApprovalModeChange('automatic')}
+            disabled={approvalModeLoading || updatingApprovalMode}
+            className={`px-4 py-2.5 rounded-lg border text-sm font-medium transition-colors ${
+              approvalMode === 'automatic'
+                ? 'border-[#309605] bg-[#e6f7f1] text-[#1f6e03]'
+                : 'border-gray-200 bg-white text-gray-600 hover:bg-gray-50'
+            } disabled:opacity-50 disabled:cursor-not-allowed`}
+          >
+            Automatic Approval
+          </button>
         </div>
       </div>
 

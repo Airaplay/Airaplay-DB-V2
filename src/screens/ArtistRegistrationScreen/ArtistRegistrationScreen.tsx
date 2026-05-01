@@ -212,7 +212,20 @@ export const ArtistRegistrationScreen = (): JSX.Element => {
 
       const genreName = genres.find(g => g.id === formData.genre_id)?.name || 'Unknown';
 
-      const { error: insertError } = await supabase
+      const { data: creatorRequestSettings, error: settingsError } = await supabase
+        .from('creator_request_settings')
+        .select('approval_mode')
+        .eq('single_row_marker', 1)
+        .maybeSingle();
+
+      if (settingsError) {
+        throw new Error(`Failed to read creator request settings: ${settingsError.message}`);
+      }
+
+      const approvalMode: 'manual' | 'automatic' =
+        creatorRequestSettings?.approval_mode === 'automatic' ? 'automatic' : 'manual';
+
+      const { data: insertedRequest, error: insertError } = await supabase
         .from('creator_requests')
         .insert({
           user_id: userId,
@@ -227,13 +240,29 @@ export const ArtistRegistrationScreen = (): JSX.Element => {
           id_document_url: null,
           cover_art_url: null,
           status: 'pending'
-        });
+        })
+        .select('id')
+        .single();
 
       if (insertError) {
         throw new Error(`Failed to submit creator request: ${insertError.message}`);
       }
 
-      setSuccessMessage('Creator request submitted successfully! Check your Notifications for updates. An admin will review your request and send you a notification with the decision (Approved, Rejected, or Banned status).');
+      if (approvalMode === 'automatic') {
+        const { error: autoApproveError } = await supabase.rpc('approve_creator_request', {
+          request_id: insertedRequest.id
+        });
+
+        if (autoApproveError) {
+          throw new Error(`Creator request was submitted but automatic approval failed: ${autoApproveError.message}`);
+        }
+      }
+
+      setSuccessMessage(
+        approvalMode === 'automatic'
+          ? 'Creator request approved automatically! Your creator access is now active. Check your Notifications for details.'
+          : 'Creator request submitted successfully! Check your Notifications for updates. An admin will review your request and send you a notification with the decision (Approved, Rejected, or Banned status).'
+      );
 
       setTimeout(() => {
         navigate('/profile');

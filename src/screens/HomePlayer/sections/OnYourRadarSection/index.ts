@@ -1,1 +1,1 @@
-export { OnYourRadarSection } from "./OnYourRadarSection";
+export { OnYourRadarSection } from './OnYourRadarSection';

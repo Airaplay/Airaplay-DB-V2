@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState } from 'react';
 import { ExternalLink, X } from 'lucide-react';
 import { cn } from '../lib/utils';
 import { recordNativeAdClick } from '../lib/nativeAdService';
+import { normalizeExternalHref, openExternalUrl } from '../lib/openExternalUrl';
 
 type CompanionAd = {
   id: string;
@@ -65,59 +66,54 @@ export function AudioAdCompanionOverlay(): JSX.Element | null {
 
   if (!visible || !ad) return null;
 
-  const handleClick = () => {
+  const handleCtaClick = async (e: React.MouseEvent) => {
+    e.preventDefault();
+    e.stopPropagation();
     if (!clickUrl) return;
+    void recordNativeAdClick(ad.id);
     try {
-      window.open(clickUrl, '_blank', 'noopener,noreferrer');
-      void recordNativeAdClick(ad.id);
+      await openExternalUrl(clickUrl);
     } catch {
-      // Ignore.
+      const href = normalizeExternalHref(clickUrl);
+      if (href) window.open(href, '_blank', 'noopener,noreferrer');
     }
   };
 
   return (
     <div className="fixed inset-0 z-[9998] flex items-center justify-center bg-black/70 backdrop-blur-sm px-4 py-6">
       <div className="w-full max-w-sm">
-        <div className="flex items-center justify-between mb-2">
-          <div className="min-w-0">
-            <p className="text-white/80 text-[11px] font-semibold uppercase tracking-wider truncate">
-              Ad break
-            </p>
-            <p className="text-white text-sm font-semibold truncate">
-              {ad.title || ad.advertiserName || 'Sponsored'}
-            </p>
-          </div>
-          <button
-            type="button"
-            className="p-2 rounded-full text-white/80 hover:text-white hover:bg-white/10 transition-colors"
-            onClick={() => setVisible(false)}
-            aria-label="Hide ad"
-          >
-            <X className="w-4 h-4" />
-          </button>
-        </div>
-
         <div className="rounded-2xl overflow-hidden bg-white/5 border border-white/10 shadow-2xl">
-          <div className="w-full aspect-square bg-black/30 flex items-center justify-center">
+          <div className="relative w-full aspect-square bg-black/30 flex items-center justify-center">
             {imageUrl ? (
               <img
                 src={imageUrl}
-                alt={ad.title || 'Ad'}
+                alt=""
                 className="w-full h-full object-cover"
                 draggable={false}
+                loading="eager"
+                decoding="async"
+                fetchPriority="high"
               />
             ) : (
               <div className="text-white/60 text-sm">Sponsored</div>
             )}
+            <button
+              type="button"
+              className="absolute top-3 right-3 z-10 p-2 rounded-full bg-black/50 border border-white/20 text-white hover:bg-black/70 hover:border-white/30 transition-colors shadow-lg"
+              onClick={() => setVisible(false)}
+              aria-label="Hide ad"
+            >
+              <X className="w-4 h-4" />
+            </button>
           </div>
 
           <div className="p-3">
             <button
               type="button"
-              onClick={handleClick}
+              onClick={handleCtaClick}
               disabled={!clickUrl}
               className={cn(
-                'w-full inline-flex items-center justify-center gap-2 rounded-xl px-4 py-3 text-sm font-semibold transition-all',
+                'w-full touch-manipulation inline-flex items-center justify-center gap-2 rounded-xl px-4 py-3 text-sm font-semibold transition-all',
                 clickUrl
                   ? 'bg-white text-black hover:opacity-90 active:scale-[0.99]'
                   : 'bg-white/20 text-white/60 cursor-not-allowed'

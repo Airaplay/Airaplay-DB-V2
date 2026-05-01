@@ -4,7 +4,7 @@ import { BrowserRouter, Routes, Route, useLocation, useNavigate } from "react-ro
 import { lazy, Suspense } from "react";
 import "./index.css";
 import "./lib/preloader";
-import { supabase, refreshSessionIfNeeded, SESSION_KEY_PENDING_BROWSER_OAUTH } from "./lib/supabase";
+import { supabase, refreshSessionIfNeeded, SESSION_KEY_PENDING_BROWSER_OAUTH, getPublicWebUrl } from "./lib/supabase";
 import { logger } from "./lib/logger";
 import { admobService } from "./lib/admobService";
 import { appInitializer } from "./lib/appInitializer";
@@ -37,7 +37,9 @@ import {
   resolveRewardedInterstitialAdUnitId,
 } from "./lib/adPlacementConstants";
 import { getBannerPreloadLeadTimeMs, getNextMainTabBannerAutoRefreshDelayMs } from "./lib/bannerRefreshConstants";
-import { BannerAdPosition } from "@capacitor-community/admob";
+import { AdMob, BannerAdPosition } from "@capacitor-community/admob";
+
+const APP_OPEN_AD_UNIT_ID = 'ca-app-pub-4739421992298461/3885196969';
 
 // Lazy load screens for better performance
 const ExploreScreen = lazy(() => import("./screens/ExploreScreen").then(module => ({ default: module.ExploreScreen })));
@@ -95,7 +97,7 @@ class RootErrorBoundary extends React.Component<{ children: React.ReactNode }, {
   }
 
   componentDidCatch(error: Error, errorInfo: React.ErrorInfo) {
-    logger.error('RootErrorBoundary: app tree error', error, errorInfo);
+    logger.error('RootErrorBoundary: app tree error', { error, errorInfo });
   }
 
   render() {
@@ -186,23 +188,30 @@ function App() {
   const hasTriggeredAppOpenAdRef = useRef(false);
   const has15MinAdTriggeredRef = useRef(false);
 
-  // App-open interstitial (policy-safe): show once shortly after first screen, non-rewarded, respects global cooldown.
+  // App-open ad: show once shortly after first screen with a hardcoded app-open unit.
   useEffect(() => {
     if (!Capacitor.isNativePlatform() || hasTriggeredAppOpenAdRef.current) return;
-    const isHome = location.pathname === '/' || location.pathname === '' || location.pathname === '/home';
     hasTriggeredAppOpenAdRef.current = true;
-    // Allow Home to rely on its own timing if needed; otherwise show a single interstitial on first open.
-    const shouldShow = true;
-    if (!shouldShow) return;
 
     const t = setTimeout(() => {
-      showInterstitial('app_open_interstitial', {
-        contentType: 'general',
-      }).catch(() => {});
-    }, 2200); // After splash minDisplayTime so first screen is visible
+      const appOpenApi = AdMob as unknown as {
+        prepareAppOpenAd?: (options: { adId: string }) => Promise<void>;
+        showAppOpenAd?: () => Promise<void>;
+      };
+
+      if (typeof appOpenApi.prepareAppOpenAd !== 'function' || typeof appOpenApi.showAppOpenAd !== 'function') {
+        console.warn('AdMob: App Open API not available in current plugin build');
+        return;
+      }
+
+      void appOpenApi
+        .prepareAppOpenAd({ adId: APP_OPEN_AD_UNIT_ID })
+        .then(() => appOpenApi.showAppOpenAd?.())
+        .catch(() => {});
+    }, 5000); // Delay app-open ad to 5s after launch
 
     return () => clearTimeout(t);
-  }, [showInterstitial, location.pathname]);
+  }, [location.pathname]);
 
   // Trigger additional interstitial after 15 minutes of app usage (AdMob policy-safe, non-rewarded).
   useEffect(() => {
@@ -335,8 +344,8 @@ function App() {
     const authAllowedOrigins: string[] = (() => {
       const list: string[] = [];
       try {
-        const base = import.meta.env.VITE_PUBLIC_WEB_URL;
-        if (typeof base === 'string' && base.trim()) list.push(new URL(base.trim()).origin);
+        // Always include the canonical public web URL (native builds have origin=capacitor://localhost).
+        list.push(new URL(getPublicWebUrl()).origin);
       } catch {
         // ignore invalid env URL
       }
@@ -370,22 +379,15 @@ function App() {
               navigate(internalPath, { replace: true });
               return;
             }
-            // Recovery must run in the system browser (e.g. https://www.airaplay.com/reset-password), not the WebView.
-            if (
-              url.includes('/reset-password') &&
-              (parsed.protocol === 'https:' || parsed.protocol === 'http:') &&
-              authAllowedOrigins.includes(parsed.origin)
-            ) {
-              void Browser.open({ url: parsed.href });
-              navigate('/', { replace: true });
-              return;
-            }
+            // Web App Links (https://airaplay.com/...) should be converted to an internal route
+            // so the in-app screens can process the auth/recovery tokens.
+            const internalPath = `${parsed.pathname}${parsed.search}${parsed.hash}`;
+            navigate(internalPath, { replace: true });
+            return;
           } catch {
             navigate('/', { replace: true });
             return;
           }
-          window.location.href = url;
-          return;
         }
 
         const urlObj = new URL(url);
@@ -439,7 +441,8 @@ function App() {
     // Handle app opened via deep link on launch
     const checkLaunchUrl = async () => {
       try {
-        const { url } = await CapacitorApp.getLaunchUrl();
+        const launch = await CapacitorApp.getLaunchUrl();
+        const url = launch?.url;
         if (url) {
           handleDeepLink(url);
         }
@@ -449,7 +452,7 @@ function App() {
     };
 
     // Handle deep links while app is running
-    const listener = CapacitorApp.addListener('appUrlOpen', (event) => {
+    const listenerHandlePromise = CapacitorApp.addListener('appUrlOpen', (event) => {
       handleDeepLink(event.url);
     });
 
@@ -457,7 +460,7 @@ function App() {
     checkLaunchUrl();
 
     return () => {
-      listener.remove();
+      void listenerHandlePromise.then((h) => h.remove());
     };
   }, [navigate]);
 
@@ -961,9 +964,6 @@ function App() {
       {/* Bottom Navigation Bar - Positioned outside container for edge-to-edge rendering */}
       {!shouldHideNavigation && !isAdminRoute && <NavigationBarSection />}
 
-      {/* Audio ad companion display (during audio ad breaks) */}
-      {BUILD_TARGET !== "web" && !isAdminRoute && <AudioAdCompanionOverlay />}
-
       {/* Mini Music Player */}
       {(() => {
         const shouldShow = isMiniPlayerVisible && currentSong && !shouldHideMiniPlayer;
@@ -973,7 +973,7 @@ function App() {
             song={currentSong}
             isVisible={isMiniPlayerVisible}
             isPlaying={isPlaying}
-            oldCurrentTime={currentTime} // Use a different prop name to avoid confusion with internal state
+            currentTime={currentTime}
             duration={duration}
             error={playerError}
             albumId={albumId}
@@ -1018,6 +1018,9 @@ function App() {
 
       {/* Upload Progress Modal */}
       <UploadProgressModal />
+
+      {/* Audio ad companion overlay (image + CTA while audio ad is playing) */}
+      <AudioAdCompanionOverlay />
     </div>
   );
 }

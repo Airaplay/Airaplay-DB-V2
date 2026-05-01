@@ -43,11 +43,14 @@ import { useMusicPlayer } from '../../contexts/MusicPlayerContext';
 import { playlistCache } from '../../lib/playlistCache';
 import { LoadingLogo } from '../../components/LoadingLogo';
 import { LazyImage } from '../../components/LazyImage';
-import { Spinner } from '../../components/Spinner';
 import { useAdPlacement } from '../../hooks/useAdPlacement';
 import { usePlayerBottomBanner } from '../../hooks/usePlayerBottomBanner';
 import { favoritesCache } from '../../lib/favoritesCache';
-import { getNativeAdsForPlacement, NativeAdCard } from '../../lib/nativeAdService';
+import {
+  getNativeAdsForPlacement,
+  prefetchAudioAdCompanionForPlacement,
+  type NativeAdCard,
+} from '../../lib/nativeAdService';
 import { PlayerStaticAdBanner } from '../../components/PlayerStaticAdBanner';
 
 interface PlaylistTrack {
@@ -276,7 +279,7 @@ const PlaylistPlayer: React.FC<PlaylistPlayerScreenProps & {
     let mounted = true;
     (async () => {
       try {
-        const ads = await getNativeAdsForPlacement('playlist_player', null, null, undefined, 1);
+        const ads = await getNativeAdsForPlacement('playlist_player', null, null, 1);
         if (!mounted) return;
         const visualOnlyAd =
           ads.find((ad) => !ad.audio_url || ad.audio_url.trim().length === 0) ?? null;
@@ -317,6 +320,14 @@ const PlaylistPlayer: React.FC<PlaylistPlayerScreenProps & {
       nativeAdTimersRef.current = {};
     };
   }, [inlineAd, playlistData.id]);
+
+  // Preload likely audio-ad companion art for playlist placement so the first overlay paints faster.
+  useEffect(() => {
+    if (!playlistData?.id) return;
+    const country =
+      typeof user?.user_metadata?.country === 'string' ? user.user_metadata.country : null;
+    void prefetchAudioAdCompanionForPlacement('playlist_player', country);
+  }, [playlistData?.id, user?.user_metadata?.country]);
 
   // No additional timers: rewarded ads are handled by song-transition logic only.
 
@@ -504,39 +515,29 @@ const PlaylistPlayer: React.FC<PlaylistPlayerScreenProps & {
       return;
     }
 
-    const trackIndex = tracks.findIndex(t => t.id === trackId);
-    if (trackIndex < 0) return;
+    const track = tracks.find(t => t.id === trackId);
+    if (!track) return;
+    const previousFavoritedState = Boolean(track.isFavorited);
 
-    const previousFavoritedState = tracks[trackIndex].isFavorited;
-
-    const updatedTracks = [...tracks];
-    updatedTracks[trackIndex] = {
-      ...updatedTracks[trackIndex],
-      isFavorited: !previousFavoritedState
-    };
-    setTracks(updatedTracks);
+    setTracks(prev =>
+      prev.map(t => (t.id === trackId ? { ...t, isFavorited: !previousFavoritedState } : t))
+    );
 
     try {
       const newFavoriteStatus = await toggleSongFavorite(trackId);
 
-      const finalTracks = [...tracks];
-      finalTracks[trackIndex] = {
-        ...finalTracks[trackIndex],
-        isFavorited: newFavoriteStatus
-      };
-      setTracks(finalTracks);
+      setTracks(prev =>
+        prev.map(t => (t.id === trackId ? { ...t, isFavorited: newFavoriteStatus } : t))
+      );
 
       // Track engagement contribution when user likes track
       if (newFavoriteStatus && !previousFavoritedState) {
         recordContribution('song_like', trackId, 'song').catch(console.error);
       }
     } catch (error) {
-      const revertedTracks = [...tracks];
-      revertedTracks[trackIndex] = {
-        ...revertedTracks[trackIndex],
-        isFavorited: previousFavoritedState
-      };
-      setTracks(revertedTracks);
+      setTracks(prev =>
+        prev.map(t => (t.id === trackId ? { ...t, isFavorited: previousFavoritedState } : t))
+      );
 
       console.error('Error toggling track favorite:', error);
       alert('Failed to update favorite status');
@@ -710,60 +711,28 @@ const PlaylistPlayer: React.FC<PlaylistPlayerScreenProps & {
 
   return (
     <div className="flex flex-col min-h-screen bg-gradient-to-b from-[#0a0a0a] via-[#0d0d0d] to-[#111111] fixed inset-0 z-50 pb-[env(safe-area-inset-bottom,0px)] overflow-hidden">
-      {/* Header - Same safe area as Explore */}
-      <div className="sticky top-0 z-10 bg-[#0d0d0d]/95 backdrop-blur-md border-b border-white/[0.04]">
-        <div className="flex items-center justify-between px-4 pt-5 pb-3">
-          <button
-            onClick={handleClose}
-            className="min-w-[40px] min-h-[40px] flex items-center justify-center bg-white/10 hover:bg-white/20 active:bg-white/30 rounded-full transition-all active:scale-95"
-            aria-label="Go back"
-          >
-            <ArrowLeft className="w-5 h-5 text-white" strokeWidth={2.5} />
-          </button>
-          <h1 className="font-sans font-bold text-white text-lg">
-            Playlist
-          </h1>
-          {/* Right side actions for owner */}
-          <div className="flex items-center gap-1">
-            {playlistData.isOwner ? (
-              <>
-                <button
-                  onClick={() => setShowEditPlaylistModal(true)}
-                  className="min-w-[40px] min-h-[40px] flex items-center justify-center hover:bg-white/10 rounded-full transition-all active:scale-95"
-                  aria-label="Edit playlist"
-                >
-                  <Edit className="w-5 h-5 text-white/80" />
-                </button>
-                <button
-                  onClick={handleDeletePlaylist}
-                  className="min-w-[40px] min-h-[40px] flex items-center justify-center hover:bg-red-500/20 rounded-full transition-all active:scale-95"
-                  aria-label="Delete playlist"
-                >
-                  <Trash2 className="w-5 h-5 text-red-400" />
-                </button>
-              </>
-            ) : (
-              <div className="w-[40px]" />
-            )}
-          </div>
-        </div>
-      </div>
-
       {/* Scrollable Content Container */}
       <div
         className="flex-1 overflow-y-auto px-4 pb-4 scrollbar-hide"
         style={{
+          paddingTop: 'calc(1.25rem + env(safe-area-inset-top, 0px) * 0.25)',
           paddingBottom: isMiniPlayerActive
             ? 'calc(12.5rem + env(safe-area-inset-bottom, 0px))'
             : 'calc(8rem + env(safe-area-inset-bottom, 0px))'
         }}
       >
-        <div className="flex flex-col gap-6 py-4">
+        <div className="flex flex-col gap-6 pt-0 pb-4">
           {/* Playlist Header Card */}
           <div className="relative overflow-hidden rounded-2xl">
             {/* Background: Track image collage or playlist cover */}
             <div className="absolute inset-0 z-0">
-              {tracks.length > 0 && tracks.some(t => t.coverImageUrl) ? (
+              {isListenerCurationsPlaylist && playlistData.coverImageUrl ? (
+                <img
+                  src={playlistData.coverImageUrl}
+                  alt={playlistData.title}
+                  className="w-full h-full object-cover"
+                />
+              ) : tracks.length > 0 && tracks.some(t => t.coverImageUrl) ? (
                 <div className="grid grid-cols-2 grid-rows-2 w-full h-full">
                   {tracks
                     .filter(t => t.coverImageUrl)
@@ -788,7 +757,42 @@ const PlaylistPlayer: React.FC<PlaylistPlayerScreenProps & {
               <div className="absolute inset-0 bg-gradient-to-b from-black/60 via-black/70 to-black/90" />
             </div>
 
-            <div className="relative z-10 p-6 pb-7 min-h-[200px] flex flex-col justify-end">
+            <div className="relative z-10 p-6 pb-7 min-h-[200px] flex flex-col justify-between">
+              <div
+                className="flex items-center justify-between"
+              >
+                <button
+                  onClick={handleClose}
+                  className="min-w-[40px] min-h-[40px] flex items-center justify-center bg-black/40 hover:bg-black/55 active:bg-black/65 rounded-full transition-all active:scale-95 backdrop-blur-sm"
+                  aria-label="Go back"
+                >
+                  <ArrowLeft className="w-5 h-5 text-white" strokeWidth={2.5} />
+                </button>
+                <div className="flex items-center gap-1">
+                  {playlistData.isOwner ? (
+                    <>
+                      <button
+                        onClick={() => setShowEditPlaylistModal(true)}
+                        className="min-w-[40px] min-h-[40px] flex items-center justify-center bg-black/35 hover:bg-black/50 rounded-full transition-all active:scale-95"
+                        aria-label="Edit playlist"
+                      >
+                        <Edit className="w-5 h-5 text-white/80" />
+                      </button>
+                      <button
+                        onClick={handleDeletePlaylist}
+                        className="min-w-[40px] min-h-[40px] flex items-center justify-center bg-black/35 hover:bg-red-500/30 rounded-full transition-all active:scale-95"
+                        aria-label="Delete playlist"
+                      >
+                        <Trash2 className="w-5 h-5 text-red-400" />
+                      </button>
+                    </>
+                  ) : (
+                    <div className="w-[40px]" />
+                  )}
+                </div>
+              </div>
+
+              <div>
               <h2 className="font-sans font-bold text-white text-2xl leading-tight mb-1">
                 {playlistData.title}
               </h2>
@@ -830,28 +834,6 @@ const PlaylistPlayer: React.FC<PlaylistPlayerScreenProps & {
                   >
                     <Share2 className="w-[18px] h-[18px]" />
                   </button>
-                  {currentTrack?.audioUrl ? (
-                    <button
-                      type="button"
-                      onClick={() => void handleDownloadTrack()}
-                      disabled={isDownloadInProgress}
-                      className={cn(
-                        'p-2 rounded-full transition-colors disabled:opacity-50',
-                        trackOfflineDownloaded
-                          ? 'shrink-0 hover:bg-red-500/20 active:bg-red-500/25'
-                          : 'text-white/80 hover:text-white hover:bg-white/10'
-                      )}
-                      title={trackOfflineDownloaded ? 'Remove offline download' : 'Download for offline'}
-                    >
-                      {isDownloadInProgress ? (
-                        <Spinner size={18} className="text-white" />
-                      ) : trackOfflineDownloaded ? (
-                        <X className="w-3.5 h-3.5 text-white/50" aria-hidden />
-                      ) : (
-                        <ArrowDownToLine className="w-[18px] h-[18px]" />
-                      )}
-                    </button>
-                  ) : null}
                   {isListenerCurationsPlaylist && !playlistData.isOwner && (
                     <button
                       onClick={() => setShowTippingModal(true)}
@@ -877,6 +859,7 @@ const PlaylistPlayer: React.FC<PlaylistPlayerScreenProps & {
                   <PlayerStaticAdBanner ad={inlineAd} className="rounded-xl" />
                 </div>
               )}
+              </div>
             </div>
           </div>
 
@@ -884,8 +867,8 @@ const PlaylistPlayer: React.FC<PlaylistPlayerScreenProps & {
           {showSongBonusPrompt && (
             <div className="mt-3 mb-2 mx-4 flex items-center justify-between gap-3 rounded-2xl bg-white/10 border border-white/15 px-3 py-2 shadow-lg">
               <div className="flex flex-col">
-                <span className="text-xs font-semibold text-white">Get bonus score</span>
-                <span className="text-[11px] text-white/70">Watch a short ad to earn extra treats.</span>
+                <span className="text-[11px] font-semibold text-white">Get bonus score</span>
+                <span className="text-[10px] text-white/70">Watch a short ad to earn extra listener score.</span>
               </div>
               <button
                 type="button"
@@ -894,7 +877,7 @@ const PlaylistPlayer: React.FC<PlaylistPlayerScreenProps & {
                   if (!currentTrack?.id) return;
                   showSongBonusRewarded({ contentId: currentTrack.id }).catch(() => {});
                 }}
-                className="px-3 py-1.5 rounded-full bg-white text-xs font-semibold text-black active:scale-95 hover:opacity-90 transition-all"
+                className="px-3 py-1.5 rounded-full bg-white text-[11px] font-semibold text-black active:scale-95 hover:opacity-90 transition-all"
               >
                 Claim
               </button>
@@ -923,9 +906,7 @@ const PlaylistPlayer: React.FC<PlaylistPlayerScreenProps & {
               className="w-14 h-14 rounded-full flex items-center justify-center bg-white text-[#0a0a0a] hover:scale-[1.06] active:scale-95 transition-all duration-200 shadow-lg"
               aria-label={isThisPlaylistActive && isPlaying && currentSong?.id === currentTrack?.id ? 'Pause' : 'Play'}
             >
-              {isBuffering ? (
-                <Spinner size={20} className="text-[#0a0a0a]" />
-              ) : isThisPlaylistActive && isPlaying && currentSong?.id === currentTrack?.id ? (
+              {isThisPlaylistActive && isPlaying && currentSong?.id === currentTrack?.id ? (
                 <Pause className="w-6 h-6" />
               ) : (
                 <Play className="w-6 h-6 ml-0.5" />
@@ -1158,7 +1139,9 @@ export const PlaylistPlayerScreen: React.FC<PlaylistPlayerScreenProps> = ({ onPl
   const { playlistId } = useParams<{ playlistId: string }>();
   const [searchParams] = useSearchParams();
   const navigate = useNavigate();
-  const isListenerCurationsPlaylist = searchParams.get('source') === 'listener_curations';
+  const source = searchParams.get('source');
+  const isListenerCurationsPlaylist = source === 'listener_curations';
+  const isMixForYouPlaylist = source === 'mix_for_you';
   const [playlistData, setPlaylistData] = useState<PlaylistData | null>(null);
   const [error, setError] = useState<string | null>(null);
 
@@ -1498,8 +1481,10 @@ export const PlaylistPlayerScreen: React.FC<PlaylistPlayerScreenProps> = ({ onPl
     }
   };
 
-  // Only show error state - no loading skeleton for instant feel
-  if (error) {
+  const isOffline = typeof navigator !== 'undefined' && !navigator.onLine;
+
+  // Keep skeleton visible when user is offline instead of showing "Playlist Not Found"
+  if (error && !isOffline) {
     return (
       <div className="fixed inset-0 bg-[#0a0a0a] z-50 flex items-center justify-center p-4">
         <div className="text-center max-w-md">
@@ -1529,39 +1514,85 @@ export const PlaylistPlayerScreen: React.FC<PlaylistPlayerScreenProps> = ({ onPl
   if (!playlistData) {
     return (
       <div className="flex flex-col min-h-screen bg-gradient-to-b from-[#0a0a0a] via-[#0d0d0d] to-[#111111] fixed inset-0 z-50 pb-[env(safe-area-inset-bottom,0px)] overflow-hidden">
-        {/* Header Skeleton */}
-        <div className="sticky top-0 z-10 bg-gradient-to-b from-[#0a0a0a] to-transparent backdrop-blur-md">
-          <div className="flex items-center justify-between px-4 py-2" style={{ paddingTop: 'calc(1.25rem + env(safe-area-inset-top, 0px) * 0.25)', paddingBottom: '1.25rem' }}>
-            <div className="w-10 h-10 bg-white/5 rounded-full animate-pulse" />
-            <div className="h-6 w-20 bg-white/5 rounded animate-pulse" />
-            <div className="w-10 h-10" />
-          </div>
-        </div>
-
-        <div className="flex-1 overflow-y-auto px-4 pb-4">
-          <div className="flex flex-col gap-6 py-4">
-            {/* Header Card Skeleton */}
-            <div className="rounded-2xl bg-white/5 p-6 pb-7 min-h-[200px] animate-pulse">
-              <div className="h-6 w-32 bg-white/10 rounded mb-4" />
-              <div className="h-8 w-3/4 bg-white/10 rounded mb-3" />
-              <div className="h-4 w-full bg-white/10 rounded mb-2" />
-              <div className="h-4 w-1/2 bg-white/10 rounded" />
+        <div
+          className="flex-1 overflow-y-auto px-4 pb-4 scrollbar-hide"
+          style={{
+            paddingTop: 'calc(1.25rem + env(safe-area-inset-top, 0px) * 0.25)',
+            paddingBottom: 'calc(8rem + env(safe-area-inset-bottom, 0px))',
+          }}
+        >
+          <div className="flex flex-col gap-6 pt-0 pb-4">
+            {/* Playlist header card — mirrors loaded layout (hero + overlay + toolbar) */}
+            <div className="relative overflow-hidden rounded-2xl">
+              <div className="absolute inset-0 z-0">
+                <div className="absolute inset-0 bg-gradient-to-br from-white/[0.12] via-white/[0.05] to-white/[0.02] animate-pulse" />
+                <div className="absolute inset-0 bg-gradient-to-b from-black/60 via-black/70 to-black/90" />
+              </div>
+              <div className="relative z-10 p-6 pb-7 min-h-[200px] flex flex-col justify-between">
+                <div className="flex items-center justify-between">
+                  <div className="min-w-[40px] min-h-[40px] rounded-full bg-black/40 animate-pulse" />
+                  <div className="flex items-center gap-1">
+                    <div className="min-w-[40px] min-h-[40px] rounded-full bg-black/35 animate-pulse" />
+                    <div className="min-w-[40px] min-h-[40px] rounded-full bg-black/35 animate-pulse" />
+                  </div>
+                </div>
+                <div>
+                  <div className="h-8 w-[min(90%,20rem)] bg-white/15 rounded-lg mb-2 animate-pulse" />
+                  <div className="h-4 w-[min(70%,16rem)] bg-white/10 rounded mb-3 animate-pulse" />
+                  <div className="flex items-center justify-between gap-3">
+                    <div className="flex items-center gap-2">
+                      <div className="w-3.5 h-3.5 rounded bg-white/15 animate-pulse" />
+                      <div className="h-3 w-14 bg-white/10 rounded animate-pulse" />
+                    </div>
+                    <div className="flex items-center gap-0.5 flex-shrink-0">
+                      {Array.from({ length: 4 }).map((_, i) => (
+                        <div
+                          key={i}
+                          className="w-9 h-9 rounded-full bg-white/10 animate-pulse"
+                        />
+                      ))}
+                    </div>
+                  </div>
+                </div>
+              </div>
             </div>
 
-            {/* Controls Skeleton */}
-            <div className="flex items-center justify-center gap-6">
-              <div className="w-10 h-10 bg-white/5 rounded-full animate-pulse" />
-              <div className="w-10 h-10 bg-white/5 rounded-full animate-pulse" />
-              <div className="w-14 h-14 bg-white/5 rounded-full animate-pulse" />
-              <div className="w-10 h-10 bg-white/5 rounded-full animate-pulse" />
-              <div className="w-10 h-10 bg-white/5 rounded-full animate-pulse" />
+            {/* Playback controls — same spacing as loaded row */}
+            <div className="flex items-center justify-center gap-6 px-2">
+              <div className="w-10 h-10 rounded-full bg-white/8 animate-pulse" />
+              <div className="w-10 h-10 rounded-full bg-white/8 animate-pulse" />
+              <div className="w-14 h-14 rounded-full bg-white/15 animate-pulse shadow-lg" />
+              <div className="w-10 h-10 rounded-full bg-white/8 animate-pulse" />
+              <div className="w-10 h-10 rounded-full bg-white/8 animate-pulse" />
             </div>
 
-            {/* Track List Skeleton */}
-            <div className="flex flex-col gap-3">
-              {Array.from({ length: 8 }).map((_, i) => (
-                <div key={i} className="h-16 bg-white/5 rounded-xl animate-pulse" />
-              ))}
+            {/* Track list — label row + row layout matching real tracks */}
+            <div className="flex flex-col gap-2">
+              <div className="flex items-center justify-between px-1 mb-1">
+                <div className="h-4 w-14 bg-white/12 rounded animate-pulse" />
+                <div className="h-3 w-9 bg-white/8 rounded animate-pulse" />
+              </div>
+              <div className="flex flex-col gap-2">
+                {Array.from({ length: 8 }).map((_, i) => (
+                  <div
+                    key={i}
+                    className="rounded-xl p-4 bg-white/5"
+                  >
+                    <div className="flex items-center gap-3">
+                      <div className="w-8 h-8 rounded-md bg-white/10 animate-pulse flex-shrink-0" />
+                      <div className="w-12 h-12 rounded-lg bg-white/10 animate-pulse flex-shrink-0 shadow" />
+                      <div className="flex-1 flex flex-col gap-1.5 min-w-0">
+                        <div className="h-4 w-[min(92%,240px)] bg-white/12 rounded animate-pulse" />
+                        <div className="h-3 w-[min(55%,140px)] bg-white/8 rounded animate-pulse" />
+                      </div>
+                      <div className="flex items-center gap-1 flex-shrink-0">
+                        <div className="w-7 h-7 rounded-full bg-white/8 animate-pulse" />
+                        <div className="w-10 h-3 bg-white/8 rounded animate-pulse" />
+                      </div>
+                    </div>
+                  </div>
+                ))}
+              </div>
             </div>
           </div>
         </div>
@@ -1570,14 +1601,14 @@ export const PlaylistPlayerScreen: React.FC<PlaylistPlayerScreenProps> = ({ onPl
   }
 
   return (
-    <PlaylistPlayer
+      <PlaylistPlayer
       playlistData={playlistData}
-      autoPlay={true}
+      autoPlay={false}
       startTrackIndex={0}
       onPlayerVisibilityChange={onPlayerVisibilityChange}
       onShowAuthModal={handleShowAuthModal}
       onOpenMusicPlayer={onOpenMusicPlayer}
-      isListenerCurationsPlaylist={isListenerCurationsPlaylist}
+      isListenerCurationsPlaylist={isListenerCurationsPlaylist || isMixForYouPlaylist}
       onPlaylistUpdated={() => {
         if (playlistId) {
           playlistCache.delete(playlistId);
