@@ -15,6 +15,13 @@ import {
 } from 'lucide-react';
 import { supabase } from '../../lib/supabase';
 import { LoadingLogo } from '../../components/LoadingLogo';
+import { HtmlEmailEditor } from '../../components/HtmlEmailEditor';
+import {
+  validateImageFile,
+  getValidatedExtension,
+  sanitizeFileName,
+  ALLOWED_IMAGE_EXTENSIONS,
+} from '../../lib/fileSecurity';
 
 interface EmailTemplate {
   id: string;
@@ -90,6 +97,18 @@ export const EmailManagementTab = (): JSX.Element => {
   // Email queue processing state
   const [isProcessingQueue, setIsProcessingQueue] = useState(false);
   const [queueResult, setQueueResult] = useState<{ processed: number; sent: number; failed: number } | null>(null);
+
+  // Weekly report queueing state
+  const [isWeeklyReportOpen, setIsWeeklyReportOpen] = useState(false);
+  const [weeklyReportRange, setWeeklyReportRange] = useState(() => {
+    const end = new Date();
+    const start = new Date(end);
+    start.setDate(end.getDate() - 7);
+    const toDateInput = (d: Date) => d.toISOString().slice(0, 10);
+    return { start_date: toDateInput(start), end_date: toDateInput(end) };
+  });
+  const [isQueueingWeeklyReports, setIsQueueingWeeklyReports] = useState(false);
+  const [weeklyReportResult, setWeeklyReportResult] = useState<{ queued: number; date_range?: string } | null>(null);
 
   useEffect(() => {
     fetchData();
@@ -210,12 +229,9 @@ export const EmailManagementTab = (): JSX.Element => {
       weekly_report: {
         user_name: 'Artist Name',
         date_range: 'Jan 1 - Jan 7, 2026',
-        plays: '1,234',
-        likes: '456',
-        shares: '89',
-        earnings: 'NGN 2,500',
-        new_followers: '23',
-        top_track: 'Amazing Song Title'
+        streams_count: '1,234',
+        earnings_week: 'Treats 245.00',
+        top_song: 'Amazing Song Title'
       }
     };
     return samples[templateType] || {};
@@ -255,6 +271,34 @@ export const EmailManagementTab = (): JSX.Element => {
     }
   };
 
+  const handleQueueWeeklyReports = async () => {
+    setIsQueueingWeeklyReports(true);
+    setWeeklyReportResult(null);
+    setError(null);
+    try {
+      const start = weeklyReportRange.start_date;
+      const end = weeklyReportRange.end_date;
+      if (!start || !end) throw new Error('Please select a start and end date.');
+
+      const { data, error } = await supabase.rpc('admin_queue_weekly_creator_reports', {
+        p_start_date: start,
+        p_end_date: end,
+      });
+
+      if (error) throw error;
+      const queued = (data as any)?.queued ?? 0;
+      const date_range = (data as any)?.date_range;
+      setWeeklyReportResult({ queued, date_range });
+
+      // Optional: refresh logs so admin can see sends after running queue
+      await fetchEmailLogs();
+    } catch (err: any) {
+      setError(err?.message || 'Failed to queue weekly reports');
+    } finally {
+      setIsQueueingWeeklyReports(false);
+    }
+  };
+
   const handlePreviewTemplate = (template: EmailTemplate) => {
     setSelectedTemplate(template);
     setIsPreviewingTemplate(true);
@@ -282,6 +326,33 @@ export const EmailManagementTab = (): JSX.Element => {
     }
 
     return { subject, html };
+  };
+
+  const uploadTemplateImage = async (file: File): Promise<string> => {
+    const { data: auth } = await supabase.auth.getUser();
+    const user = auth.user;
+    if (!user) throw new Error('You must be signed in to upload images.');
+
+    const validation = validateImageFile(file);
+    if (!validation.valid) throw new Error(validation.error ?? 'Invalid image');
+
+    const ext = getValidatedExtension(file.name, ALLOWED_IMAGE_EXTENSIONS);
+    if (!ext) throw new Error('Allowed: jpg, jpeg, png, webp, gif');
+
+    const base = sanitizeFileName(file.name).replace(/\.[^.]+$/, '') || 'image';
+    const path = `${user.id}/email/templates-${Date.now()}-${base}.${ext}`;
+
+    const { error: uploadError } = await supabase.storage.from('thumbnails').upload(path, file, {
+      cacheControl: '3600',
+      upsert: false,
+    });
+
+    if (uploadError) {
+      throw new Error((uploadError as { message?: string }).message ?? 'Upload failed');
+    }
+
+    const { data } = supabase.storage.from('thumbnails').getPublicUrl(path);
+    return data.publicUrl;
   };
 
   const handleSaveTemplate = async () => {
@@ -521,13 +592,23 @@ export const EmailManagementTab = (): JSX.Element => {
         <div className="bg-white rounded-lg shadow p-6">
           <div className="flex items-center justify-between mb-4">
             <h3 className="text-xl font-semibold text-gray-900">Email Templates</h3>
-            <button
-              onClick={() => setIsTestEmailOpen(true)}
-              className="px-4 py-2 bg-green-600 hover:bg-green-700 text-white rounded-lg flex items-center gap-2"
-            >
-              <Send className="w-4 h-4" />
-              Send Test Email
-            </button>
+            <div className="flex items-center gap-3">
+              <button
+                onClick={() => setIsWeeklyReportOpen(true)}
+                className="px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-lg flex items-center gap-2"
+                title="Queue Creator Weekly Reports for all creators"
+              >
+                <Mail className="w-4 h-4" />
+                Queue Weekly Reports
+              </button>
+              <button
+                onClick={() => setIsTestEmailOpen(true)}
+                className="px-4 py-2 bg-green-600 hover:bg-green-700 text-white rounded-lg flex items-center gap-2"
+              >
+                <Send className="w-4 h-4" />
+                Send Test Email
+              </button>
+            </div>
           </div>
 
           {isLoading ? (
@@ -873,11 +954,11 @@ export const EmailManagementTab = (): JSX.Element => {
                   <label className="block text-gray-700 text-sm font-medium mb-2">
                     HTML Content
                   </label>
-                  <textarea
+                  <HtmlEmailEditor
                     value={templateFormData.html_content}
-                    onChange={(e) => setTemplateFormData({ ...templateFormData, html_content: e.target.value })}
-                    rows={20}
-                    className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 font-mono text-sm"
+                    disabled={isSaving}
+                    onUploadImage={uploadTemplateImage}
+                    onChange={(nextHtml) => setTemplateFormData({ ...templateFormData, html_content: nextHtml })}
                   />
                   <p className="mt-2 text-xs text-gray-500">
                     Available variables: {selectedTemplate.variables.map(v => `{{${v}}}`).join(', ')}
@@ -1100,6 +1181,111 @@ export const EmailManagementTab = (): JSX.Element => {
                     )}
                   </button>
                 </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Queue Weekly Reports Modal */}
+      {isWeeklyReportOpen && (
+        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
+          <div className="bg-white rounded-lg shadow-xl max-w-md w-full">
+            <div className="p-6">
+              <div className="flex items-center justify-between mb-4">
+                <h3 className="text-xl font-bold text-gray-900">Queue Creator Weekly Reports</h3>
+                <button
+                  onClick={() => {
+                    setIsWeeklyReportOpen(false);
+                    setWeeklyReportResult(null);
+                  }}
+                  className="p-2 hover:bg-gray-100 rounded-lg"
+                >
+                  <X className="w-5 h-5 text-gray-500" />
+                </button>
+              </div>
+
+              <p className="text-sm text-gray-600 mb-4">
+                This will enqueue one <span className="font-mono">weekly_report</span> email per creator, then you can run the email queue to deliver them.
+              </p>
+
+              <div className="space-y-4">
+                <div className="grid grid-cols-2 gap-3">
+                  <div>
+                    <label className="block text-gray-700 text-sm font-medium mb-2">Start date</label>
+                    <input
+                      type="date"
+                      value={weeklyReportRange.start_date}
+                      onChange={(e) => setWeeklyReportRange((prev) => ({ ...prev, start_date: e.target.value }))}
+                      className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-gray-700 text-sm font-medium mb-2">End date</label>
+                    <input
+                      type="date"
+                      value={weeklyReportRange.end_date}
+                      onChange={(e) => setWeeklyReportRange((prev) => ({ ...prev, end_date: e.target.value }))}
+                      className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500"
+                    />
+                  </div>
+                </div>
+
+                {weeklyReportResult && (
+                  <div className="p-3 bg-green-50 border border-green-200 rounded-lg">
+                    <p className="text-green-700 text-sm">
+                      Queued {weeklyReportResult.queued} report(s){weeklyReportResult.date_range ? ` for ${weeklyReportResult.date_range}` : ''}.
+                    </p>
+                  </div>
+                )}
+
+                <div className="flex gap-3 pt-2">
+                  <button
+                    onClick={() => {
+                      setIsWeeklyReportOpen(false);
+                      setWeeklyReportResult(null);
+                    }}
+                    className="flex-1 px-4 py-2 border border-gray-300 rounded-lg text-gray-700 hover:bg-gray-50"
+                  >
+                    Close
+                  </button>
+                  <button
+                    onClick={handleQueueWeeklyReports}
+                    disabled={isQueueingWeeklyReports}
+                    className="flex-1 px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-lg disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center gap-2"
+                  >
+                    {isQueueingWeeklyReports ? (
+                      <>
+                        <LoadingLogo variant="pulse" size={16} />
+                        Queueing...
+                      </>
+                    ) : (
+                      <>
+                        <Mail className="w-4 h-4" />
+                        Queue Reports
+                      </>
+                    )}
+                  </button>
+                </div>
+
+                <button
+                  onClick={handleRunEmailQueue}
+                  disabled={isProcessingQueue}
+                  className="w-full px-4 py-2 bg-[#309605] hover:bg-[#3ba208] text-white rounded-lg disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center gap-2"
+                  title="Process pending emails now"
+                >
+                  {isProcessingQueue ? (
+                    <>
+                      <LoadingLogo variant="pulse" size={16} />
+                      Running queue...
+                    </>
+                  ) : (
+                    <>
+                      <RefreshCw className="w-4 h-4" />
+                      Run email queue now
+                    </>
+                  )}
+                </button>
               </div>
             </div>
           </div>
