@@ -2925,6 +2925,13 @@ export const adminGeneratePasswordResetLink = async (userId: string): Promise<an
   }
 };
 
+export const getPublicWebUrl = (): string => {
+  const raw =
+    import.meta.env.VITE_PUBLIC_WEB_URL ||
+    (typeof window !== 'undefined' ? window.location.origin : '');
+  return String(raw || '').trim().replace(/\/+$/, '');
+};
+
 export const adminDeletePayoutSetting = async (settingId: string): Promise<any> => {
   try {
     const { data, error } = await supabase.rpc('admin_delete_payout_setting', {
