@@ -13,7 +13,7 @@ interface NotificationCounts {
 interface Notification {
   id: string;
   notification_type: string;
-  reference_id: string;
+  reference_id: string | null;
   title: string;
   message: string;
   is_read: boolean;
@@ -200,6 +200,13 @@ export const AdminNotificationBell: React.FC<AdminNotificationBellProps> = ({ on
         onNavigateToSection('support');
       } else if (notification.notification_type === 'payment_monitoring' || notification.notification_type === 'financial_alert') {
         onNavigateToSection('payment_monitoring');
+      } else if (notification.notification_type === 'report_submitted') {
+        if (notification.reference_id) {
+          const url = new URL(window.location.href);
+          url.searchParams.set('reportId', notification.reference_id);
+          window.history.replaceState({}, '', `${url.pathname}${url.search}${url.hash}`);
+        }
+        onNavigateToSection('reports');
       }
     }
 
@@ -216,6 +223,8 @@ export const AdminNotificationBell: React.FC<AdminNotificationBellProps> = ({ on
         return <AlertTriangle className="w-4 h-4 text-red-600" />;
       case 'payment_monitoring':
         return <TrendingUp className="w-4 h-4 text-orange-600" />;
+      case 'report_submitted':
+        return <AlertTriangle className="w-4 h-4 text-red-500" />;
       default:
         return <Bell className="w-4 h-4 text-gray-600" />;
     }

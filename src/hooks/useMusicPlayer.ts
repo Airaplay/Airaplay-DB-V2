@@ -18,7 +18,7 @@ import {
   setMediaSessionPositionState,
   setMediaSessionActionHandlers,
 } from '../lib/mediaSession';
-import { playNativeAudioAdForPlacement } from '../lib/nativeAdService';
+import { playNativeAudioAdForPlacement, resetNativeAudioAdCadenceForPlacement } from '../lib/nativeAdService';
 
 interface Song {
   id: string;
@@ -97,6 +97,15 @@ function resolveNativePlayerPlacementFromContext(context: string | undefined): s
   return 'music_player';
 }
 
+function resolveNativePlayerPlacement(state: Pick<MusicPlayerState, 'playlistContext' | 'albumId' | 'playlistId'>): string {
+  const fromContext = resolveNativePlayerPlacementFromContext(state.playlistContext);
+  if (fromContext !== 'music_player') return fromContext;
+  // Fallback to explicit identifiers when context is unavailable/stale.
+  if (state.playlistId) return 'playlist_player';
+  if (state.albumId) return 'album_player';
+  return 'music_player';
+}
+
 export const useMusicPlayer = () => {
   const { session } = useAuth();
 
@@ -126,6 +135,7 @@ export const useMusicPlayer = () => {
   const intentionalPauseRef = useRef(false);
   const lastSaveTimeRef = useRef<number>(0);
   const playNextSongRef = useRef<(() => void) | null>(null);
+  const isAudioAdPlayingRef = useRef(false);
   const stateRef = useRef<MusicPlayerState>(state);
   const togglePlayPauseRef = useRef<(() => void) | null>(null);
   const playNextRef = useRef<(() => void) | null>(null);
@@ -174,6 +184,15 @@ export const useMusicPlayer = () => {
 
       if (contextKey !== currentContextKeyRef.current) {
         currentContextKeyRef.current = contextKey;
+
+        // Reset audio ad song counters when the playback context changes so
+        // "Play this audio ad after N songs" starts counting fresh in the new session.
+        try {
+          const placementType = resolveNativePlayerPlacement(state);
+          resetNativeAudioAdCadenceForPlacement(placementType);
+        } catch {
+          // Must never block playback.
+        }
 
         const settings = await loadContextSettings(contextKey);
 
@@ -375,11 +394,18 @@ export const useMusicPlayer = () => {
       // Audio ad cadence is configured per audio ad (2/3/5/6/8/10 songs).
       // Any ad failure must not block autoplay progression.
       try {
-        const placementType = resolveNativePlayerPlacementFromContext(currentState.playlistContext);
-        const userCountry =
-          typeof session?.user?.user_metadata?.country === 'string'
-            ? session.user.user_metadata.country
-            : null;
+        isAudioAdPlayingRef.current = true;
+        const placementType = resolveNativePlayerPlacement(currentState);
+        // Fresh user metadata — createAudioElement is memoized with [] and would otherwise read a stale session.
+        let userCountry: string | null = null;
+        try {
+          const { data: { user } } = await supabase.auth.getUser();
+          if (user && typeof user.user_metadata?.country === 'string') {
+            userCountry = user.user_metadata.country;
+          }
+        } catch {
+          // Ignore; ads still work without country targeting.
+        }
 
         await playNativeAudioAdForPlacement(
           placementType,
@@ -393,6 +419,8 @@ export const useMusicPlayer = () => {
         );
       } catch (adError) {
         logger.warn('Audio ad between songs failed; continuing playback', adError);
+      } finally {
+        isAudioAdPlayingRef.current = false;
       }
 
       const getCurrentPlaylist = () => {
@@ -786,37 +814,65 @@ export const useMusicPlayer = () => {
       return;
     }
 
-    let nextIndex: number;
-    if (state.isShuffleEnabled) {
-      const currentShuffledIndex = state.shuffledPlaylist.findIndex(s => s.id === state.currentSong?.id);
-      if (currentShuffledIndex === state.shuffledPlaylist.length - 1) {
-        if (state.repeatMode === 'all') {
-          nextIndex = 0;
-        } else {
-          return;
-        }
-      } else {
-        nextIndex = currentShuffledIndex + 1;
-      }
-    } else {
-      if (state.currentIndex === currentPlaylist.length - 1) {
-        if (state.repeatMode === 'all') {
-          nextIndex = 0;
-        } else {
-          return;
-        }
-      } else {
-        nextIndex = state.currentIndex + 1;
-      }
-    }
-
-    const nextSong = currentPlaylist[nextIndex];
-    if (!nextSong) {
-      logger.error('playNext: Next song not found at index', nextIndex);
-      return;
-    }
-
     void (async () => {
+      let nextIndex: number;
+      if (state.isShuffleEnabled) {
+        const currentShuffledIndex = state.shuffledPlaylist.findIndex(s => s.id === state.currentSong?.id);
+        if (currentShuffledIndex === state.shuffledPlaylist.length - 1) {
+          if (state.repeatMode === 'all') {
+            nextIndex = 0;
+          } else {
+            return;
+          }
+        } else {
+          nextIndex = currentShuffledIndex + 1;
+        }
+      } else {
+        if (state.currentIndex === currentPlaylist.length - 1) {
+          if (state.repeatMode === 'all') {
+            nextIndex = 0;
+          } else {
+            return;
+          }
+        } else {
+          nextIndex = state.currentIndex + 1;
+        }
+      }
+
+      const nextSong = currentPlaylist[nextIndex];
+      if (!nextSong) {
+        logger.error('playNext: Next song not found at index', nextIndex);
+        return;
+      }
+
+      // Also run between-song audio ads for manual Next, so album/playlist players don't bypass ad insertion.
+      try {
+        isAudioAdPlayingRef.current = true;
+        const placementType = resolveNativePlayerPlacement(stateRef.current);
+        let userCountry: string | null = null;
+        try {
+          const { data: { user } } = await supabase.auth.getUser();
+          if (user && typeof user.user_metadata?.country === 'string') {
+            userCountry = user.user_metadata.country;
+          }
+        } catch {
+          // Ignore; ads still work without country targeting.
+        }
+        await playNativeAudioAdForPlacement(
+          placementType,
+          userCountry,
+          undefined,
+          {
+            maxDurationMs: 30_000,
+            minIntervalMs: 0,
+          }
+        );
+      } catch (adError) {
+        logger.warn('Audio ad on manual next failed; continuing playback', adError);
+      } finally {
+        isAudioAdPlayingRef.current = false;
+      }
+
       if (audioCleanupRef.current) {
         audioCleanupRef.current();
         audioCleanupRef.current = null;
@@ -1024,7 +1080,16 @@ export const useMusicPlayer = () => {
     }));
   }, []);
 
-  const playSong = useCallback((song: Song, expandFullPlayer: boolean = true, playlist: Song[] = [], index: number = 0, context: string = 'unknown', albumId: string | null = null, playlistId: string | null = null) => {
+  const playSong = useCallback((
+    song: Song,
+    expandFullPlayer: boolean = true,
+    playlist: Song[] = [],
+    index: number = 0,
+    context: string = 'unknown',
+    albumId: string | null = null,
+    playlistId: string | null = null,
+    autoPlay: boolean = true
+  ) => {
     if (audioCleanupRef.current) {
       audioCleanupRef.current();
       audioCleanupRef.current = null;
@@ -1064,12 +1129,14 @@ export const useMusicPlayer = () => {
       }));
 
       newAudio.load();
-      newAudio.play().catch(err => {
-        if (err.name !== 'AbortError') {
-          logger.error('Error playing audio', err);
-          setState(prev => ({ ...prev, error: 'Failed to play audio. Please try again.' }));
-        }
-      });
+      if (autoPlay) {
+        newAudio.play().catch(err => {
+          if (err.name !== 'AbortError') {
+            logger.error('Error playing audio', err);
+            setState(prev => ({ ...prev, error: 'Failed to play audio. Please try again.' }));
+          }
+        });
+      }
     })();
   }, [createAudioElement]);
 
@@ -1108,6 +1175,7 @@ export const useMusicPlayer = () => {
 
   const togglePlayPause = useCallback(() => {
     if (!state.audioElement) return;
+    if (isAudioAdPlayingRef.current) return;
 
     if (state.isPlaying) {
       intentionalPauseRef.current = true; // User-initiated pause — don't auto-resume on unlock
@@ -1174,7 +1242,7 @@ export const useMusicPlayer = () => {
     let appStateHandle: { remove: () => void } | null = null;
 
     CapacitorApp.addListener('appStateChange', ({ isActive }) => {
-      if (isActive && !intentionalPauseRef.current) {
+      if (isActive && !intentionalPauseRef.current && !isAudioAdPlayingRef.current) {
         const el = stateRef.current.audioElement;
         const hasSong = !!stateRef.current.currentSong;
         if (el && hasSong && el.paused) {
@@ -1187,7 +1255,11 @@ export const useMusicPlayer = () => {
 
     // visibilitychange fires on Android when the screen turns off/on (WebView visibility)
     const handleVisibilityChange = () => {
-      if (document.visibilityState === 'visible' && !intentionalPauseRef.current) {
+      if (
+        document.visibilityState === 'visible' &&
+        !intentionalPauseRef.current &&
+        !isAudioAdPlayingRef.current
+      ) {
         const el = stateRef.current.audioElement;
         const hasSong = !!stateRef.current.currentSong;
         if (el && hasSong && el.paused) {

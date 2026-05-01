@@ -119,8 +119,35 @@ export const NativeAdsSection = (): JSX.Element => {
         .order('created_at', { ascending: false });
 
       if (fetchError) throw fetchError;
+      const rows = (data || []) as NativeAdCard[];
 
-      setAds(data || []);
+      // Auto-finish expired ads so they no longer show as "running".
+      // "Finished" in the admin UI is derived from either `expires_at` or `is_active=false`,
+      // but persisting `is_active=false` makes status consistent across surfaces.
+      const now = Date.now();
+      const expiredStillActiveIds = rows
+        .filter((ad) => !!ad.expires_at && new Date(ad.expires_at).getTime() <= now && ad.is_active)
+        .map((ad) => ad.id);
+
+      if (expiredStillActiveIds.length > 0) {
+        const { error: expireUpdateError } = await supabase
+          .from('native_ad_cards')
+          .update({ is_active: false })
+          .in('id', expiredStillActiveIds);
+
+        if (expireUpdateError) {
+          // Do not block rendering list on best-effort auto-finish.
+          console.warn('Failed to auto-finish expired native ads:', expireUpdateError);
+        } else {
+          for (const ad of rows) {
+            if (expiredStillActiveIds.includes(ad.id)) {
+              ad.is_active = false;
+            }
+          }
+        }
+      }
+
+      setAds(rows);
     } catch (err) {
       console.error('Error fetching native ads:', err);
       setError('Failed to load native ads');
@@ -505,12 +532,23 @@ export const NativeAdsSection = (): JSX.Element => {
 
   const handleToggleActive = async (ad: NativeAdCard) => {
     try {
+      const nextIsActive = !ad.is_active;
       const { error: updateError } = await supabase
         .from('native_ad_cards')
-        .update({ is_active: !ad.is_active })
+        .update({ is_active: nextIsActive })
         .eq('id', ad.id);
 
       if (updateError) throw updateError;
+
+      // Optimistically update list so the card moves immediately.
+      setAds((prev) => prev.map((item) => (item.id === ad.id ? { ...item, is_active: nextIsActive } : item)));
+
+      // If admin just finished (deactivated) an ad while looking at Running,
+      // automatically move them to the Finished tab so the ad appears there.
+      if (!nextIsActive) {
+        setStatusFilterType('finished');
+      }
+
       fetchNativeAds();
     } catch (err) {
       console.error('Error toggling ad status:', err);

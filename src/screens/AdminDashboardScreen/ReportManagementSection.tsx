@@ -140,6 +140,22 @@ export const ReportManagementSection: React.FC = () => {
     loadReports();
   }, [selectedStatus, selectedType, dateFilter, currentPage]);
 
+  useEffect(() => {
+    if (!reports.length) return;
+
+    const url = new URL(window.location.href);
+    const reportId = url.searchParams.get('reportId');
+    if (!reportId) return;
+
+    const targetReport = reports.find((report) => report.id === reportId);
+    if (!targetReport) return;
+
+    setSelectedReport(targetReport);
+    setAdminNotes(targetReport.admin_notes || '');
+    url.searchParams.delete('reportId');
+    window.history.replaceState({}, '', `${url.pathname}${url.search}${url.hash}`);
+  }, [reports]);
+
   const loadReports = async () => {
     try {
       setIsLoading(true);

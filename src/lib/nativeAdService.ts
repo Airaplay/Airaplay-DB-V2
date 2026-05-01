@@ -541,3 +541,22 @@ export async function playNativeAudioAdForPlacement(
     return false;
   }
 }
+
+/**
+ * Reset audio ad cadence counters for a placement.
+ * This is useful when the playback context changes (e.g. switching from playlist to album),
+ * so "play after N songs" starts counting from the new session rather than a previous one.
+ */
+export function resetNativeAudioAdCadenceForPlacement(placementType: string): void {
+  completedSongCountByPlacement.set(placementType, 0);
+  lastAudioAdPlaybackAtByPlacement.delete(placementType);
+  audioAdRoundRobinIndexByPlacement.delete(placementType);
+
+  // Remove per-ad counters for this placement (keys are `${placementType}:${adId}`).
+  const prefix = `${placementType}:`;
+  for (const key of Array.from(lastServedSongCountByAd.keys())) {
+    if (key.startsWith(prefix)) {
+      lastServedSongCountByAd.delete(key);
+    }
+  }
+}
