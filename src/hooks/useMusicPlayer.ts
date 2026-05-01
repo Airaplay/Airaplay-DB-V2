@@ -815,6 +815,18 @@ export const useMusicPlayer = () => {
     }
 
     void (async () => {
+      // Ensure no song audio is playing while an audio ad is playing.
+      // If the user taps "Next" mid-song, pause immediately before attempting the ad.
+      try {
+        const currentAudio = stateRef.current.audioElement;
+        if (currentAudio && !currentAudio.paused) {
+          currentAudio.pause();
+        }
+      } catch {
+        // Ignore pause failures; ad flow should continue.
+      }
+      setState((prev) => ({ ...prev, isPlaying: false }));
+
       let nextIndex: number;
       if (state.isShuffleEnabled) {
         const currentShuffledIndex = state.shuffledPlaylist.findIndex(s => s.id === state.currentSong?.id);
