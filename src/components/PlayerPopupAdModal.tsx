@@ -1,6 +1,12 @@
 import { useEffect, useMemo, useState } from 'react';
 import { X, ExternalLink } from 'lucide-react';
-import { getNativeAdsForPlacement, NativeAdCard, recordNativeAdClick, recordNativeAdImpression } from '../lib/nativeAdService';
+import {
+  getNativeAdsForPlacement,
+  hasNativeAdClickUrl,
+  NativeAdCard,
+  recordNativeAdClick,
+  recordNativeAdImpression,
+} from '../lib/nativeAdService';
 
 interface PlayerPopupAdModalProps {
   placementType: string;
@@ -57,11 +63,14 @@ export const PlayerPopupAdModal = ({ placementType, triggerKey, userCountry }: P
 
   if (!ad || !visible) return null;
 
+  const clickEnabled = hasNativeAdClickUrl(ad.click_url);
+
   const handleClose = () => {
     setVisible(false);
   };
 
   const handleVisit = async () => {
+    if (!clickEnabled) return;
     await recordNativeAdClick(ad.id);
     window.open(ad.click_url, '_blank', 'noopener,noreferrer');
     setVisible(false);
@@ -93,14 +102,27 @@ export const PlayerPopupAdModal = ({ placementType, triggerKey, userCountry }: P
           {ad.description ? (
             <p className="text-white/70 text-xs mt-1 line-clamp-2">{ad.description}</p>
           ) : null}
-          <p className="text-white/50 text-[11px] mt-1">by {ad.advertiser_name}</p>
+          {ad.advertiser_name?.trim() ? (
+            <p className="text-white/50 text-[11px] mt-1">by {ad.advertiser_name}</p>
+          ) : null}
           <button
             type="button"
             onClick={handleVisit}
-            className="mt-3 w-full inline-flex items-center justify-center gap-2 px-4 py-2 rounded-lg bg-[#00ad74] hover:bg-[#009c68] text-white text-sm font-semibold transition-colors"
+            disabled={!clickEnabled}
+            className={`mt-3 w-full inline-flex items-center justify-center gap-2 px-4 py-2 rounded-lg text-sm font-semibold transition-colors ${
+              clickEnabled
+                ? 'bg-[#00ad74] hover:bg-[#009c68] text-white'
+                : 'bg-white/10 text-white/50 cursor-not-allowed'
+            }`}
           >
-            Learn More
-            <ExternalLink className="w-4 h-4" />
+            {clickEnabled ? (
+              <>
+                Learn More
+                <ExternalLink className="w-4 h-4" />
+              </>
+            ) : (
+              'No destination link'
+            )}
           </button>
         </div>
       </div>

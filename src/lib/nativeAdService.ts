@@ -258,6 +258,11 @@ function normalizeOptionalText(value: string | null | undefined): string | null 
   return trimmed.length > 0 ? trimmed : null;
 }
 
+/** True when the ad has a non-empty outbound URL for clicks (native ads may omit URL for awareness-only visuals). */
+export function hasNativeAdClickUrl(clickUrl: string | null | undefined): boolean {
+  return normalizeOptionalText(clickUrl) != null;
+}
+
 function normalizeAudioAdInterval(value: number | null | undefined): number {
   if (value == null) return 5;
   const rounded = Math.round(Number(value));

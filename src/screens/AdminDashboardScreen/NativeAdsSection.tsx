@@ -409,6 +409,10 @@ export const NativeAdsSection = (): JSX.Element => {
         throw new Error('Companion image is required for audio ads.');
       }
 
+      if (selectedMediaType === 'audio' && !(formData.advertiser_name?.trim())) {
+        throw new Error('Advertiser name is required for audio ads.');
+      }
+
       const adData = {
         title: formData.title,
         description: formData.description || null,
@@ -422,8 +426,8 @@ export const NativeAdsSection = (): JSX.Element => {
           : null,
         click_url: shouldPersistAudioSettings
           ? (formData.click_url?.trim() || AUDIO_AD_DEFAULT_CLICK_URL)
-          : formData.click_url,
-        advertiser_name: formData.advertiser_name,
+          : (formData.click_url?.trim() || ''),
+        advertiser_name: formData.advertiser_name?.trim() || '',
         placement_type: selectedPlacementTypes[0],
         placement_types: selectedPlacementTypes,
         priority: formData.priority,
@@ -502,8 +506,8 @@ export const NativeAdsSection = (): JSX.Element => {
       image_url: ad.image_url,
       companion_image_url: ad.companion_image_url || '',
       companion_cta_text: ad.companion_cta_text ?? '',
-      click_url: ad.click_url,
-      advertiser_name: ad.advertiser_name,
+      click_url: ad.click_url ?? '',
+      advertiser_name: ad.advertiser_name ?? '',
       placement_type: ad.placement_type,
       priority: ad.priority,
       is_active: ad.is_active,
@@ -949,14 +953,19 @@ export const NativeAdsSection = (): JSX.Element => {
 
             <div>
               <label className="block text-sm font-medium text-gray-700 mb-2">
-                Advertiser Name *
+                Advertiser Name{' '}
+                {selectedMediaType === 'audio' ? (
+                  '*'
+                ) : (
+                  <span className="font-normal text-gray-500">(optional)</span>
+                )}
               </label>
               <input
                 type="text"
                 value={formData.advertiser_name}
                 onChange={(e) => setFormData({ ...formData, advertiser_name: e.target.value })}
                 className="w-full px-3 py-2 bg-white border border-gray-200 rounded-lg text-sm text-gray-900 focus:outline-none focus:ring-2 focus:ring-[#309605]/70 focus:border-[#309605]"
-                required
+                required={selectedMediaType === 'audio'}
               />
             </div>
           </div>
@@ -1054,15 +1063,18 @@ export const NativeAdsSection = (): JSX.Element => {
             {selectedMediaType === 'visual' ? (
               <div>
                 <label className="block text-sm font-medium text-gray-700 mb-2">
-                  Click URL *
+                  Click URL <span className="font-normal text-gray-500">(optional)</span>
                 </label>
                 <input
                   type="url"
                   value={formData.click_url}
                   onChange={(e) => setFormData({ ...formData, click_url: e.target.value })}
                   className="w-full px-3 py-2 bg-white border border-gray-200 rounded-lg text-sm text-gray-900 focus:outline-none focus:ring-2 focus:ring-[#309605]/70 focus:border-[#309605]"
-                  required
+                  placeholder="https://…"
                 />
+                <p className="mt-1 text-[11px] text-gray-500">
+                  Leave blank for awareness-only placements (no outbound click).
+                </p>
               </div>
             ) : (
               <div>

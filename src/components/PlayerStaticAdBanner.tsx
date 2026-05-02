@@ -1,7 +1,12 @@
 import { useEffect, useRef, useState } from 'react';
 import { ExternalLink } from 'lucide-react';
 import { LazyImage } from './LazyImage';
-import { NativeAdCard as NativeAdCardType, recordNativeAdImpression, recordNativeAdClick } from '../lib/nativeAdService';
+import {
+  NativeAdCard as NativeAdCardType,
+  hasNativeAdClickUrl,
+  recordNativeAdImpression,
+  recordNativeAdClick,
+} from '../lib/nativeAdService';
 
 interface PlayerStaticAdBannerProps {
   ad: NativeAdCardType;
@@ -11,6 +16,7 @@ interface PlayerStaticAdBannerProps {
 export const PlayerStaticAdBanner = ({ ad, className = '' }: PlayerStaticAdBannerProps): JSX.Element => {
   const bannerRef = useRef<HTMLDivElement>(null);
   const [hasRecordedImpression, setHasRecordedImpression] = useState(false);
+  const clickEnabled = hasNativeAdClickUrl(ad.click_url);
 
   useEffect(() => {
     if (!bannerRef.current || hasRecordedImpression) return;
@@ -39,6 +45,7 @@ export const PlayerStaticAdBanner = ({ ad, className = '' }: PlayerStaticAdBanne
   }, [ad.id, hasRecordedImpression]);
 
   const handleClick = async () => {
+    if (!clickEnabled) return;
     await recordNativeAdClick(ad.id);
     window.open(ad.click_url, '_blank', 'noopener,noreferrer');
   };
@@ -46,8 +53,8 @@ export const PlayerStaticAdBanner = ({ ad, className = '' }: PlayerStaticAdBanne
   return (
     <div
       ref={bannerRef}
-      onClick={handleClick}
-      className={`relative w-full cursor-pointer group overflow-hidden ${className}`}
+      onClick={clickEnabled ? handleClick : undefined}
+      className={`relative w-full group overflow-hidden ${clickEnabled ? 'cursor-pointer' : 'cursor-default'} ${className}`}
     >
       {/* Ad Banner Container */}
       <div className="relative w-full bg-gradient-to-r from-gray-900/50 to-gray-800/50 backdrop-blur-sm rounded-lg overflow-hidden border border-white/10">
@@ -61,10 +68,12 @@ export const PlayerStaticAdBanner = ({ ad, className = '' }: PlayerStaticAdBanne
 
           {/* Overlay on hover */}
           <div className="absolute inset-0 bg-black/0 group-hover:bg-black/30 transition-colors duration-300 flex items-center justify-center">
-            <div className="flex items-center gap-2 opacity-0 group-hover:opacity-100 transition-opacity duration-300">
-              <span className="text-white text-sm font-medium">Learn More</span>
-              <ExternalLink className="w-4 h-4 text-white" />
-            </div>
+            {clickEnabled ? (
+              <div className="flex items-center gap-2 opacity-0 group-hover:opacity-100 transition-opacity duration-300">
+                <span className="text-white text-sm font-medium">Learn More</span>
+                <ExternalLink className="w-4 h-4 text-white" />
+              </div>
+            ) : null}
           </div>
 
           {/* Sponsored Badge */}
@@ -85,20 +94,25 @@ export const PlayerStaticAdBanner = ({ ad, className = '' }: PlayerStaticAdBanne
                   {ad.description}
                 </p>
               )}
-              <p className="text-[10px] text-gray-400 mt-1">
-                by {ad.advertiser_name}
-              </p>
+              {ad.advertiser_name?.trim() ? (
+                <p className="text-[10px] text-gray-400 mt-1">by {ad.advertiser_name}</p>
+              ) : null}
             </div>
-            <button
-              className="ml-3 px-3 py-1.5 bg-[#00ad74] hover:bg-[#009c68] text-white text-xs font-semibold rounded-md transition-colors shadow-md flex items-center gap-1.5 flex-shrink-0"
-              onClick={(e) => {
-                e.stopPropagation();
-                handleClick();
-              }}
-            >
-              Visit
-              <ExternalLink className="w-3 h-3" />
-            </button>
+            {clickEnabled ? (
+              <button
+                type="button"
+                className="ml-3 px-3 py-1.5 bg-[#00ad74] hover:bg-[#009c68] text-white text-xs font-semibold rounded-md transition-colors shadow-md flex items-center gap-1.5 flex-shrink-0"
+                onClick={(e) => {
+                  e.stopPropagation();
+                  void handleClick();
+                }}
+              >
+                Visit
+                <ExternalLink className="w-3 h-3" />
+              </button>
+            ) : (
+              <span className="ml-3 px-2 py-1 text-[10px] text-gray-500 flex-shrink-0">No link</span>
+            )}
           </div>
         </div>
       </div>
