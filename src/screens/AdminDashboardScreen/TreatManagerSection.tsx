@@ -1,7 +1,7 @@
 import { useState, type FormEvent } from 'react';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '../../components/ui/tabs';
 import { Card } from '../../components/ui/card';
-import { DollarSign, Settings, CreditCard, Package, BarChart, Download, Clock, Coins, RefreshCw, TrendingUp, AlertTriangle, Users, Wallet } from 'lucide-react';
+import { DollarSign, Settings, CreditCard, Package, BarChart, Download, Clock, Coins, RefreshCw, TrendingUp, AlertTriangle, Users, Wallet, ArrowUp, ArrowDown } from 'lucide-react';
 import { supabase } from '../../lib/supabase';
 import { validateChannelConfig } from '../../lib/paymentChannels';
 import { sanitizeForFilter } from '../../lib/filterSecurity';
@@ -1478,6 +1478,7 @@ const PaymentChannelModal = ({ channel, onClose, onSave }: {
 const TreatPackageTab = () => {
   const [packages, setPackages] = useState<any[]>([]);
   const [isLoading, setIsLoading] = useState(true);
+  const [isReordering, setIsReordering] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [success, setSuccess] = useState<string | null>(null);
   const [editingPackage, setEditingPackage] = useState<any | null>(null);
@@ -1580,6 +1581,53 @@ const TreatPackageTab = () => {
     } catch (err) {
       console.error('Error deleting package:', err);
       setError('Failed to delete package');
+    }
+  };
+
+  const handleMovePackage = async (packageId: string, direction: 'up' | 'down') => {
+    if (isReordering) return;
+
+    const currentIndex = packages.findIndex((pkg) => pkg.id === packageId);
+    if (currentIndex === -1) return;
+
+    const targetIndex = direction === 'up' ? currentIndex - 1 : currentIndex + 1;
+    if (targetIndex < 0 || targetIndex >= packages.length) return;
+
+    try {
+      setError(null);
+      setSuccess(null);
+      setIsReordering(true);
+
+      const reorderedPackages = [...packages];
+      [reorderedPackages[currentIndex], reorderedPackages[targetIndex]] = [reorderedPackages[targetIndex], reorderedPackages[currentIndex]];
+
+      const normalizedPackages = reorderedPackages.map((pkg, index) => ({
+        ...pkg,
+        display_order: index + 1
+      }));
+
+      setPackages(normalizedPackages);
+
+      const { error: reorderError } = await supabase
+        .from('treat_packages')
+        .upsert(
+          normalizedPackages.map((pkg) => ({
+            id: pkg.id,
+            display_order: pkg.display_order
+          })),
+          { onConflict: 'id' }
+        );
+
+      if (reorderError) throw reorderError;
+
+      setSuccess('Package order updated successfully');
+      setTimeout(() => setSuccess(null), 3000);
+    } catch (err) {
+      console.error('Error reordering packages:', err);
+      setError('Failed to reorder packages');
+      fetchTreatPackages();
+    } finally {
+      setIsReordering(false);
     }
   };
 
@@ -1698,6 +1746,25 @@ const TreatPackageTab = () => {
                   <span className="text-gray-600">Display Order</span>
                   <span className="font-medium text-gray-900">{pkg.display_order}</span>
                 </div>
+              </div>
+
+              <div className="flex gap-2 mb-2">
+                <button
+                  onClick={() => handleMovePackage(pkg.id, 'up')}
+                  disabled={isReordering || pkg.display_order === 1}
+                  className="flex-1 px-3 py-2 bg-gray-50 hover:bg-gray-100 text-gray-700 rounded-lg transition-colors duration-200 text-sm font-medium disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center gap-1"
+                >
+                  <ArrowUp className="w-4 h-4" />
+                  Move Up
+                </button>
+                <button
+                  onClick={() => handleMovePackage(pkg.id, 'down')}
+                  disabled={isReordering || pkg.display_order === packages.length}
+                  className="flex-1 px-3 py-2 bg-gray-50 hover:bg-gray-100 text-gray-700 rounded-lg transition-colors duration-200 text-sm font-medium disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center gap-1"
+                >
+                  <ArrowDown className="w-4 h-4" />
+                  Move Down
+                </button>
               </div>
 
               <div className="flex gap-2">
