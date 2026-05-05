@@ -1479,6 +1479,7 @@ const TreatPackageTab = () => {
   const [packages, setPackages] = useState<any[]>([]);
   const [isLoading, setIsLoading] = useState(true);
   const [isReordering, setIsReordering] = useState(false);
+  const [draggedPackageId, setDraggedPackageId] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [success, setSuccess] = useState<string | null>(null);
   const [editingPackage, setEditingPackage] = useState<any | null>(null);
@@ -1584,6 +1585,29 @@ const TreatPackageTab = () => {
     }
   };
 
+  const persistPackageOrder = async (nextPackages: any[]) => {
+    const normalizedPackages = nextPackages.map((pkg, index) => ({
+      ...pkg,
+      display_order: index + 1
+    }));
+
+    setPackages(normalizedPackages);
+
+    const updateResults = await Promise.all(
+      normalizedPackages.map((pkg) =>
+        supabase
+          .from('treat_packages')
+          .update({ display_order: pkg.display_order })
+          .eq('id', pkg.id)
+      )
+    );
+
+    const failedUpdate = updateResults.find((result) => result.error);
+    if (failedUpdate?.error) {
+      throw failedUpdate.error;
+    }
+  };
+
   const handleMovePackage = async (packageId: string, direction: 'up' | 'down') => {
     if (isReordering) return;
 
@@ -1601,24 +1625,7 @@ const TreatPackageTab = () => {
       const reorderedPackages = [...packages];
       [reorderedPackages[currentIndex], reorderedPackages[targetIndex]] = [reorderedPackages[targetIndex], reorderedPackages[currentIndex]];
 
-      const normalizedPackages = reorderedPackages.map((pkg, index) => ({
-        ...pkg,
-        display_order: index + 1
-      }));
-
-      setPackages(normalizedPackages);
-
-      const { error: reorderError } = await supabase
-        .from('treat_packages')
-        .upsert(
-          normalizedPackages.map((pkg) => ({
-            id: pkg.id,
-            display_order: pkg.display_order
-          })),
-          { onConflict: 'id' }
-        );
-
-      if (reorderError) throw reorderError;
+      await persistPackageOrder(reorderedPackages);
 
       setSuccess('Package order updated successfully');
       setTimeout(() => setSuccess(null), 3000);
@@ -1627,6 +1634,36 @@ const TreatPackageTab = () => {
       setError('Failed to reorder packages');
       fetchTreatPackages();
     } finally {
+      setIsReordering(false);
+    }
+  };
+
+  const handleDropPackage = async (targetPackageId: string) => {
+    if (!draggedPackageId || draggedPackageId === targetPackageId || isReordering) return;
+
+    const sourceIndex = packages.findIndex((pkg) => pkg.id === draggedPackageId);
+    const targetIndex = packages.findIndex((pkg) => pkg.id === targetPackageId);
+    if (sourceIndex < 0 || targetIndex < 0) return;
+
+    try {
+      setError(null);
+      setSuccess(null);
+      setIsReordering(true);
+
+      const reorderedPackages = [...packages];
+      const [draggedPackage] = reorderedPackages.splice(sourceIndex, 1);
+      reorderedPackages.splice(targetIndex, 0, draggedPackage);
+
+      await persistPackageOrder(reorderedPackages);
+
+      setSuccess('Package moved successfully');
+      setTimeout(() => setSuccess(null), 3000);
+    } catch (err) {
+      console.error('Error dragging package:', err);
+      setError('Failed to move package');
+      fetchTreatPackages();
+    } finally {
+      setDraggedPackageId(null);
       setIsReordering(false);
     }
   };
@@ -1666,6 +1703,9 @@ const TreatPackageTab = () => {
           </button>
         </div>
       </div>
+      <p className="text-sm text-gray-600">
+        Drag and drop package cards to reorder them, or use Move Up/Move Down.
+      </p>
 
       {(success || error) && (
         <div className={`p-4 rounded-lg ${
@@ -1678,10 +1718,20 @@ const TreatPackageTab = () => {
       )}
 
       <div className="grid grid-cols-3 gap-4">
-        {packages.map((pkg) => (
-          <Card key={pkg.id} className={`rounded-lg shadow transition-all duration-200 ${
-            pkg.is_popular ? 'ring-2 ring-[#309605] bg-gradient-to-br from-white to-[#e6f7f1]' : 'bg-white'
-          }`}>
+        {packages.map((pkg, index) => (
+          <Card
+            key={pkg.id}
+            draggable={!isReordering}
+            onDragStart={() => setDraggedPackageId(pkg.id)}
+            onDragEnd={() => setDraggedPackageId(null)}
+            onDragOver={(e) => e.preventDefault()}
+            onDrop={() => handleDropPackage(pkg.id)}
+            className={`rounded-lg shadow transition-all duration-200 cursor-move ${
+              draggedPackageId === pkg.id ? 'opacity-60' : ''
+            } ${
+              pkg.is_popular ? 'ring-2 ring-[#309605] bg-gradient-to-br from-white to-[#e6f7f1]' : 'bg-white'
+            }`}
+          >
             <div className="p-6">
               {pkg.is_popular && (
                 <div className="mb-3 inline-flex items-center px-3 py-1 bg-[#309605] text-white text-xs font-semibold rounded-full">
@@ -1751,7 +1801,7 @@ const TreatPackageTab = () => {
               <div className="flex gap-2 mb-2">
                 <button
                   onClick={() => handleMovePackage(pkg.id, 'up')}
-                  disabled={isReordering || pkg.display_order === 1}
+                  disabled={isReordering || index === 0}
                   className="flex-1 px-3 py-2 bg-gray-50 hover:bg-gray-100 text-gray-700 rounded-lg transition-colors duration-200 text-sm font-medium disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center gap-1"
                 >
                   <ArrowUp className="w-4 h-4" />
@@ -1759,7 +1809,7 @@ const TreatPackageTab = () => {
                 </button>
                 <button
                   onClick={() => handleMovePackage(pkg.id, 'down')}
-                  disabled={isReordering || pkg.display_order === packages.length}
+                  disabled={isReordering || index === packages.length - 1}
                   className="flex-1 px-3 py-2 bg-gray-50 hover:bg-gray-100 text-gray-700 rounded-lg transition-colors duration-200 text-sm font-medium disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center gap-1"
                 >
                   <ArrowDown className="w-4 h-4" />
