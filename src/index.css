@@ -299,3 +299,27 @@
 .animate-pulse-glow {
   animation: pulse-glow 2s ease-in-out;
 }
+
+/* TipTap email HTML editor: images fit compose width; resizable image wrapper scales */
+.email-html-editor [data-node='image'] {
+  max-width: 100%;
+  margin: 0.5rem 0;
+  box-sizing: border-box;
+}
+
+.email-html-editor [data-node='image'] [data-resize-wrapper] {
+  max-width: 100%;
+}
+
+.email-html-editor [data-node='image'] img {
+  max-width: 100%;
+  height: auto;
+  display: block;
+  box-sizing: border-box;
+  vertical-align: bottom;
+}
+
+/* Resize handles stay usable on light backgrounds */
+.email-html-editor [data-resize-handle] {
+  z-index: 2;
+}

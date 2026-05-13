@@ -1,5 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { EditorContent, useEditor } from '@tiptap/react';
+import { mergeAttributes } from '@tiptap/core';
+import type { ResizableNodeViewDirection } from '@tiptap/core';
 import StarterKit from '@tiptap/starter-kit';
 import Underline from '@tiptap/extension-underline';
 import Link from '@tiptap/extension-link';
@@ -18,7 +20,53 @@ import {
   Code2,
   List,
   ListOrdered,
+  RotateCcw,
 } from 'lucide-react';
+
+const emailImageResizeDirections: ResizableNodeViewDirection[] = [
+  'bottom-right',
+  'bottom-left',
+  'top-right',
+  'top-left',
+  'right',
+  'bottom',
+];
+
+/** Responsive output for email + Tiptap v3 resizable node view in the editor. */
+const EmailBodyImage = Image.extend({
+  renderHTML({ node, HTMLAttributes }) {
+    const w = node.attrs.width as number | null | undefined;
+    const h = node.attrs.height as number | null | undefined;
+    const rest = { ...HTMLAttributes } as Record<string, unknown>;
+    delete rest.width;
+    delete rest.height;
+    let style = 'max-width:100%;height:auto;display:block;';
+    if (w != null && w > 0) {
+      style += `width:${w}px;`;
+    }
+    if (h != null && h > 0) {
+      style += `height:${h}px;`;
+    }
+    const extra: Record<string, string | number> = { style };
+    if (w != null && w > 0) {
+      extra.width = w;
+    }
+    if (h != null && h > 0) {
+      extra.height = h;
+    }
+    return ['img', mergeAttributes(this.options.HTMLAttributes, rest, extra)];
+  },
+}).configure({
+  inline: false,
+  allowBase64: false,
+  resize: {
+    enabled: true,
+    minWidth: 48,
+    minHeight: 48,
+    alwaysPreserveAspectRatio: true,
+    directions: emailImageResizeDirections,
+  },
+});
 
 type Props = {
   value: string;
@@ -73,10 +121,7 @@ export const HtmlEmailEditor = ({
           target: '_blank',
         },
       }),
-      Image.configure({
-        inline: false,
-        allowBase64: false,
-      }),
+      EmailBodyImage,
       TextAlign.configure({
         types: ['heading', 'paragraph'],
       }),
@@ -219,6 +264,27 @@ export const HtmlEmailEditor = ({
             <ImageIcon className="w-4 h-4" />
             {!isCompose && (isUploading ? <span className="text-xs">Uploading…</span> : <span className="text-xs">Image</span>)}
           </button>
+          {editor?.isActive('image') && (
+            <>
+              <div className={isCompose ? 'mx-0.5 h-6 w-px bg-[#dadce0]' : 'mx-1 h-6 w-px bg-gray-200'} />
+              <button
+                type="button"
+                onClick={() =>
+                  editor
+                    .chain()
+                    .focus()
+                    .updateAttributes('image', { width: null, height: null })
+                    .run()
+                }
+                disabled={visualToolbarDisabled}
+                className={toolbarBtnClass(false)}
+                title="Reset to original image size"
+              >
+                <RotateCcw className="h-4 w-4" />
+                {!isCompose && <span className="text-xs">Reset size</span>}
+              </button>
+            </>
+          )}
           <div className={isCompose ? 'w-px h-6 bg-[#dadce0] mx-0.5' : 'w-px h-6 bg-gray-200 mx-1'} />
           <button
             type="button"
@@ -306,15 +372,15 @@ export const HtmlEmailEditor = ({
       <div
         className={
           isCompose
-            ? 'min-h-[220px] flex-1 overflow-y-auto bg-white [&_.ProseMirror]:min-h-[200px] [&_.ProseMirror]:px-4 [&_.ProseMirror]:py-3 [&_.ProseMirror]:text-[15px] [&_.ProseMirror]:leading-6 [&_.ProseMirror]:text-[#202124] [&_.ProseMirror]:outline-none'
-            : 'overflow-hidden rounded-lg border border-gray-300'
+            ? 'min-h-[220px] flex-1 overflow-y-auto overflow-x-hidden bg-white [&_.ProseMirror]:min-h-[200px] [&_.ProseMirror]:px-4 [&_.ProseMirror]:py-3 [&_.ProseMirror]:text-[15px] [&_.ProseMirror]:leading-6 [&_.ProseMirror]:text-[#202124] [&_.ProseMirror]:outline-none'
+            : 'overflow-x-hidden overflow-hidden rounded-lg border border-gray-300'
         }
       >
         {isCompose ? (
-          <EditorContent editor={editor} />
+          <EditorContent editor={editor} className="email-html-editor" />
         ) : (
           <div className="bg-white p-3">
-            <EditorContent editor={editor} />
+            <EditorContent editor={editor} className="email-html-editor" />
           </div>
         )}
       </div>
