@@ -11,8 +11,12 @@ interface ConversionSettings {
   minimum_points_for_payout: number;
   /** % of platform ad-revenue share suggested for this reward pool (default 15) */
   platform_to_pool_percentage?: number;
-  /** When true, pg_cron runs conversion for previous month (1st ~07:00 UTC) */
+  /** When true, pg_cron may run automated conversion (daily at UTC time below) */
   auto_execute_monthly_conversion?: boolean;
+  auto_conversion_run_hour_utc?: number;
+  auto_conversion_run_minute_utc?: number;
+  /** UTC instant — automation suppressed until this time */
+  auto_conversion_not_before_utc?: string | null;
   updated_at: string;
 }
 
@@ -50,6 +54,24 @@ interface ConversionPreview {
   minimum_points_required: number;
 }
 
+function utcPartsFromIso(iso: string | null | undefined): { date: string; time: string } {
+  if (!iso) return { date: '', time: '' };
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return { date: '', time: '' };
+  const s = d.toISOString();
+  return { date: s.slice(0, 10), time: s.slice(11, 16) };
+}
+
+/** Interprets date + optional time as UTC wall clock for Postgres timestamptz. */
+function buildNotBeforeUtcIso(dateStr: string, timeStr: string): string | null {
+  const d = dateStr.trim();
+  if (!d) return null;
+  const t = timeStr.trim() || '00:00';
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(d)) return null;
+  if (!/^\d{2}:\d{2}$/.test(t)) return null;
+  return `${d}T${t}:00.000Z`;
+}
+
 export const MonthlyConversionSection: React.FC = () => {
   const [settings, setSettings] = useState<ConversionSettings | null>(null);
   const [preview, setPreview] = useState<ConversionPreview | null>(null);
@@ -71,6 +93,10 @@ export const MonthlyConversionSection: React.FC = () => {
   const [rateDescription, setRateDescription] = useState<string>('');
   const [newPlatformPoolPct, setNewPlatformPoolPct] = useState<string>('15');
   const [autoExecuteMonthly, setAutoExecuteMonthly] = useState(false);
+  const [autoRunHourUtc, setAutoRunHourUtc] = useState(7);
+  const [autoRunMinuteUtc, setAutoRunMinuteUtc] = useState(0);
+  const [autoNotBeforeDateUtc, setAutoNotBeforeDateUtc] = useState('');
+  const [autoNotBeforeTimeUtc, setAutoNotBeforeTimeUtc] = useState('');
 
   const [poolSuggestion, setPoolSuggestion] = useState<PoolSuggestion | null>(null);
   const [poolSuggestionLoading, setPoolSuggestionLoading] = useState(false);
@@ -144,6 +170,19 @@ export const MonthlyConversionSection: React.FC = () => {
             : 15;
         setNewPlatformPoolPct(String(poolPct));
         setAutoExecuteMonthly(!!settingsData.auto_execute_monthly_conversion);
+        const h =
+          typeof settingsData.auto_conversion_run_hour_utc === 'number'
+            ? settingsData.auto_conversion_run_hour_utc
+            : 7;
+        const m =
+          typeof settingsData.auto_conversion_run_minute_utc === 'number'
+            ? settingsData.auto_conversion_run_minute_utc
+            : 0;
+        setAutoRunHourUtc(h);
+        setAutoRunMinuteUtc(m);
+        const nb = utcPartsFromIso(settingsData.auto_conversion_not_before_utc);
+        setAutoNotBeforeDateUtc(nb.date);
+        setAutoNotBeforeTimeUtc(nb.time);
       }
 
       // Load conversion preview
@@ -185,6 +224,28 @@ export const MonthlyConversionSection: React.FC = () => {
       return;
     }
 
+    if (autoExecuteMonthly) {
+      if (autoNotBeforeTimeUtc.trim() && !autoNotBeforeDateUtc.trim()) {
+        setError('Clear the earliest time or set an earliest start date (both in UTC).');
+        return;
+      }
+    }
+
+    const runH = Math.min(23, Math.max(0, Math.round(Number(autoRunHourUtc))));
+    const runM = Math.min(59, Math.max(0, Math.round(Number(autoRunMinuteUtc))));
+    if (!Number.isFinite(runH) || !Number.isFinite(runM)) {
+      setError('Run time (UTC hour and minute) must be valid numbers.');
+      return;
+    }
+
+    const notBeforeIso = autoNotBeforeDateUtc.trim()
+      ? buildNotBeforeUtcIso(autoNotBeforeDateUtc, autoNotBeforeTimeUtc)
+      : null;
+    if (autoNotBeforeDateUtc.trim() && !notBeforeIso) {
+      setError('Invalid earliest start: use date YYYY-MM-DD and optional time HH:MM (UTC).');
+      return;
+    }
+
     try {
       setProcessing(true);
       setError(null);
@@ -213,7 +274,12 @@ export const MonthlyConversionSection: React.FC = () => {
 
       const { error: autoErr } = await supabase
         .from('contribution_conversion_settings')
-        .update({ auto_execute_monthly_conversion: autoExecuteMonthly })
+        .update({
+          auto_execute_monthly_conversion: autoExecuteMonthly,
+          auto_conversion_run_hour_utc: runH,
+          auto_conversion_run_minute_utc: runM,
+          auto_conversion_not_before_utc: notBeforeIso,
+        })
         .eq('is_active', true);
 
       if (autoErr) throw autoErr;
@@ -408,11 +474,23 @@ export const MonthlyConversionSection: React.FC = () => {
               <p className="text-xs text-gray-600 mt-1">Of platform ad share → reward pool</p>
             </div>
             <div className="p-4 bg-violet-50 border border-violet-200 rounded-lg">
-              <p className="text-xs text-violet-700 uppercase tracking-wider mb-1">Auto monthly run</p>
+              <p className="text-xs text-violet-700 uppercase tracking-wider mb-1">Auto scheduled run</p>
               <p className="text-2xl font-bold text-gray-900">
                 {settings.auto_execute_monthly_conversion ? 'On' : 'Off'}
               </p>
-              <p className="text-xs text-gray-600 mt-1">1st of month ~07:00 UTC, previous month</p>
+              <p className="text-xs text-gray-600 mt-1">
+                {settings.auto_execute_monthly_conversion
+                  ? `Daily ~${String(settings.auto_conversion_run_hour_utc ?? 7).padStart(2, '0')}:${String(
+                      settings.auto_conversion_run_minute_utc ?? 0
+                    ).padStart(2, '0')} UTC · previous calendar month`
+                  : 'Disabled'}
+                {settings.auto_conversion_not_before_utc ? (
+                  <span className="block mt-1 text-violet-800">
+                    Not before {utcPartsFromIso(settings.auto_conversion_not_before_utc).date}{' '}
+                    {utcPartsFromIso(settings.auto_conversion_not_before_utc).time} UTC
+                  </span>
+                ) : null}
+              </p>
             </div>
           </div>
         )}
@@ -476,17 +554,91 @@ export const MonthlyConversionSection: React.FC = () => {
               />
               <span>
                 <span className="block text-sm font-medium text-gray-900">
-                  Automatically execute monthly conversion
+                  Automatically execute conversion (daily)
                 </span>
                 <span className="block text-xs text-gray-600 mt-0.5">
-                  On the 1st of each month (~07:00 UTC), runs conversion for the <strong>previous</strong> calendar month
-                  using the suggested pool (platform AdMob share × this %). Skips if already completed for that month,
-                  if disabled here, or if the suggested pool is zero. Requires pg_cron, Edge Function{' '}
+                  Once every 24 hours at the <strong>UTC</strong> time you set below, the system attempts conversion for
+                  the <strong>previous</strong> calendar month using the suggested pool (platform AdMob share × this %).
+                  Skips if that month is already completed, if disabled here, or if the suggested pool is zero. Requires
+                  pg_cron, Edge Function{' '}
                   <code className="text-[11px] bg-white px-1 rounded">contribution-monthly-convert</code>, and service-role
                   JWT config for pg_net (same as AdMob auto-sync).
                 </span>
               </span>
             </label>
+
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 rounded-lg border border-gray-200 bg-white p-3">
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-1.5">
+                  Run at — hour (UTC)
+                </label>
+                <input
+                  type="number"
+                  min={0}
+                  max={23}
+                  step={1}
+                  value={autoRunHourUtc}
+                  onChange={(e) => {
+                    const v = parseInt(e.target.value, 10);
+                    if (Number.isNaN(v)) {
+                      setAutoRunHourUtc(0);
+                      return;
+                    }
+                    setAutoRunHourUtc(Math.min(23, Math.max(0, v)));
+                  }}
+                  disabled={!autoExecuteMonthly}
+                  className="w-full px-3 py-2 bg-white border border-gray-300 rounded-lg text-gray-900 text-sm focus:outline-none focus:border-green-600 focus:ring-2 focus:ring-green-600 focus:ring-opacity-20 disabled:opacity-50"
+                />
+              </div>
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-1.5">
+                  Run at — minute (UTC)
+                </label>
+                <input
+                  type="number"
+                  min={0}
+                  max={59}
+                  step={1}
+                  value={autoRunMinuteUtc}
+                  onChange={(e) => {
+                    const v = parseInt(e.target.value, 10);
+                    if (Number.isNaN(v)) {
+                      setAutoRunMinuteUtc(0);
+                      return;
+                    }
+                    setAutoRunMinuteUtc(Math.min(59, Math.max(0, v)));
+                  }}
+                  disabled={!autoExecuteMonthly}
+                  className="w-full px-3 py-2 bg-white border border-gray-300 rounded-lg text-gray-900 text-sm focus:outline-none focus:border-green-600 focus:ring-2 focus:ring-green-600 focus:ring-opacity-20 disabled:opacity-50"
+                />
+              </div>
+              <div className="sm:col-span-2">
+                <label className="block text-sm font-medium text-gray-700 mb-1.5">
+                  Earliest first automation (optional, UTC)
+                </label>
+                <p className="text-xs text-gray-500 mb-2">
+                  Leave blank to allow automation immediately. When set, automated runs are skipped until this date and
+                  time in UTC.
+                </p>
+                <div className="flex flex-wrap gap-2">
+                  <input
+                    type="date"
+                    value={autoNotBeforeDateUtc}
+                    onChange={(e) => setAutoNotBeforeDateUtc(e.target.value)}
+                    disabled={!autoExecuteMonthly}
+                    className="px-3 py-2 bg-white border border-gray-300 rounded-lg text-gray-900 text-sm focus:outline-none focus:border-green-600 focus:ring-2 focus:ring-green-600 focus:ring-opacity-20 disabled:opacity-50"
+                  />
+                  <input
+                    type="time"
+                    step={60}
+                    value={autoNotBeforeTimeUtc}
+                    onChange={(e) => setAutoNotBeforeTimeUtc(e.target.value)}
+                    disabled={!autoExecuteMonthly}
+                    className="px-3 py-2 bg-white border border-gray-300 rounded-lg text-gray-900 text-sm focus:outline-none focus:border-green-600 focus:ring-2 focus:ring-green-600 focus:ring-opacity-20 disabled:opacity-50"
+                  />
+                </div>
+              </div>
+            </div>
 
             <div className="flex items-center gap-2 pt-2">
               <button
@@ -510,6 +662,19 @@ export const MonthlyConversionSection: React.FC = () => {
                       )
                     );
                     setAutoExecuteMonthly(!!settings.auto_execute_monthly_conversion);
+                    const rh =
+                      typeof settings.auto_conversion_run_hour_utc === 'number'
+                        ? settings.auto_conversion_run_hour_utc
+                        : 7;
+                    const rm =
+                      typeof settings.auto_conversion_run_minute_utc === 'number'
+                        ? settings.auto_conversion_run_minute_utc
+                        : 0;
+                    setAutoRunHourUtc(rh);
+                    setAutoRunMinuteUtc(rm);
+                    const nb2 = utcPartsFromIso(settings.auto_conversion_not_before_utc);
+                    setAutoNotBeforeDateUtc(nb2.date);
+                    setAutoNotBeforeTimeUtc(nb2.time);
                   }
                 }}
                 disabled={processing}

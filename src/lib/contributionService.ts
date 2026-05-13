@@ -649,6 +649,11 @@ export interface ConversionSettings {
   is_active: boolean;
   max_payout_per_user_usd: number | null;
   minimum_points_for_payout: number;
+  platform_to_pool_percentage?: number;
+  auto_execute_monthly_conversion?: boolean;
+  auto_conversion_run_hour_utc?: number;
+  auto_conversion_run_minute_utc?: number;
+  auto_conversion_not_before_utc?: string | null;
   updated_at: string;
 }
 

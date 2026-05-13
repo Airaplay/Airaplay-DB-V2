@@ -100,11 +100,21 @@ export const EmailManagementTab = (): JSX.Element => {
 
   // Weekly report queueing state
   const [isWeeklyReportOpen, setIsWeeklyReportOpen] = useState(false);
+  /** Last completed Fri–Thu week in UTC (same window the Friday cron uses). */
   const [weeklyReportRange, setWeeklyReportRange] = useState(() => {
-    const end = new Date();
+    const now = new Date();
+    const y = now.getUTCFullYear();
+    const mo = now.getUTCMonth();
+    const d = now.getUTCDate();
+    const todayUtc = new Date(Date.UTC(y, mo, d));
+    const dow = todayUtc.getUTCDay(); // 0 Sun … 5 Fri … 6 Sat
+    const daysFromThisWeekThursday = (dow + 7 - 4) % 7;
+    const end = new Date(todayUtc);
+    end.setUTCDate(end.getUTCDate() - daysFromThisWeekThursday);
     const start = new Date(end);
-    start.setDate(end.getDate() - 7);
-    const toDateInput = (d: Date) => d.toISOString().slice(0, 10);
+    start.setUTCDate(start.getUTCDate() - 6);
+    const toDateInput = (dt: Date) =>
+      `${dt.getUTCFullYear()}-${String(dt.getUTCMonth() + 1).padStart(2, '0')}-${String(dt.getUTCDate()).padStart(2, '0')}`;
     return { start_date: toDateInput(start), end_date: toDateInput(end) };
   });
   const [isQueueingWeeklyReports, setIsQueueingWeeklyReports] = useState(false);
@@ -1207,6 +1217,7 @@ export const EmailManagementTab = (): JSX.Element => {
 
               <p className="text-sm text-gray-600 mb-4">
                 This will enqueue one <span className="font-mono">weekly_report</span> email per creator, then you can run the email queue to deliver them.
+                The week is seven UTC calendar days, Friday through Thursday (the next Friday starts the next week). Defaults match that window. A database job also queues the same window every Friday at 10:15 UTC.
               </p>
 
               <div className="space-y-4">
