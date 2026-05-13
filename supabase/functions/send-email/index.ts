@@ -9,7 +9,15 @@ const corsHeaders = {
 };
 
 interface SendEmailRequest {
-  template_type: 'welcome' | 'purchase_treat' | 'approved_withdrawal' | 'newsletter' | 'weekly_report';
+  template_type:
+    | 'welcome'
+    | 'purchase_treat'
+    | 'approved_withdrawal'
+    | 'completed_withdrawal'
+    | 'creator_approved'
+    | 'promotion_active'
+    | 'newsletter'
+    | 'weekly_report';
   recipient_email: string;
   recipient_user_id?: string;
   variables: Record<string, string>;

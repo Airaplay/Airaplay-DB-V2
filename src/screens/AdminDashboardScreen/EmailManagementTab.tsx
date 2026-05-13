@@ -231,10 +231,11 @@ export const EmailManagementTab = (): JSX.Element => {
       },
       newsletter: {
         user_name: 'John Doe',
-        trending_content: 'Check out the hottest tracks this week!',
-        new_releases: 'Fresh music from your favorite artists.',
-        featured_artists: 'Discover talented new creators.',
-        app_url: 'https://airaplay.com',
+        newsletter_title: 'This week on Airaplay',
+        newsletter_content:
+          '<p><strong>Trending</strong><br>Check out the hottest tracks this week!</p>' +
+          '<p><strong>New releases</strong><br>Fresh music from your favorite artists.</p>' +
+          '<p><strong>Featured artists</strong><br>Discover talented new creators.</p>',
         unsubscribe_url: 'https://airaplay.com/unsubscribe'
       },
       weekly_report: {
