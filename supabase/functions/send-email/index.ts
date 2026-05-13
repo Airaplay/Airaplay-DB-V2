@@ -1,5 +1,6 @@
 import "jsr:@supabase/functions-js/edge-runtime.d.ts";
 import { createClient } from 'jsr:@supabase/supabase-js@2';
+import { enforceBlackEmailHeaderBackground } from "../_shared/emailHeaderStyle.ts";
 
 const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
@@ -82,7 +83,7 @@ Deno.serve(async (req: Request) => {
 
     // Replace variables in subject and content
     let subject = template.subject;
-    let htmlContent = template.html_content;
+    let htmlContent = enforceBlackEmailHeaderBackground(template.html_content);
 
     for (const [key, value] of Object.entries(variables)) {
       const placeholder = `{{${key}}}`;

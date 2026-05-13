@@ -22,6 +22,7 @@ import {
   sanitizeFileName,
   ALLOWED_IMAGE_EXTENSIONS,
 } from '../../lib/fileSecurity';
+import { enforceBlackEmailHeaderBackground } from '../../lib/emailHeaderStyle';
 
 interface EmailTemplate {
   id: string;
@@ -328,7 +329,7 @@ export const EmailManagementTab = (): JSX.Element => {
   const getPreviewContent = (template: EmailTemplate): { subject: string; html: string } => {
     const sampleVars = getSampleVariables(template.template_type);
     let subject = template.subject;
-    let html = template.html_content;
+    let html = enforceBlackEmailHeaderBackground(template.html_content);
 
     // Replace variables with sample data
     for (const [key, value] of Object.entries(sampleVars)) {
@@ -379,7 +380,7 @@ export const EmailManagementTab = (): JSX.Element => {
         .from('email_templates')
         .update({
           subject: templateFormData.subject,
-          html_content: templateFormData.html_content,
+          html_content: enforceBlackEmailHeaderBackground(templateFormData.html_content),
           updated_at: new Date().toISOString()
         })
         .eq('id', selectedTemplate.id);
