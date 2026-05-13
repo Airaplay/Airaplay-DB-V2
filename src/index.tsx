@@ -229,6 +229,39 @@ function App() {
   }, [showInterstitial]);
 
   const isAdminRoute = location.pathname.startsWith('/admin');
+
+  // Block copy/cut globally for the consumer app; admin tools need clipboard, selection, and context menu.
+  useEffect(() => {
+    if (isAdminRoute) {
+      return;
+    }
+
+    const stopEvent = (event: Event) => {
+      event.preventDefault();
+    };
+
+    const stopCopyShortcut = (event: KeyboardEvent) => {
+      const key = event.key.toLowerCase();
+      if ((event.ctrlKey || event.metaKey) && (key === 'c' || key === 'x')) {
+        event.preventDefault();
+      }
+    };
+
+    document.addEventListener('copy', stopEvent);
+    document.addEventListener('cut', stopEvent);
+    document.addEventListener('contextmenu', stopEvent);
+    document.addEventListener('selectstart', stopEvent);
+    document.addEventListener('keydown', stopCopyShortcut);
+
+    return () => {
+      document.removeEventListener('copy', stopEvent);
+      document.removeEventListener('cut', stopEvent);
+      document.removeEventListener('contextmenu', stopEvent);
+      document.removeEventListener('selectstart', stopEvent);
+      document.removeEventListener('keydown', stopCopyShortcut);
+    };
+  }, [isAdminRoute]);
+
   const isVideoRoute = location.pathname.startsWith('/video/');
   const isArtistRegistrationRoute = location.pathname === '/become-artist';
   const isTransactionHistoryRoute = location.pathname === '/transaction-history';
@@ -1028,34 +1061,6 @@ function App() {
 function AppWithRouter() {
   const [showSplash, setShowSplash] = useState(true);
   const [isAppReady, setIsAppReady] = useState(false);
-
-  // Block copy/cut flows globally so app content cannot be copied.
-  useEffect(() => {
-    const stopEvent = (event: Event) => {
-      event.preventDefault();
-    };
-
-    const stopCopyShortcut = (event: KeyboardEvent) => {
-      const key = event.key.toLowerCase();
-      if ((event.ctrlKey || event.metaKey) && (key === "c" || key === "x")) {
-        event.preventDefault();
-      }
-    };
-
-    document.addEventListener("copy", stopEvent);
-    document.addEventListener("cut", stopEvent);
-    document.addEventListener("contextmenu", stopEvent);
-    document.addEventListener("selectstart", stopEvent);
-    document.addEventListener("keydown", stopCopyShortcut);
-
-    return () => {
-      document.removeEventListener("copy", stopEvent);
-      document.removeEventListener("cut", stopEvent);
-      document.removeEventListener("contextmenu", stopEvent);
-      document.removeEventListener("selectstart", stopEvent);
-      document.removeEventListener("keydown", stopCopyShortcut);
-    };
-  }, []);
 
   useEffect(() => {
     const initializeApp = async () => {

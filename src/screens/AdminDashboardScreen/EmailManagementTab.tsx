@@ -11,9 +11,11 @@ import {
   Settings,
   Save,
   X,
-  RefreshCw
+  RefreshCw,
+  Newspaper
 } from 'lucide-react';
 import { supabase } from '../../lib/supabase';
+import { verifyAdminRole } from '../../lib/adminVerification';
 import { LoadingLogo } from '../../components/LoadingLogo';
 import { HtmlEmailEditor } from '../../components/HtmlEmailEditor';
 import {
@@ -120,6 +122,16 @@ export const EmailManagementTab = (): JSX.Element => {
   });
   const [isQueueingWeeklyReports, setIsQueueingWeeklyReports] = useState(false);
   const [weeklyReportResult, setWeeklyReportResult] = useState<{ queued: number; date_range?: string } | null>(null);
+
+  const [isNewsletterComposerOpen, setIsNewsletterComposerOpen] = useState(false);
+  const [newsletterDraft, setNewsletterDraft] = useState({
+    title: '',
+    html: '<p></p>',
+    unsubscribe_url: 'https://airaplay.com/unsubscribe',
+    audience: 'all' as 'all' | 'listener' | 'creator',
+  });
+  const [isQueueingNewsletter, setIsQueueingNewsletter] = useState(false);
+  const [newsletterQueueResult, setNewsletterQueueResult] = useState<{ queued: number } | null>(null);
 
   useEffect(() => {
     fetchData();
@@ -327,17 +339,82 @@ export const EmailManagementTab = (): JSX.Element => {
     setIsEditingTemplate(true);
   };
 
+  const replaceEmailPlaceholders = (html: string, vars: Record<string, string>): string => {
+    let out = html;
+    for (const [key, value] of Object.entries(vars)) {
+      const ph = `{{${key}}}`;
+      out = out.split(ph).join(value);
+    }
+    return out;
+  };
+
+  const buildNewsletterDraftPreviewHtml = (): string => {
+    const tpl = templates.find((t) => t.template_type === 'newsletter');
+    if (!tpl) {
+      return '<p class="p-4 text-gray-600">Load templates first, then open the composer again.</p>';
+    }
+    let html = enforceBlackEmailHeaderBackground(tpl.html_content);
+    const vars: Record<string, string> = {
+      user_name: 'Jamie Listener',
+      newsletter_title: newsletterDraft.title.trim() || 'Your newsletter title',
+      newsletter_content:
+        newsletterDraft.html.trim() || '<p>Your issue content will appear here.</p>',
+      unsubscribe_url: newsletterDraft.unsubscribe_url.trim() || 'https://airaplay.com/unsubscribe',
+    };
+    return replaceEmailPlaceholders(html, vars);
+  };
+
+  const handleOpenNewsletterComposer = () => {
+    setNewsletterQueueResult(null);
+    setError(null);
+    setIsNewsletterComposerOpen(true);
+  };
+
+  const handleQueueNewsletterBroadcast = async () => {
+    setError(null);
+    setNewsletterQueueResult(null);
+
+    const gate = await verifyAdminRole();
+    if (!gate.isManager) {
+      setError(gate.error || 'Only admins or managers can queue newsletters.');
+      return;
+    }
+
+    if (!newsletterDraft.title.trim()) {
+      setError('Add a newsletter title.');
+      return;
+    }
+    if (!newsletterDraft.html.trim() || newsletterDraft.html.trim() === '<p></p>') {
+      setError('Add newsletter body content (HTML).');
+      return;
+    }
+
+    setIsQueueingNewsletter(true);
+    try {
+      const { data, error: rpcError } = await supabase.rpc('admin_queue_newsletter_broadcast', {
+        p_newsletter_title: newsletterDraft.title.trim(),
+        p_newsletter_content: newsletterDraft.html,
+        p_unsubscribe_url: newsletterDraft.unsubscribe_url.trim() || null,
+        p_audience: newsletterDraft.audience,
+      });
+
+      if (rpcError) throw rpcError;
+      const queued = (data as { queued?: number })?.queued ?? 0;
+      setNewsletterQueueResult({ queued });
+    } catch (err: unknown) {
+      setError(err instanceof Error ? err.message : 'Failed to queue newsletter');
+    } finally {
+      setIsQueueingNewsletter(false);
+    }
+  };
+
   const getPreviewContent = (template: EmailTemplate): { subject: string; html: string } => {
     const sampleVars = getSampleVariables(template.template_type);
     let subject = template.subject;
     let html = enforceBlackEmailHeaderBackground(template.html_content);
 
-    // Replace variables with sample data
-    for (const [key, value] of Object.entries(sampleVars)) {
-      const placeholder = new RegExp(`{{${key}}}`, 'g');
-      subject = subject.replace(placeholder, value);
-      html = html.replace(placeholder, value);
-    }
+    subject = replaceEmailPlaceholders(subject, sampleVars as Record<string, string>);
+    html = replaceEmailPlaceholders(html, sampleVars as Record<string, string>);
 
     return { subject, html };
   };
@@ -614,6 +691,14 @@ export const EmailManagementTab = (): JSX.Element => {
               >
                 <Mail className="w-4 h-4" />
                 Queue Weekly Reports
+              </button>
+              <button
+                onClick={handleOpenNewsletterComposer}
+                className="px-4 py-2 bg-indigo-600 hover:bg-indigo-700 text-white rounded-lg flex items-center gap-2"
+                title="Write issue content and queue newsletter sends"
+              >
+                <Newspaper className="w-4 h-4" />
+                Compose newsletter
               </button>
               <button
                 onClick={() => setIsTestEmailOpen(true)}
@@ -1202,6 +1287,151 @@ export const EmailManagementTab = (): JSX.Element => {
       )}
 
       {/* Queue Weekly Reports Modal */}
+      {isNewsletterComposerOpen && (
+        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
+          <div className="bg-white rounded-lg shadow-xl max-w-4xl w-full max-h-[92vh] overflow-y-auto">
+            <div className="p-6">
+              <div className="flex items-center justify-between mb-4">
+                <h3 className="text-xl font-bold text-gray-900">Compose newsletter</h3>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setIsNewsletterComposerOpen(false);
+                    setNewsletterQueueResult(null);
+                  }}
+                  className="p-2 hover:bg-gray-100 rounded-lg"
+                >
+                  <X className="w-5 h-5 text-gray-500" />
+                </button>
+              </div>
+
+              <p className="text-sm text-gray-600 mb-4">
+                Type the issue title and body (rich HTML). Everyone in the audience you pick gets the same content with their own name and unsubscribe link. Then run the email queue to send.
+              </p>
+
+              <div className="space-y-4">
+                <div>
+                  <label className="block text-gray-700 text-sm font-medium mb-2">Issue title (email heading)</label>
+                  <input
+                    type="text"
+                    value={newsletterDraft.title}
+                    onChange={(e) => setNewsletterDraft((d) => ({ ...d, title: e.target.value }))}
+                    className="w-full px-4 py-2 border border-gray-300 rounded-lg text-gray-900 focus:ring-2 focus:ring-indigo-500"
+                    placeholder="e.g. This week on Airaplay"
+                  />
+                </div>
+
+                <div>
+                  <label className="block text-gray-700 text-sm font-medium mb-2">Audience</label>
+                  <select
+                    value={newsletterDraft.audience}
+                    onChange={(e) =>
+                      setNewsletterDraft((d) => ({
+                        ...d,
+                        audience: e.target.value as 'all' | 'listener' | 'creator',
+                      }))
+                    }
+                    className="w-full px-4 py-2 border border-gray-300 rounded-lg text-gray-900 focus:ring-2 focus:ring-indigo-500"
+                  >
+                    <option value="all">All users (with a valid email)</option>
+                    <option value="listener">Listeners only</option>
+                    <option value="creator">Creators only</option>
+                  </select>
+                </div>
+
+                <div>
+                  <label className="block text-gray-700 text-sm font-medium mb-2">Unsubscribe URL</label>
+                  <input
+                    type="url"
+                    value={newsletterDraft.unsubscribe_url}
+                    onChange={(e) => setNewsletterDraft((d) => ({ ...d, unsubscribe_url: e.target.value }))}
+                    className="w-full px-4 py-2 border border-gray-300 rounded-lg text-gray-900 focus:ring-2 focus:ring-indigo-500"
+                    placeholder="https://airaplay.com/unsubscribe"
+                  />
+                </div>
+
+                <div>
+                  <label className="block text-gray-700 text-sm font-medium mb-2">Issue body (HTML)</label>
+                  <HtmlEmailEditor
+                    value={newsletterDraft.html}
+                    disabled={isQueueingNewsletter}
+                    onUploadImage={uploadTemplateImage}
+                    onChange={(nextHtml) => setNewsletterDraft((d) => ({ ...d, html: nextHtml }))}
+                  />
+                </div>
+
+                <div className="border border-gray-200 rounded-lg overflow-hidden">
+                  <div className="bg-gray-100 px-3 py-2 text-xs font-medium text-gray-700">Live preview (uses saved Weekly Newsletter template shell)</div>
+                  <iframe
+                    title="Newsletter preview"
+                    className="w-full min-h-[280px] border-0 bg-white"
+                    sandbox="allow-same-origin"
+                    srcDoc={buildNewsletterDraftPreviewHtml()}
+                  />
+                </div>
+
+                {newsletterQueueResult && (
+                  <div className="p-3 bg-green-50 border border-green-200 rounded-lg">
+                    <p className="text-green-700 text-sm">
+                      Queued {newsletterQueueResult.queued} newsletter email(s). Open Email Logs and use &quot;Run email queue now&quot; to send.
+                    </p>
+                  </div>
+                )}
+
+                <div className="flex flex-wrap gap-3 pt-2">
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setIsNewsletterComposerOpen(false);
+                      setNewsletterQueueResult(null);
+                    }}
+                    className="px-4 py-2 border border-gray-300 rounded-lg text-gray-700 hover:bg-gray-50"
+                  >
+                    Close
+                  </button>
+                  <button
+                    type="button"
+                    onClick={handleQueueNewsletterBroadcast}
+                    disabled={isQueueingNewsletter}
+                    className="px-4 py-2 bg-indigo-600 hover:bg-indigo-700 text-white rounded-lg disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-2"
+                  >
+                    {isQueueingNewsletter ? (
+                      <>
+                        <LoadingLogo variant="pulse" size={16} />
+                        Queueing…
+                      </>
+                    ) : (
+                      <>
+                        <Newspaper className="w-4 h-4" />
+                        Queue to audience
+                      </>
+                    )}
+                  </button>
+                  <button
+                    type="button"
+                    onClick={handleRunEmailQueue}
+                    disabled={isProcessingQueue}
+                    className="px-4 py-2 bg-[#309605] hover:bg-[#3ba208] text-white rounded-lg disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-2"
+                  >
+                    {isProcessingQueue ? (
+                      <>
+                        <LoadingLogo variant="pulse" size={16} />
+                        Running…
+                      </>
+                    ) : (
+                      <>
+                        <RefreshCw className="w-4 h-4" />
+                        Run email queue now
+                      </>
+                    )}
+                  </button>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
       {isWeeklyReportOpen && (
         <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
           <div className="bg-white rounded-lg shadow-xl max-w-md w-full">
