@@ -240,7 +240,8 @@ export const EmailManagementTab = (): JSX.Element => {
         user_name: 'Artist Name',
         date_range: 'Jan 1 - Jan 7, 2026',
         streams_count: '1,234',
-        earnings_week: 'Treats 245.00',
+        earnings_week: '$42.50',
+        stream_earnings: '$128.00',
         top_song: 'Amazing Song Title'
       }
     };
