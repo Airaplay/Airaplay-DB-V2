@@ -89,14 +89,15 @@ Deno.serve(async (req: Request) => {
       );
     }
 
-    // Replace variables in subject and content
+    // Replace variables in subject and content (split/join avoids regex + `$` replacement quirks in long HTML)
     let subject = template.subject;
     let htmlContent = enforceBlackEmailHeaderBackground(template.html_content);
 
-    for (const [key, value] of Object.entries(variables)) {
+    for (const [key, raw] of Object.entries(variables)) {
       const placeholder = `{{${key}}}`;
-      subject = subject.replace(new RegExp(placeholder, 'g'), value);
-      htmlContent = htmlContent.replace(new RegExp(placeholder, 'g'), value);
+      const value = raw == null ? '' : String(raw);
+      subject = subject.split(placeholder).join(value);
+      htmlContent = htmlContent.split(placeholder).join(value);
     }
 
     // Send email via ZeptoMail API
