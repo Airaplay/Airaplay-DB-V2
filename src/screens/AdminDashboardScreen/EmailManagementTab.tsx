@@ -242,6 +242,7 @@ export const EmailManagementTab = (): JSX.Element => {
         streams_count: '1,234',
         earnings_week: '$42.50',
         stream_earnings: '$128.00',
+        treat_earnings: '3,500 Treats',
         top_song: 'Amazing Song Title'
       }
     };
