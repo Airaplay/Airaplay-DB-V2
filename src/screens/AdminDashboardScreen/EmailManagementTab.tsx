@@ -132,6 +132,7 @@ export const EmailManagementTab = (): JSX.Element => {
   });
   const [isQueueingNewsletter, setIsQueueingNewsletter] = useState(false);
   const [newsletterQueueResult, setNewsletterQueueResult] = useState<{ queued: number } | null>(null);
+  const [newsletterComposeTab, setNewsletterComposeTab] = useState<'compose' | 'preview'>('compose');
 
   useEffect(() => {
     fetchData();
@@ -367,6 +368,7 @@ export const EmailManagementTab = (): JSX.Element => {
   const handleOpenNewsletterComposer = () => {
     setNewsletterQueueResult(null);
     setError(null);
+    setNewsletterComposeTab('compose');
     setIsNewsletterComposerOpen(true);
   };
 
@@ -381,7 +383,7 @@ export const EmailManagementTab = (): JSX.Element => {
     }
 
     if (!newsletterDraft.title.trim()) {
-      setError('Add a newsletter title.');
+      setError('Add a subject line.');
       return;
     }
     if (!newsletterDraft.html.trim() || newsletterDraft.html.trim() === '<p></p>') {
@@ -1286,148 +1288,208 @@ export const EmailManagementTab = (): JSX.Element => {
         </div>
       )}
 
-      {/* Queue Weekly Reports Modal */}
+      {/* Newsletter compose (Gmail-style: To / Subject / message + Preview tab) */}
       {isNewsletterComposerOpen && (
-        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
-          <div className="bg-white rounded-lg shadow-xl max-w-4xl w-full max-h-[92vh] overflow-y-auto">
-            <div className="p-6">
-              <div className="flex items-center justify-between mb-4">
-                <h3 className="text-xl font-bold text-gray-900">Compose newsletter</h3>
-                <button
-                  type="button"
-                  onClick={() => {
-                    setIsNewsletterComposerOpen(false);
-                    setNewsletterQueueResult(null);
-                  }}
-                  className="p-2 hover:bg-gray-100 rounded-lg"
-                >
-                  <X className="w-5 h-5 text-gray-500" />
-                </button>
-              </div>
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-3 sm:p-4">
+          <div
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="newsletter-compose-title"
+            className="flex max-h-[92vh] w-full max-w-[720px] flex-col overflow-hidden rounded-lg bg-white shadow-2xl ring-1 ring-black/[0.06]"
+          >
+            <header className="flex shrink-0 items-center justify-between border-b border-[#e8eaed] bg-[#f6f8fc] px-3 py-2.5 sm:px-4">
+              <h2 id="newsletter-compose-title" className="text-[15px] font-medium text-[#202124]">
+                New message
+              </h2>
+              <button
+                type="button"
+                onClick={() => {
+                  setIsNewsletterComposerOpen(false);
+                  setNewsletterQueueResult(null);
+                }}
+                className="rounded-full p-2 text-gray-500 hover:bg-gray-200/80"
+                aria-label="Close"
+              >
+                <X className="h-5 w-5" />
+              </button>
+            </header>
 
-              <p className="text-sm text-gray-600 mb-4">
-                Type the issue title and body (rich HTML). Everyone in the audience you pick gets the same content with their own name and unsubscribe link. Then run the email queue to send.
-              </p>
+            <div className="flex shrink-0 gap-6 border-b border-[#e8eaed] px-3 sm:px-4">
+              <button
+                type="button"
+                onClick={() => setNewsletterComposeTab('compose')}
+                className={`border-b-2 pb-2.5 pt-2 text-sm font-medium -mb-px transition-colors ${
+                  newsletterComposeTab === 'compose'
+                    ? 'border-[#1a73e8] text-[#1a73e8]'
+                    : 'border-transparent text-[#5f6368] hover:text-[#202124]'
+                }`}
+              >
+                Compose
+              </button>
+              <button
+                type="button"
+                onClick={() => setNewsletterComposeTab('preview')}
+                className={`border-b-2 pb-2.5 pt-2 text-sm font-medium -mb-px transition-colors ${
+                  newsletterComposeTab === 'preview'
+                    ? 'border-[#1a73e8] text-[#1a73e8]'
+                    : 'border-transparent text-[#5f6368] hover:text-[#202124]'
+                }`}
+              >
+                Preview
+              </button>
+            </div>
 
-              <div className="space-y-4">
-                <div>
-                  <label className="block text-gray-700 text-sm font-medium mb-2">Issue title (email heading)</label>
-                  <input
-                    type="text"
-                    value={newsletterDraft.title}
-                    onChange={(e) => setNewsletterDraft((d) => ({ ...d, title: e.target.value }))}
-                    className="w-full px-4 py-2 border border-gray-300 rounded-lg text-gray-900 focus:ring-2 focus:ring-indigo-500"
-                    placeholder="e.g. This week on Airaplay"
-                  />
-                </div>
+            <div className="min-h-0 flex-1 overflow-y-auto">
+              {newsletterComposeTab === 'compose' ? (
+                <>
+                  <div className="flex min-h-[48px] items-stretch border-b border-[#e8eaed]">
+                    <span className="flex w-14 shrink-0 items-center pl-3 text-right text-[13px] text-[#5f6368] sm:w-[72px] sm:pl-4">
+                      To
+                    </span>
+                    <select
+                      value={newsletterDraft.audience}
+                      onChange={(e) =>
+                        setNewsletterDraft((d) => ({
+                          ...d,
+                          audience: e.target.value as 'all' | 'listener' | 'creator',
+                        }))
+                      }
+                      disabled={isQueueingNewsletter}
+                      className="min-w-0 flex-1 cursor-pointer border-0 bg-transparent py-3 pr-3 text-[15px] text-[#202124] focus:outline-none focus:ring-0 disabled:opacity-50"
+                    >
+                      <option value="all">All users with email</option>
+                      <option value="listener">Listeners</option>
+                      <option value="creator">Creators</option>
+                    </select>
+                  </div>
 
-                <div>
-                  <label className="block text-gray-700 text-sm font-medium mb-2">Audience</label>
-                  <select
-                    value={newsletterDraft.audience}
-                    onChange={(e) =>
-                      setNewsletterDraft((d) => ({
-                        ...d,
-                        audience: e.target.value as 'all' | 'listener' | 'creator',
-                      }))
-                    }
-                    className="w-full px-4 py-2 border border-gray-300 rounded-lg text-gray-900 focus:ring-2 focus:ring-indigo-500"
-                  >
-                    <option value="all">All users (with a valid email)</option>
-                    <option value="listener">Listeners only</option>
-                    <option value="creator">Creators only</option>
-                  </select>
-                </div>
+                  <div className="flex min-h-[48px] items-stretch border-b border-[#e8eaed]">
+                    <span className="flex w-14 shrink-0 items-center pl-3 text-right text-[13px] text-[#5f6368] sm:w-[72px] sm:pl-4">
+                      Subject
+                    </span>
+                    <input
+                      type="text"
+                      value={newsletterDraft.title}
+                      onChange={(e) => setNewsletterDraft((d) => ({ ...d, title: e.target.value }))}
+                      disabled={isQueueingNewsletter}
+                      className="min-w-0 flex-1 border-0 bg-transparent py-3 pr-3 text-[15px] text-[#202124] placeholder:text-[#80868b] focus:outline-none focus:ring-0 disabled:opacity-50"
+                      placeholder="Newsletter subject / headline"
+                      autoComplete="off"
+                    />
+                  </div>
 
-                <div>
-                  <label className="block text-gray-700 text-sm font-medium mb-2">Unsubscribe URL</label>
-                  <input
-                    type="url"
-                    value={newsletterDraft.unsubscribe_url}
-                    onChange={(e) => setNewsletterDraft((d) => ({ ...d, unsubscribe_url: e.target.value }))}
-                    className="w-full px-4 py-2 border border-gray-300 rounded-lg text-gray-900 focus:ring-2 focus:ring-indigo-500"
-                    placeholder="https://airaplay.com/unsubscribe"
-                  />
-                </div>
+                  <details className="border-b border-[#e8eaed] [&_summary::-webkit-details-marker]:hidden">
+                    <summary className="cursor-pointer list-none py-2.5 pl-3 text-[13px] text-[#1a73e8] hover:underline sm:pl-[84px]">
+                      Sending options
+                    </summary>
+                    <div className="space-y-1.5 px-3 pb-3 sm:pl-[84px] sm:pr-4">
+                      <label htmlFor="newsletter-unsub-url" className="block text-xs text-[#5f6368]">
+                        Unsubscribe link (footer in each email)
+                      </label>
+                      <input
+                        id="newsletter-unsub-url"
+                        type="url"
+                        value={newsletterDraft.unsubscribe_url}
+                        onChange={(e) => setNewsletterDraft((d) => ({ ...d, unsubscribe_url: e.target.value }))}
+                        disabled={isQueueingNewsletter}
+                        className="w-full rounded border border-[#dadce0] bg-white px-3 py-2 text-sm text-[#202124] focus:border-[#1a73e8] focus:outline-none focus:ring-1 focus:ring-[#1a73e8] disabled:opacity-50"
+                        placeholder="https://airaplay.com/unsubscribe"
+                      />
+                    </div>
+                  </details>
 
-                <div>
-                  <label className="block text-gray-700 text-sm font-medium mb-2">Issue body (HTML)</label>
-                  <HtmlEmailEditor
-                    value={newsletterDraft.html}
-                    disabled={isQueueingNewsletter}
-                    onUploadImage={uploadTemplateImage}
-                    onChange={(nextHtml) => setNewsletterDraft((d) => ({ ...d, html: nextHtml }))}
-                  />
-                </div>
+                  <p className="border-b border-[#e8eaed] bg-[#fafafa] px-3 py-2 text-xs leading-relaxed text-[#5f6368] sm:px-4">
+                    Recipients each get this message with their own name and unsubscribe link. Queue adds rows to the email queue; use Run email queue to deliver.
+                  </p>
 
-                <div className="border border-gray-200 rounded-lg overflow-hidden">
-                  <div className="bg-gray-100 px-3 py-2 text-xs font-medium text-gray-700">Live preview (uses saved Weekly Newsletter template shell)</div>
+                  <div className="flex min-h-[min(52vh,420px)] flex-1 flex-col px-2 pb-2 pt-2 sm:px-3">
+                    <div className="mb-1.5 px-1 text-[11px] font-medium uppercase tracking-wide text-[#5f6368]">
+                      Message
+                    </div>
+                    <div className="flex min-h-[280px] flex-1 flex-col sm:min-h-[320px]">
+                      <HtmlEmailEditor
+                        layout="compose"
+                        value={newsletterDraft.html}
+                        disabled={isQueueingNewsletter}
+                        onUploadImage={uploadTemplateImage}
+                        onChange={(nextHtml) => setNewsletterDraft((d) => ({ ...d, html: nextHtml }))}
+                      />
+                    </div>
+                  </div>
+                </>
+              ) : (
+                <div className="flex flex-col bg-[#f8f9fa] p-3 sm:p-4">
+                  <p className="mb-2 text-xs text-[#5f6368]">
+                    Renders with your saved Weekly Newsletter template (header, mint body, footer).
+                  </p>
                   <iframe
                     title="Newsletter preview"
-                    className="w-full min-h-[280px] border-0 bg-white"
+                    className="min-h-[min(60vh,480px)] w-full flex-1 rounded border border-[#dadce0] bg-white shadow-sm"
                     sandbox="allow-same-origin"
                     srcDoc={buildNewsletterDraftPreviewHtml()}
                   />
                 </div>
+              )}
 
-                {newsletterQueueResult && (
-                  <div className="p-3 bg-green-50 border border-green-200 rounded-lg">
-                    <p className="text-green-700 text-sm">
-                      Queued {newsletterQueueResult.queued} newsletter email(s). Open Email Logs and use &quot;Run email queue now&quot; to send.
-                    </p>
-                  </div>
-                )}
-
-                <div className="flex flex-wrap gap-3 pt-2">
-                  <button
-                    type="button"
-                    onClick={() => {
-                      setIsNewsletterComposerOpen(false);
-                      setNewsletterQueueResult(null);
-                    }}
-                    className="px-4 py-2 border border-gray-300 rounded-lg text-gray-700 hover:bg-gray-50"
-                  >
-                    Close
-                  </button>
-                  <button
-                    type="button"
-                    onClick={handleQueueNewsletterBroadcast}
-                    disabled={isQueueingNewsletter}
-                    className="px-4 py-2 bg-indigo-600 hover:bg-indigo-700 text-white rounded-lg disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-2"
-                  >
-                    {isQueueingNewsletter ? (
-                      <>
-                        <LoadingLogo variant="pulse" size={16} />
-                        Queueing…
-                      </>
-                    ) : (
-                      <>
-                        <Newspaper className="w-4 h-4" />
-                        Queue to audience
-                      </>
-                    )}
-                  </button>
-                  <button
-                    type="button"
-                    onClick={handleRunEmailQueue}
-                    disabled={isProcessingQueue}
-                    className="px-4 py-2 bg-[#309605] hover:bg-[#3ba208] text-white rounded-lg disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-2"
-                  >
-                    {isProcessingQueue ? (
-                      <>
-                        <LoadingLogo variant="pulse" size={16} />
-                        Running…
-                      </>
-                    ) : (
-                      <>
-                        <RefreshCw className="w-4 h-4" />
-                        Run email queue now
-                      </>
-                    )}
-                  </button>
+              {newsletterQueueResult && (
+                <div className="mx-3 mb-3 rounded border border-green-200 bg-green-50 px-3 py-2.5 sm:mx-4">
+                  <p className="text-sm text-green-800">
+                    Queued {newsletterQueueResult.queued} message(s). Open Email Logs and use Run email queue to send.
+                  </p>
                 </div>
-              </div>
+              )}
             </div>
+
+            <footer className="flex shrink-0 flex-wrap items-center justify-between gap-2 border-t border-[#e8eaed] bg-[#f6f8fc] px-3 py-2.5 sm:px-4">
+              <button
+                type="button"
+                onClick={() => {
+                  setIsNewsletterComposerOpen(false);
+                  setNewsletterQueueResult(null);
+                }}
+                className="rounded-md px-3 py-2 text-sm font-medium text-[#5f6368] hover:bg-gray-200/70"
+              >
+                Discard
+              </button>
+              <div className="flex flex-wrap items-center justify-end gap-2">
+                <button
+                  type="button"
+                  onClick={handleRunEmailQueue}
+                  disabled={isProcessingQueue}
+                  className="inline-flex items-center gap-2 rounded-md border border-[#dadce0] bg-white px-3 py-2 text-sm font-medium text-[#3c4043] shadow-sm hover:bg-gray-50 disabled:cursor-not-allowed disabled:opacity-50"
+                >
+                  {isProcessingQueue ? (
+                    <>
+                      <LoadingLogo variant="pulse" size={16} />
+                      Running…
+                    </>
+                  ) : (
+                    <>
+                      <RefreshCw className="h-4 w-4" />
+                      Run email queue
+                    </>
+                  )}
+                </button>
+                <button
+                  type="button"
+                  onClick={handleQueueNewsletterBroadcast}
+                  disabled={isQueueingNewsletter}
+                  className="inline-flex items-center gap-2 rounded-md bg-[#1a73e8] px-4 py-2 text-sm font-medium text-white shadow-sm hover:bg-[#1557b0] disabled:cursor-not-allowed disabled:opacity-50"
+                >
+                  {isQueueingNewsletter ? (
+                    <>
+                      <LoadingLogo variant="pulse" size={16} />
+                      Queueing…
+                    </>
+                  ) : (
+                    <>
+                      <Send className="h-4 w-4" />
+                      Queue
+                    </>
+                  )}
+                </button>
+              </div>
+            </footer>
           </div>
         </div>
       )}

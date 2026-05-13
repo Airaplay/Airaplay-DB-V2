@@ -16,6 +16,8 @@ import {
   AlignRight,
   Eye,
   Code2,
+  List,
+  ListOrdered,
 } from 'lucide-react';
 
 type Props = {
@@ -23,6 +25,8 @@ type Props = {
   onChange: (nextHtml: string) => void;
   onUploadImage: (file: File) => Promise<string>;
   disabled?: boolean;
+  /** Gmail-style single frame: gray toolbar, flat icon buttons, larger compose area */
+  layout?: 'default' | 'compose';
 };
 
 function looksLikeHtml(s: string): boolean {
@@ -38,7 +42,13 @@ const DEFAULT_HTML = `<!DOCTYPE html>
   </body>
 </html>`;
 
-export const HtmlEmailEditor = ({ value, onChange, onUploadImage, disabled }: Props): JSX.Element => {
+export const HtmlEmailEditor = ({
+  value,
+  onChange,
+  onUploadImage,
+  disabled,
+  layout = 'default',
+}: Props): JSX.Element => {
   const [mode, setMode] = useState<'visual' | 'html'>('visual');
   const [htmlDraft, setHtmlDraft] = useState(value);
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -140,19 +150,35 @@ export const HtmlEmailEditor = ({ value, onChange, onUploadImage, disabled }: Pr
   };
 
   const visualToolbarDisabled = disabled || !editor || mode !== 'visual';
+  const isCompose = layout === 'compose';
 
-  return (
-    <div className="space-y-2">
-      <div className="flex flex-wrap items-center justify-between gap-2">
-        <div className="flex flex-wrap items-center gap-2">
+  const tbBtnDefault = (active: boolean) =>
+    `px-2 py-1 rounded border text-sm flex items-center gap-1 disabled:opacity-50 ${
+      active ? 'bg-blue-100 border-blue-200 text-blue-700' : 'bg-white border-gray-300 text-gray-700'
+    }`;
+
+  const tbBtnCompose = (active: boolean) =>
+    `p-2 rounded-md text-gray-700 disabled:opacity-40 flex items-center justify-center ${
+      active ? 'bg-gray-300/70 text-gray-900' : 'hover:bg-gray-200/80'
+    }`;
+
+  const toolbarBtnClass = (active: boolean) => (isCompose ? tbBtnCompose(active) : tbBtnDefault(active));
+
+  const toolbar = (
+    <div
+      className={
+        isCompose
+          ? 'flex flex-wrap items-center justify-between gap-1 border-b border-[#dadce0] bg-[#f0f0f0] px-1.5 py-1'
+          : 'flex flex-wrap items-center justify-between gap-2'
+      }
+    >
+        <div className="flex flex-wrap items-center gap-0.5">
           <button
             type="button"
             onClick={() => editor?.chain().focus().toggleBold().run()}
             disabled={visualToolbarDisabled}
-            className={`px-2 py-1 rounded border text-sm flex items-center gap-1 ${
-              editor?.isActive('bold') ? 'bg-blue-100 border-blue-200 text-blue-700' : 'bg-white border-gray-300 text-gray-700'
-            } disabled:opacity-50`}
-            title="Bold"
+            className={toolbarBtnClass(!!editor?.isActive('bold'))}
+            title="Bold (Ctrl+B)"
           >
             <Bold className="w-4 h-4" />
           </button>
@@ -160,10 +186,8 @@ export const HtmlEmailEditor = ({ value, onChange, onUploadImage, disabled }: Pr
             type="button"
             onClick={() => editor?.chain().focus().toggleItalic().run()}
             disabled={visualToolbarDisabled}
-            className={`px-2 py-1 rounded border text-sm flex items-center gap-1 ${
-              editor?.isActive('italic') ? 'bg-blue-100 border-blue-200 text-blue-700' : 'bg-white border-gray-300 text-gray-700'
-            } disabled:opacity-50`}
-            title="Italic"
+            className={toolbarBtnClass(!!editor?.isActive('italic'))}
+            title="Italic (Ctrl+I)"
           >
             <Italic className="w-4 h-4" />
           </button>
@@ -171,10 +195,8 @@ export const HtmlEmailEditor = ({ value, onChange, onUploadImage, disabled }: Pr
             type="button"
             onClick={() => editor?.chain().focus().toggleUnderline().run()}
             disabled={visualToolbarDisabled}
-            className={`px-2 py-1 rounded border text-sm flex items-center gap-1 ${
-              editor?.isActive('underline') ? 'bg-blue-100 border-blue-200 text-blue-700' : 'bg-white border-gray-300 text-gray-700'
-            } disabled:opacity-50`}
-            title="Underline"
+            className={toolbarBtnClass(!!editor?.isActive('underline'))}
+            title="Underline (Ctrl+U)"
           >
             <UnderlineIcon className="w-4 h-4" />
           </button>
@@ -182,8 +204,8 @@ export const HtmlEmailEditor = ({ value, onChange, onUploadImage, disabled }: Pr
             type="button"
             onClick={setLink}
             disabled={visualToolbarDisabled}
-            className="px-2 py-1 rounded border text-sm flex items-center gap-1 bg-white border-gray-300 text-gray-700 disabled:opacity-50"
-            title="Insert/Edit Link"
+            className={toolbarBtnClass(false)}
+            title="Link"
           >
             <LinkIcon className="w-4 h-4" />
           </button>
@@ -191,18 +213,37 @@ export const HtmlEmailEditor = ({ value, onChange, onUploadImage, disabled }: Pr
             type="button"
             onClick={onPickImage}
             disabled={visualToolbarDisabled || isUploading}
-            className="px-2 py-1 rounded border text-sm flex items-center gap-1 bg-white border-gray-300 text-gray-700 disabled:opacity-50"
-            title="Upload & insert image"
+            className={toolbarBtnClass(false)}
+            title="Insert image"
           >
             <ImageIcon className="w-4 h-4" />
-            {isUploading ? 'Uploading...' : 'Image'}
+            {!isCompose && (isUploading ? <span className="text-xs">Uploading…</span> : <span className="text-xs">Image</span>)}
           </button>
-          <div className="w-px h-6 bg-gray-200 mx-1" />
+          <div className={isCompose ? 'w-px h-6 bg-[#dadce0] mx-0.5' : 'w-px h-6 bg-gray-200 mx-1'} />
+          <button
+            type="button"
+            onClick={() => editor?.chain().focus().toggleBulletList().run()}
+            disabled={visualToolbarDisabled}
+            className={toolbarBtnClass(!!editor?.isActive('bulletList'))}
+            title="Bulleted list"
+          >
+            <List className="w-4 h-4" />
+          </button>
+          <button
+            type="button"
+            onClick={() => editor?.chain().focus().toggleOrderedList().run()}
+            disabled={visualToolbarDisabled}
+            className={toolbarBtnClass(!!editor?.isActive('orderedList'))}
+            title="Numbered list"
+          >
+            <ListOrdered className="w-4 h-4" />
+          </button>
+          <div className={isCompose ? 'w-px h-6 bg-[#dadce0] mx-0.5' : 'w-px h-6 bg-gray-200 mx-1'} />
           <button
             type="button"
             onClick={() => editor?.chain().focus().setTextAlign('left').run()}
             disabled={visualToolbarDisabled}
-            className="px-2 py-1 rounded border text-sm flex items-center gap-1 bg-white border-gray-300 text-gray-700 disabled:opacity-50"
+            className={toolbarBtnClass(!!editor?.isActive({ textAlign: 'left' }))}
             title="Align left"
           >
             <AlignLeft className="w-4 h-4" />
@@ -211,7 +252,7 @@ export const HtmlEmailEditor = ({ value, onChange, onUploadImage, disabled }: Pr
             type="button"
             onClick={() => editor?.chain().focus().setTextAlign('center').run()}
             disabled={visualToolbarDisabled}
-            className="px-2 py-1 rounded border text-sm flex items-center gap-1 bg-white border-gray-300 text-gray-700 disabled:opacity-50"
+            className={toolbarBtnClass(!!editor?.isActive({ textAlign: 'center' }))}
             title="Align center"
           >
             <AlignCenter className="w-4 h-4" />
@@ -220,62 +261,103 @@ export const HtmlEmailEditor = ({ value, onChange, onUploadImage, disabled }: Pr
             type="button"
             onClick={() => editor?.chain().focus().setTextAlign('right').run()}
             disabled={visualToolbarDisabled}
-            className="px-2 py-1 rounded border text-sm flex items-center gap-1 bg-white border-gray-300 text-gray-700 disabled:opacity-50"
+            className={toolbarBtnClass(!!editor?.isActive({ textAlign: 'right' }))}
             title="Align right"
           >
             <AlignRight className="w-4 h-4" />
           </button>
         </div>
 
-        <button
-          type="button"
-          onClick={toggleMode}
-          disabled={disabled || !editor}
-          className="px-3 py-1.5 rounded-lg border border-gray-300 bg-white text-gray-700 text-sm flex items-center gap-2 disabled:opacity-50"
-          title={mode === 'visual' ? 'View/edit HTML' : 'Back to visual editor'}
-        >
-          {mode === 'visual' ? <Code2 className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
-          {mode === 'visual' ? 'HTML' : 'Visual'}
-        </button>
+      <button
+        type="button"
+        onClick={toggleMode}
+        disabled={disabled || !editor}
+        className={
+          isCompose
+            ? 'flex shrink-0 items-center gap-1.5 rounded-md px-2.5 py-1.5 text-sm text-gray-700 hover:bg-gray-200/80 disabled:opacity-50'
+            : 'flex items-center gap-2 rounded-lg border border-gray-300 bg-white px-3 py-1.5 text-sm text-gray-700 disabled:opacity-50'
+        }
+        title={mode === 'visual' ? 'View/edit HTML' : 'Back to visual editor'}
+      >
+        {mode === 'visual' ? <Code2 className="h-4 w-4" /> : <Eye className="h-4 w-4" />}
+        {mode === 'visual' ? 'HTML' : 'Visual'}
+      </button>
+    </div>
+  );
+
+  const uploadBlock =
+    uploadError &&
+    (isCompose ? (
+      <div className="border-b border-red-200 bg-red-50 px-3 py-2">
+        <p className="text-sm text-red-800">{uploadError}</p>
       </div>
+    ) : (
+      <div className="rounded-lg border border-red-200 bg-red-100 p-3">
+        <p className="text-sm text-red-700">{uploadError}</p>
+      </div>
+    ));
 
-      {uploadError && (
-        <div className="p-3 bg-red-100 border border-red-200 rounded-lg">
-          <p className="text-red-700 text-sm">{uploadError}</p>
-        </div>
-      )}
+  const fileInput = (
+    <input ref={fileInputRef} type="file" accept="image/*" onChange={onImageSelected} className="hidden" />
+  );
 
-      <input
-        ref={fileInputRef}
-        type="file"
-        accept="image/*"
-        onChange={onImageSelected}
-        className="hidden"
-      />
-
-      {mode === 'visual' ? (
-        <div className="border border-gray-300 rounded-lg overflow-hidden">
+  const editorArea =
+    mode === 'visual' ? (
+      <div
+        className={
+          isCompose
+            ? 'min-h-[220px] flex-1 overflow-y-auto bg-white [&_.ProseMirror]:min-h-[200px] [&_.ProseMirror]:px-4 [&_.ProseMirror]:py-3 [&_.ProseMirror]:text-[15px] [&_.ProseMirror]:leading-6 [&_.ProseMirror]:text-[#202124] [&_.ProseMirror]:outline-none'
+            : 'overflow-hidden rounded-lg border border-gray-300'
+        }
+      >
+        {isCompose ? (
+          <EditorContent editor={editor} />
+        ) : (
           <div className="bg-white p-3">
             <EditorContent editor={editor} />
           </div>
-        </div>
-      ) : (
-        <textarea
-          value={htmlDraft}
-          onChange={(e) => {
-            const next = e.target.value;
-            setHtmlDraft(next);
-            onChange(next);
-          }}
-          rows={16}
-          disabled={disabled}
-          className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 font-mono text-sm disabled:opacity-50"
-        />
-      )}
+        )}
+      </div>
+    ) : (
+      <textarea
+        value={htmlDraft}
+        onChange={(e) => {
+          const next = e.target.value;
+          setHtmlDraft(next);
+          onChange(next);
+        }}
+        rows={isCompose ? 14 : 16}
+        disabled={disabled}
+        className={
+          isCompose
+            ? 'min-h-[200px] w-full flex-1 resize-y border-0 bg-white px-4 py-3 font-mono text-sm text-gray-900 outline-none focus:ring-0 disabled:opacity-50'
+            : 'w-full rounded-lg border border-gray-300 px-4 py-2 font-mono text-sm focus:ring-2 focus:ring-blue-500 disabled:opacity-50'
+        }
+      />
+    );
 
-      <p className="text-xs text-gray-500 flex items-center gap-2">
+  if (isCompose) {
+    return (
+      <div className="flex min-h-[240px] flex-1 flex-col">
+        <div className="flex min-h-0 flex-1 flex-col overflow-hidden rounded-lg border border-[#dadce0] bg-white shadow-sm">
+          {toolbar}
+          {uploadBlock}
+          {fileInput}
+          {editorArea}
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <div className="space-y-2">
+      {toolbar}
+      {uploadBlock}
+      {fileInput}
+      {editorArea}
+      <p className="flex items-center gap-2 text-xs text-gray-500">
         <span className="inline-flex items-center gap-1">
-          <Eye className="w-3.5 h-3.5" />
+          <Eye className="h-3.5 w-3.5" />
           Tip: use “Preview” to confirm it renders well in email clients.
         </span>
       </p>
