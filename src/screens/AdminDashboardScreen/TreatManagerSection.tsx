@@ -1,7 +1,7 @@
 import { useState, type FormEvent } from 'react';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '../../components/ui/tabs';
 import { Card } from '../../components/ui/card';
-import { DollarSign, Settings, CreditCard, Package, BarChart, Download, Clock, Coins, RefreshCw, TrendingUp, AlertTriangle, Users, Wallet, ArrowUp, ArrowDown } from 'lucide-react';
+import { DollarSign, Settings, CreditCard, Package, BarChart, Download, Clock, Coins, RefreshCw, TrendingUp, AlertTriangle, Users, Wallet, ArrowUp, ArrowDown, Trash2 } from 'lucide-react';
 import { supabase } from '../../lib/supabase';
 import { validateChannelConfig } from '../../lib/paymentChannels';
 import { sanitizeForFilter } from '../../lib/filterSecurity';
@@ -2493,6 +2493,9 @@ const TransactionsTab = () => {
   const [selectedTransaction, setSelectedTransaction] = useState<any | null>(null);
   const [showDeleteConfirm, setShowDeleteConfirm] = useState(false);
   const [deletingId, setDeletingId] = useState<string | null>(null);
+  const [selectedTransactionIds, setSelectedTransactionIds] = useState<Set<string>>(new Set());
+  const [isAllMatchingSelected, setIsAllMatchingSelected] = useState(false);
+  const [isBulkDeleting, setIsBulkDeleting] = useState(false);
 
   const itemsPerPage = 20;
 
@@ -2546,6 +2549,121 @@ const TransactionsTab = () => {
     }
   };
 
+  const clearSelection = () => {
+    setSelectedTransactionIds(new Set());
+    setIsAllMatchingSelected(false);
+  };
+
+  const toggleSelectTransaction = (transactionId: string) => {
+    setSelectedTransactionIds(prev => {
+      const nextSelected = isAllMatchingSelected
+        ? new Set(transactions.map(transaction => transaction.id))
+        : new Set(prev);
+
+      if (nextSelected.has(transactionId)) {
+        nextSelected.delete(transactionId);
+      } else {
+        nextSelected.add(transactionId);
+      }
+
+      return nextSelected;
+    });
+
+    if (isAllMatchingSelected) {
+      setIsAllMatchingSelected(false);
+    }
+  };
+
+  const toggleSelectVisibleTransactions = () => {
+    const visibleTransactionIds = transactions.map(transaction => transaction.id);
+    const allVisibleSelected = visibleTransactionIds.length > 0
+      && visibleTransactionIds.every(transactionId => selectedTransactionIds.has(transactionId));
+
+    if (isAllMatchingSelected || allVisibleSelected) {
+      setSelectedTransactionIds(prev => {
+        const nextSelected = new Set(prev);
+        visibleTransactionIds.forEach(transactionId => nextSelected.delete(transactionId));
+        return nextSelected;
+      });
+      setIsAllMatchingSelected(false);
+      return;
+    }
+
+    setSelectedTransactionIds(prev => {
+      const nextSelected = new Set(prev);
+      visibleTransactionIds.forEach(transactionId => nextSelected.add(transactionId));
+      return nextSelected;
+    });
+  };
+
+  const handleSelectAllMatchingTransactions = () => {
+    setSelectedTransactionIds(new Set(transactions.map(transaction => transaction.id)));
+    setIsAllMatchingSelected(true);
+  };
+
+  const handleDeleteSelectedTransactions = async () => {
+    const selectedCount = isAllMatchingSelected ? totalTransactions : selectedTransactionIds.size;
+
+    if (selectedCount === 0 || isBulkDeleting) {
+      return;
+    }
+
+    const confirmMessage = isAllMatchingSelected
+      ? `Are you sure you want to delete all ${selectedCount.toLocaleString()} treat transactions matching the current filters?\n\nThis action cannot be undone.`
+      : `Are you sure you want to delete ${selectedCount.toLocaleString()} selected treat transaction(s)?\n\nThis action cannot be undone.`;
+
+    if (!confirm(confirmMessage)) {
+      return;
+    }
+
+    try {
+      setIsBulkDeleting(true);
+      setError(null);
+      setSuccess(null);
+
+      let deleteQuery = supabase
+        .from('treat_transactions')
+        .delete();
+
+      if (isAllMatchingSelected) {
+        if (typeFilter !== 'all') {
+          deleteQuery = deleteQuery.eq('transaction_type', typeFilter);
+        }
+
+        if (statusFilter !== 'all') {
+          deleteQuery = deleteQuery.eq('status', statusFilter);
+        }
+
+        if (searchQuery?.trim()) {
+          const safe = sanitizeForFilter(searchQuery.trim());
+          if (safe) deleteQuery = deleteQuery.or(`description.ilike.%${safe}%`);
+        }
+      } else {
+        deleteQuery = deleteQuery.in('id', Array.from(selectedTransactionIds));
+      }
+
+      const { error: deleteError } = await deleteQuery;
+
+      if (deleteError) throw deleteError;
+
+      setSuccess(`${selectedCount.toLocaleString()} treat transaction${selectedCount === 1 ? '' : 's'} deleted successfully`);
+      clearSelection();
+
+      if (currentPage !== 1) {
+        setCurrentPage(1);
+      } else {
+        await fetchTransactions();
+      }
+
+      setTimeout(() => setSuccess(null), 3000);
+    } catch (err) {
+      console.error('Error deleting selected transactions:', err);
+      setError('Failed to delete selected transactions');
+    } finally {
+      setIsBulkDeleting(false);
+    }
+  };
+
   const handleDeleteTransaction = async (transactionId: string) => {
     try {
       setDeletingId(transactionId);
@@ -2561,6 +2679,12 @@ const TransactionsTab = () => {
       setSuccess('Transaction deleted successfully');
       setShowDeleteConfirm(false);
       setSelectedTransaction(null);
+      setSelectedTransactionIds(prev => {
+        const nextSelected = new Set(prev);
+        nextSelected.delete(transactionId);
+        return nextSelected;
+      });
+      setIsAllMatchingSelected(false);
       fetchTransactions();
 
       setTimeout(() => setSuccess(null), 3000);
@@ -2625,6 +2749,15 @@ const TransactionsTab = () => {
     return type.split('_').map(word => word.charAt(0).toUpperCase() + word.slice(1)).join(' ');
   };
 
+  const visibleTransactionIds = transactions.map(transaction => transaction.id);
+  const allVisibleSelected = transactions.length > 0
+    && (isAllMatchingSelected || visibleTransactionIds.every(transactionId => selectedTransactionIds.has(transactionId)));
+  const hasVisibleSelection = isAllMatchingSelected
+    || visibleTransactionIds.some(transactionId => selectedTransactionIds.has(transactionId));
+  const selectedCount = isAllMatchingSelected ? totalTransactions : selectedTransactionIds.size;
+  const canSelectAllMatching = allVisibleSelected
+    && !isAllMatchingSelected
+    && selectedTransactionIds.size < totalTransactions;
   const totalPages = Math.ceil(totalTransactions / itemsPerPage);
 
   return (
@@ -2667,6 +2800,7 @@ const TransactionsTab = () => {
                 type="text"
                 value={searchQuery}
                 onChange={(e) => {
+                  clearSelection();
                   setSearchQuery(e.target.value);
                   setCurrentPage(1);
                 }}
@@ -2682,6 +2816,7 @@ const TransactionsTab = () => {
               <select
                 value={typeFilter}
                 onChange={(e) => {
+                  clearSelection();
                   setTypeFilter(e.target.value);
                   setCurrentPage(1);
                 }}
@@ -2704,6 +2839,7 @@ const TransactionsTab = () => {
               <select
                 value={statusFilter}
                 onChange={(e) => {
+                  clearSelection();
                   setStatusFilter(e.target.value);
                   setCurrentPage(1);
                 }}
@@ -2720,6 +2856,7 @@ const TransactionsTab = () => {
             <div className="flex items-end">
               <button
                 onClick={() => {
+                  clearSelection();
                   setSearchQuery('');
                   setTypeFilter('all');
                   setStatusFilter('all');
@@ -2731,6 +2868,64 @@ const TransactionsTab = () => {
               </button>
             </div>
           </div>
+
+          {transactions.length > 0 && (
+            <div className="flex flex-wrap items-center justify-between gap-3 mb-4 px-4 py-3 bg-gray-50 border border-gray-200 rounded-lg">
+              <div className="text-sm text-gray-700">
+                {selectedCount > 0 ? (
+                  <>
+                    <span className="font-medium text-gray-900">
+                      {selectedCount.toLocaleString()} transaction{selectedCount === 1 ? '' : 's'} selected
+                    </span>
+                    {isAllMatchingSelected && (
+                      <span className="ml-2 text-gray-500">
+                        across the current filters
+                      </span>
+                    )}
+                    {canSelectAllMatching && (
+                      <button
+                        onClick={handleSelectAllMatchingTransactions}
+                        className="ml-3 text-[#309605] hover:text-[#267804] font-medium"
+                      >
+                        Select all {totalTransactions.toLocaleString()} matching transactions
+                      </button>
+                    )}
+                  </>
+                ) : (
+                  'Select transactions to delete them in bulk.'
+                )}
+              </div>
+
+              <div className="flex items-center gap-2">
+                {selectedCount > 0 && (
+                  <button
+                    onClick={clearSelection}
+                    disabled={isBulkDeleting}
+                    className="px-3 py-2 bg-white border border-gray-300 text-gray-700 rounded-lg text-sm font-medium hover:bg-gray-50 disabled:opacity-50 transition-colors duration-200"
+                  >
+                    Clear Selection
+                  </button>
+                )}
+                <button
+                  onClick={handleDeleteSelectedTransactions}
+                  disabled={selectedCount === 0 || isBulkDeleting}
+                  className="inline-flex items-center gap-2 px-3 py-2 bg-red-600 hover:bg-red-700 text-white rounded-lg text-sm font-medium disabled:opacity-50 disabled:cursor-not-allowed transition-colors duration-200"
+                >
+                  {isBulkDeleting ? (
+                    <>
+                      <LoadingLogo variant="pulse" size={16} />
+                      Deleting...
+                    </>
+                  ) : (
+                    <>
+                      <Trash2 className="w-4 h-4" />
+                      Delete Selected
+                    </>
+                  )}
+                </button>
+              </div>
+            </div>
+          )}
 
           {isLoading ? (
             <div className="flex items-center justify-center py-12">
@@ -2752,6 +2947,16 @@ const TransactionsTab = () => {
               <table className="w-full">
                 <thead>
                   <tr className="border-b border-gray-200 bg-gray-50">
+                    <th className="px-4 py-3 text-left text-xs font-medium text-gray-600 uppercase tracking-wider">
+                      <input
+                        type="checkbox"
+                        checked={allVisibleSelected}
+                        aria-checked={hasVisibleSelection && !allVisibleSelected ? 'mixed' : allVisibleSelected}
+                        onChange={toggleSelectVisibleTransactions}
+                        className="w-4 h-4 text-[#309605] border-gray-300 rounded focus:ring-[#309605]"
+                        title={allVisibleSelected ? 'Deselect visible transactions' : 'Select visible transactions'}
+                      />
+                    </th>
                     <th className="px-4 py-3 text-left text-xs font-medium text-gray-600 uppercase tracking-wider">
                       User
                     </th>
@@ -2778,6 +2983,15 @@ const TransactionsTab = () => {
                 <tbody className="divide-y divide-gray-200">
                   {transactions.map((transaction) => (
                     <tr key={transaction.id} className="hover:bg-gray-50">
+                      <td className="px-4 py-4">
+                        <input
+                          type="checkbox"
+                          checked={isAllMatchingSelected || selectedTransactionIds.has(transaction.id)}
+                          onChange={() => toggleSelectTransaction(transaction.id)}
+                          className="w-4 h-4 text-[#309605] border-gray-300 rounded focus:ring-[#309605]"
+                          aria-label={`Select transaction ${transaction.id}`}
+                        />
+                      </td>
                       <td className="px-4 py-4">
                         <div className="flex items-center">
                           <div className="w-8 h-8 bg-gradient-to-r from-[#309605] to-[#309605] rounded-full flex items-center justify-center text-white font-medium text-sm">
