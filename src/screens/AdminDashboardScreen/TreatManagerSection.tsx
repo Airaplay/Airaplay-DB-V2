@@ -1,7 +1,7 @@
 import { useState, type FormEvent } from 'react';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '../../components/ui/tabs';
 import { Card } from '../../components/ui/card';
-import { DollarSign, Settings, CreditCard, Package, BarChart, Download, Clock, Coins, RefreshCw, TrendingUp, AlertTriangle, Users, Wallet, ArrowUp, ArrowDown, Trash2 } from 'lucide-react';
+import { DollarSign, Settings, CreditCard, Package, BarChart, Download, Clock, Coins, RefreshCw, TrendingUp, AlertTriangle, Users, Wallet, ArrowUp, ArrowDown, Trash2, Gift } from 'lucide-react';
 import { supabase } from '../../lib/supabase';
 import { validateChannelConfig } from '../../lib/paymentChannels';
 import { sanitizeForFilter } from '../../lib/filterSecurity';
@@ -9,6 +9,7 @@ import { useEffect } from 'react';
 import { RevenueBreakdownChart } from '../../components/RevenueBreakdownChart';
 import { CollabSettingsTab } from './CollabSettingsTab';
 import { TreatUsersSection } from './TreatUsersSection';
+import { SignupBonusTab } from './SignupBonusTab';
 import { LoadingLogo } from '../../components/LoadingLogo';
 
 // Withdrawal Settings Tab Component
@@ -3394,6 +3395,9 @@ export const TreatManagerSection = (): JSX.Element => {
             <TabsTrigger value="treat-package" className="flex-shrink-0 px-4 py-2 text-sm font-medium rounded-md data-[state=active]:bg-[#309605] data-[state=active]:text-white data-[state=active]:shadow">
               <Package className="w-4 h-4 mr-2" /> Treat Package
             </TabsTrigger>
+            <TabsTrigger value="signup-bonus" className="flex-shrink-0 px-4 py-2 text-sm font-medium rounded-md data-[state=active]:bg-[#309605] data-[state=active]:text-white data-[state=active]:shadow">
+              <Gift className="w-4 h-4 mr-2" /> Sign-up Bonus
+            </TabsTrigger>
             <TabsTrigger value="analytics" className="flex-shrink-0 px-4 py-2 text-sm font-medium rounded-md data-[state=active]:bg-[#309605] data-[state=active]:text-white data-[state=active]:shadow">
               <BarChart className="w-4 h-4 mr-2" /> Analytics
             </TabsTrigger>
@@ -3423,6 +3427,9 @@ export const TreatManagerSection = (): JSX.Element => {
         </TabsContent>
         <TabsContent value="treat-package">
           <TreatPackageTab />
+        </TabsContent>
+        <TabsContent value="signup-bonus">
+          <SignupBonusTab />
         </TabsContent>
         <TabsContent value="analytics">
           <AnalyticsTab />

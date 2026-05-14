@@ -95,6 +95,18 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       } catch (error) {
         console.error('[AuthContext] Error fetching display name:', error);
       }
+
+      // Fire-and-forget: try to claim the sign-up Treat bonus. The RPC is
+      // idempotent (signup_bonus_claims PK on user_id), only credits when the
+      // admin has enabled it, and writes to NON-withdrawable promo_balance.
+      // It is safe to call on every sign-in / token refresh.
+      void (async () => {
+        try {
+          await supabase.rpc('claim_signup_bonus');
+        } catch {
+          // Swallow — the bonus is best-effort and must never affect auth UX.
+        }
+      })();
     }
   }, [safeSetState, removeInitialLoader]);
 
