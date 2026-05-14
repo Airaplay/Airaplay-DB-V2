@@ -129,7 +129,7 @@ export const CreateScreen = ({ onFormVisibilityChange }: CreateScreenProps): JSX
       try {
         const { data: existingUser, error: userError } = await supabase
           .from('users')
-          .select('*')
+          .select('id')
           .eq('id', user.id)
           .single();
 

@@ -209,9 +209,12 @@ export const AdminDashboardScreen = (): JSX.Element => {
         return;
       }
 
+      // Column-level grants on public.users mean SELECT * fails (PIN columns
+      // are intentionally revoked). Keep the projection narrow — only what
+      // this screen actually reads.
       const { data: userData, error: userError } = await supabase
         .from('users')
-        .select('*')
+        .select('id, role, display_name, avatar_url, email, username, is_active')
         .eq('id', session.user.id)
         .single();
 

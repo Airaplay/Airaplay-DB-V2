@@ -129,9 +129,15 @@ export const EditProfileScreen = (): JSX.Element => {
         return;
       }
 
+      // Column-level grants on public.users mean SELECT * fails. Only the
+      // fields this screen edits/displays are projected.
       const { data: userData, error: userError } = await supabase
         .from('users')
-        .select('*')
+        .select(
+          'id, email, display_name, username, avatar_url, bio, country, gender, ' +
+          'social_media_platform, social_media_url, username_last_changed_at, ' +
+          'country_last_changed_at, profile_visibility'
+        )
         .eq('id', user.id)
         .single();
 

@@ -1,12 +1,16 @@
 import "jsr:@supabase/functions-js/edge-runtime.d.ts";
-import { createClient } from 'jsr:@supabase/supabase-js@2';
 import { enforceBlackEmailHeaderBackground } from "../_shared/emailHeaderStyle.ts";
+import { requireRoleCaller } from "../_shared/auth.ts";
 
 const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
   "Access-Control-Allow-Methods": "GET, POST, PUT, DELETE, OPTIONS",
   "Access-Control-Allow-Headers": "Content-Type, Authorization, X-Client-Info, Apikey",
 };
+
+// Roles permitted to send transactional/marketing email through this function.
+// Service-role callers (process-email-queue, scheduled jobs) are also accepted by requireRoleCaller.
+const ALLOWED_ROLES = ['admin', 'manager'] as const;
 
 interface SendEmailRequest {
   template_type:
@@ -36,12 +40,13 @@ Deno.serve(async (req: Request) => {
     });
   }
 
-  try {
-    // Initialize Supabase client
-    const supabaseUrl = Deno.env.get('SUPABASE_URL')!;
-    const supabaseServiceKey = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY')!;
-    const supabase = createClient(supabaseUrl, supabaseServiceKey);
+  // Authenticate caller. Email sending uses the project's transactional
+  // provider credentials, so it must be gated to admins or trusted server-to-server callers.
+  const auth = await requireRoleCaller(req, corsHeaders, ALLOWED_ROLES);
+  if (!auth.ok) return auth.response;
+  const { supabase } = auth;
 
+  try {
     // Parse request body
     const body: SendEmailRequest = await req.json();
     const { template_type, recipient_email, recipient_user_id, variables } = body;

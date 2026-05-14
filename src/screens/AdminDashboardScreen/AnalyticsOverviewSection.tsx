@@ -74,8 +74,8 @@ export const AnalyticsOverviewSection = (): JSX.Element => {
         { count: songPlaysToday },
         { count: videoPlaysToday },
       ] = await Promise.all([
-        supabase.from('users').select('*', { count: 'exact', head: true }),
-        supabase.from('users').select('*', { count: 'exact', head: true }).gte('created_at', todayStr),
+        supabase.from('users').select('id', { count: 'exact', head: true }),
+        supabase.from('users').select('id', { count: 'exact', head: true }).gte('created_at', todayStr),
         supabase.from('content_uploads').select('*', { count: 'exact', head: true }),
         supabase.from('content_uploads').select('*', { count: 'exact', head: true }).gte('created_at', todayStr),
         supabase.rpc('admin_get_analytics_overview_totals'),

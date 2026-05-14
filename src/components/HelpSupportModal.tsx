@@ -73,17 +73,10 @@ export const HelpSupportModal: React.FC<HelpSupportModalProps> = ({
     return category.charAt(0).toUpperCase() + category.slice(1);
   };
 
-  const processQueuedSupportEmail = async () => {
-    try {
-      await supabase.functions.invoke('process-email-queue', {
-        method: 'POST',
-        body: { ignore_scheduled_for: true },
-      });
-    } catch (err) {
-      // Ticket creation should not fail if immediate delivery fails; the queued email remains visible in Email Logs.
-      console.warn('Support confirmation email queued but not processed immediately:', err);
-    }
-  };
+  // Confirmation email is enqueued by the create_support_ticket RPC and delivered
+  // by the scheduled email-queue drain. We deliberately do NOT call
+  // `process-email-queue` here — that endpoint is admin-only, and exposing it to
+  // unauthenticated/regular users would let any caller flush the entire queue.
 
   const handleSubmitTicket = async () => {
     if (!subject.trim() || !message.trim()) {
@@ -109,7 +102,6 @@ export const HelpSupportModal: React.FC<HelpSupportModalProps> = ({
       setSubject('');
       setMessage('');
       setCategory('general');
-      await processQueuedSupportEmail();
 
       setTimeout(() => {
         setSubmitSuccess(false);

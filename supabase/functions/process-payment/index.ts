@@ -1,6 +1,6 @@
 import "jsr:@supabase/functions-js/edge-runtime.d.ts";
-import { createClient } from "npm:@supabase/supabase-js@2";
 import { validatePaymentRequest, validateContentType } from "../_shared/validation.ts";
+import { requireAuthenticatedCaller } from "../_shared/auth.ts";
 
 const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
@@ -8,13 +8,19 @@ const corsHeaders = {
   "Access-Control-Allow-Headers": "Content-Type, Authorization, X-Client-Info, Apikey",
 };
 
+/**
+ * Inbound payload. `configuration` is intentionally NOT accepted from the
+ * client — provider secrets live only in `treat_payment_channels.configuration`
+ * and are loaded here via the service-role client.
+ *
+ * Likewise, the buyer is always the authenticated caller; we never trust
+ * `user_email` to identify the user (it's only used as the receipt address).
+ */
 interface PaymentRequest {
   channel_id: string;
-  channel_type: string;
   amount: number;
   package_id: string;
   user_email: string;
-  configuration: any;
   currency: string;
   currency_symbol: string;
   currency_name: string;
@@ -45,34 +51,36 @@ Deno.serve(async (req: Request) => {
       );
     }
 
-    const supabase = createClient(
-      Deno.env.get("SUPABASE_URL") ?? "",
-      Deno.env.get("SUPABASE_SERVICE_ROLE_KEY") ?? ""
-    );
+    // Authenticate caller — never trust user identity from the request body.
+    const auth = await requireAuthenticatedCaller(req, corsHeaders);
+    if (!auth.ok) return auth.response;
+    const { supabase, user, isServiceRole } = auth;
 
     requestData = await req.json();
 
-    const validation = validatePaymentRequest(requestData);
+    // Construct a validation payload that includes a placeholder `channel_type`
+    // — the legacy validator rejects requests without it, but real channel
+    // type/configuration is loaded from the database below.
+    const validationPayload = { ...requestData, channel_type: 'paystack' };
+    const validation = validatePaymentRequest(validationPayload);
     if (!validation.isValid) {
-      return new Response(
-        JSON.stringify({
-          error: "Validation failed",
-          details: validation.errors
-        }),
-        {
-          status: 400,
-          headers: { ...corsHeaders, "Content-Type": "application/json" },
-        }
-      );
+      const filteredErrors = validation.errors.filter((e) => e.field !== 'channel_type');
+      if (filteredErrors.length > 0) {
+        return new Response(
+          JSON.stringify({ error: "Validation failed", details: filteredErrors }),
+          {
+            status: 400,
+            headers: { ...corsHeaders, "Content-Type": "application/json" },
+          }
+        );
+      }
     }
 
     const {
       channel_id,
-      channel_type,
       amount,
       package_id,
       user_email,
-      configuration,
       currency,
       currency_symbol,
       currency_name,
@@ -81,45 +89,17 @@ Deno.serve(async (req: Request) => {
       detected_country_code,
     } = requestData;
 
-    // Validate configuration exists and has required keys
-    if (!configuration || typeof configuration !== 'object') {
-      console.error("Invalid or missing configuration");
-      return new Response(
-        JSON.stringify({
-          error: "Payment gateway not properly configured",
-          message: "The payment system is currently being set up. Please try again later or contact support."
-        }),
-        {
-          status: 400,
-          headers: { ...corsHeaders, "Content-Type": "application/json" },
-        }
-      );
-    }
-
-    // Check for required API keys based on channel type
-    if ((channel_type === 'paystack' || channel_type === 'flutterwave') && !configuration.secret_key) {
-      console.error(`${channel_type} secret key is missing`);
-      return new Response(
-        JSON.stringify({
-          error: "Payment gateway not properly configured",
-          message: "The payment system requires configuration. Please contact support."
-        }),
-        {
-          status: 400,
-          headers: { ...corsHeaders, "Content-Type": "application/json" },
-        }
-      );
-    }
-
-    const { data: userData, error: userError } = await supabase
-      .from("users")
-      .select("id")
-      .eq("email", user_email)
+    // Load channel + provider secrets server-side. Reject disabled channels.
+    const { data: channel, error: channelError } = await supabase
+      .from("treat_payment_channels")
+      .select("id, channel_type, is_enabled, configuration")
+      .eq("id", channel_id)
+      .eq("is_enabled", true)
       .maybeSingle();
 
-    if (userError || !userData) {
+    if (channelError || !channel) {
       return new Response(
-        JSON.stringify({ error: "User not found" }),
+        JSON.stringify({ error: "Payment channel not found or disabled" }),
         {
           status: 404,
           headers: { ...corsHeaders, "Content-Type": "application/json" },
@@ -127,28 +107,97 @@ Deno.serve(async (req: Request) => {
       );
     }
 
+    const channelType = channel.channel_type as string;
+    const configuration = channel.configuration as Record<string, unknown> | null;
+
+    if (channelType === 'google_play') {
+      return new Response(
+        JSON.stringify({
+          error: 'Google Play purchases use in-app billing, not the card checkout flow.',
+        }),
+        {
+          status: 400,
+          headers: { ...corsHeaders, "Content-Type": "application/json" },
+        }
+      );
+    }
+
+    if (!configuration || typeof configuration !== 'object') {
+      console.error("Channel has no configuration", { channel_id });
+      return new Response(
+        JSON.stringify({
+          error: "Payment gateway not properly configured",
+          message: "The payment system is currently being set up. Please try again later or contact support."
+        }),
+        {
+          status: 500,
+          headers: { ...corsHeaders, "Content-Type": "application/json" },
+        }
+      );
+    }
+
+    const secretKey = (configuration as { secret_key?: string }).secret_key;
+    if ((channelType === 'paystack' || channelType === 'flutterwave') && !secretKey) {
+      console.error(`${channelType} secret key is missing`);
+      return new Response(
+        JSON.stringify({
+          error: "Payment gateway not properly configured",
+          message: "The payment system requires configuration. Please contact support."
+        }),
+        {
+          status: 500,
+          headers: { ...corsHeaders, "Content-Type": "application/json" },
+        }
+      );
+    }
+
+    // The buyer is the caller. Service-role calls (server-to-server) may pass user_email.
+    let buyerId: string;
+    let buyerEmail: string;
+
+    if (isServiceRole) {
+      const { data: lookupUser, error: lookupError } = await supabase
+        .from('users')
+        .select('id, email')
+        .eq('email', user_email)
+        .maybeSingle();
+      if (lookupError || !lookupUser) {
+        return new Response(
+          JSON.stringify({ error: "User not found" }),
+          {
+            status: 404,
+            headers: { ...corsHeaders, "Content-Type": "application/json" },
+          }
+        );
+      }
+      buyerId = lookupUser.id as string;
+      buyerEmail = (lookupUser.email as string) ?? user_email;
+    } else {
+      buyerId = user.id;
+      buyerEmail = user.email ?? user_email;
+    }
+
     const amountUSD = exchange_rate > 0 ? amount / exchange_rate : amount;
 
-    // Log premium currency transactions (GBP/EUR with USD equivalent < $1)
     const premiumCurrencies = ['GBP', 'EUR'];
     const isPremiumCurrency = premiumCurrencies.includes(currency.toUpperCase());
     if (isPremiumCurrency && amountUSD < 1.00) {
       console.log(`[Premium Currency] ${currency} transaction allowed:`, {
-        amount: amount,
-        currency: currency,
-        amountUSD: amountUSD,
-        exchange_rate: exchange_rate,
-        user_email: user_email,
-        detected_country: detected_country
+        amount,
+        currency,
+        amountUSD,
+        exchange_rate,
+        buyer: buyerId,
+        detected_country,
       });
     }
 
     const { data: paymentData, error: paymentError } = await supabase
       .from("treat_payments")
       .insert({
-        user_id: userData.id,
-        package_id: package_id,
-        amount: amount,
+        user_id: buyerId,
+        package_id,
+        amount,
         currency: currency || "USD",
         currency_symbol: currency_symbol || "$",
         currency_name: currency_name || "US Dollar",
@@ -156,7 +205,7 @@ Deno.serve(async (req: Request) => {
         amount_usd: amountUSD,
         detected_country: detected_country || null,
         detected_country_code: detected_country_code || null,
-        payment_method: channel_type,
+        payment_method: channelType,
         status: "pending",
         payment_channel_id: channel_id,
       })
@@ -174,13 +223,13 @@ Deno.serve(async (req: Request) => {
       );
     }
 
-    let paymentResponse: any = {};
+    let paymentResponse: Record<string, unknown> = {};
 
-    switch (channel_type) {
+    switch (channelType) {
       case "paystack":
         paymentResponse = await processPaystackPayment(
           amount,
-          user_email,
+          buyerEmail,
           paymentData.id,
           configuration,
           currency
@@ -190,7 +239,7 @@ Deno.serve(async (req: Request) => {
       case "flutterwave":
         paymentResponse = await processFlutterwavePayment(
           amount,
-          user_email,
+          buyerEmail,
           paymentData.id,
           configuration,
           currency
@@ -216,11 +265,11 @@ Deno.serve(async (req: Request) => {
         );
     }
 
-    if (paymentResponse.reference) {
+    if ((paymentResponse as { reference?: string }).reference) {
       await supabase
         .from("treat_payments")
         .update({
-          external_reference: paymentResponse.reference,
+          external_reference: (paymentResponse as { reference: string }).reference,
           payment_data: paymentResponse,
         })
         .eq("id", paymentData.id);
@@ -239,14 +288,13 @@ Deno.serve(async (req: Request) => {
   } catch (error) {
     console.error("Payment processing error:", error);
 
-    // Provide more detailed error information
     const errorMessage = error instanceof Error ? error.message : "Unknown error occurred";
     const errorStack = error instanceof Error ? error.stack : undefined;
 
     console.error("Error details:", {
       message: errorMessage,
       stack: errorStack,
-      requestData: requestData ? JSON.stringify(requestData) : "unavailable"
+      hasRequestData: requestData !== null,
     });
 
     return new Response(
@@ -269,7 +317,7 @@ async function processPaystackPayment(
   amount: number,
   email: string,
   paymentId: string,
-  config: any,
+  config: Record<string, unknown>,
   currency: string = "NGN"
 ) {
   const paystackAmount = Math.round(amount * 100);
@@ -283,14 +331,14 @@ async function processPaystackPayment(
   const response = await fetch("https://api.paystack.co/transaction/initialize", {
     method: "POST",
     headers: {
-      "Authorization": "Bearer " + config.secret_key,
+      "Authorization": "Bearer " + (config.secret_key as string),
       "Content-Type": "application/json",
     },
     body: JSON.stringify({
-      email: email,
+      email,
       amount: paystackAmount,
       currency: paystackCurrency,
-      reference: reference,
+      reference,
       callback_url: callbackUrl,
       metadata: {
         payment_id: paymentId,
@@ -301,7 +349,6 @@ async function processPaystackPayment(
   });
 
   const data = await response.json();
-
   console.log("Paystack API response:", JSON.stringify(data, null, 2));
 
   if (!response.ok || !data.status) {
@@ -309,7 +356,7 @@ async function processPaystackPayment(
     console.error("Paystack error details:", {
       status: response.status,
       statusText: response.statusText,
-      data: data,
+      data,
       currency: paystackCurrency,
       amount: paystackAmount
     });
@@ -327,43 +374,38 @@ async function processFlutterwavePayment(
   amount: number,
   email: string,
   paymentId: string,
-  config: any,
+  config: Record<string, unknown>,
   currency: string = "USD"
 ) {
   const txRef = "treat_" + paymentId;
-  
-  // Use custom URL scheme for mobile app redirect
+
   const redirectUrl = `airaplay://payment/success?provider=flutterwave&reference=${txRef}`;
 
-  const apiVersion = config.api_version || "v3";
+  const apiVersion = (config.api_version as string) || "v3";
 
-  // Flutterwave supported currencies
   const flutterwaveSupportedCurrencies = [
     "NGN", "USD", "GHS", "KES", "UGX", "TZS", "ZAR",
     "XAF", "XOF", "GBP", "EUR", "RWF", "ZMW", "MWK",
     "AUD", "CAD", "BRL", "CNY", "INR", "JPY", "MXN", "SAR", "AED"
   ];
 
-  // Validate and convert currency if needed
   let flutterwaveCurrency = currency;
   let flutterwaveAmount = amount;
 
   if (!flutterwaveSupportedCurrencies.includes(currency)) {
     console.log(`Currency ${currency} not supported by Flutterwave, defaulting to USD`);
     flutterwaveCurrency = "USD";
-    // Amount should already be in the correct value based on exchange rate from frontend
   }
 
-  // Round amount to 2 decimal places for currency precision
   flutterwaveAmount = Math.round(flutterwaveAmount * 100) / 100;
 
   const headers: Record<string, string> = {
-    "Authorization": "Bearer " + config.secret_key,
+    "Authorization": "Bearer " + (config.secret_key as string),
     "Content-Type": "application/json",
   };
 
   if (config.encryption_key) {
-    headers["X-Encryption-Key"] = config.encryption_key;
+    headers["X-Encryption-Key"] = config.encryption_key as string;
   }
 
   const payload = {
@@ -373,7 +415,7 @@ async function processFlutterwavePayment(
     redirect_url: redirectUrl,
     payment_options: "card,banktransfer,ussd,mobilemoney",
     customer: {
-      email: email,
+      email,
       name: email.split('@')[0],
     },
     customizations: {
@@ -394,7 +436,7 @@ async function processFlutterwavePayment(
 
   const response = await fetch("https://api.flutterwave.com/v3/payments", {
     method: "POST",
-    headers: headers,
+    headers,
     body: JSON.stringify(payload),
   });
 
@@ -406,7 +448,7 @@ async function processFlutterwavePayment(
     console.error("Flutterwave HTTP error details:", {
       status: response.status,
       statusText: response.statusText,
-      data: data,
+      data,
       currency: flutterwaveCurrency,
       amount: flutterwaveAmount
     });
@@ -417,7 +459,7 @@ async function processFlutterwavePayment(
     const errorMsg = data.message || `Flutterwave ${apiVersion} initialization failed`;
     console.error("Flutterwave error:", {
       message: errorMsg,
-      data: data,
+      data,
       currency: flutterwaveCurrency,
       amount: flutterwaveAmount,
       requestPayload: payload
@@ -440,18 +482,20 @@ async function processFlutterwavePayment(
 async function processUSDTPayment(
   amount: number,
   paymentId: string,
-  config: any,
+  config: Record<string, unknown>,
   currency: string = "USD"
 ) {
   const reference = "treat_usdt_" + paymentId;
-  const instructions = `Send exactly ${amount} ${currency} equivalent in USDT to the wallet address above using ${config.network} network. Payment will be verified manually.`;
+  const network = config.network as string;
+  const wallet = config.wallet_address as string;
+  const instructions = `Send exactly ${amount} ${currency} equivalent in USDT to the wallet address above using ${network} network. Payment will be verified manually.`;
 
   return {
-    reference: reference,
-    wallet_address: config.wallet_address,
-    network: config.network,
+    reference,
+    wallet_address: wallet,
+    network,
     amount_usdt: amount,
-    currency: currency,
-    instructions: instructions,
+    currency,
+    instructions,
   };
 }

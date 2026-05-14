@@ -1,4 +1,5 @@
 import "jsr:@supabase/functions-js/edge-runtime.d.ts";
+import { requireRoleCaller } from "../_shared/auth.ts";
 
 const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
@@ -15,6 +16,9 @@ interface UploadResponse {
   error?: string;
 }
 
+// Roles permitted to upload native ads / promotional video assets to Bunny Stream.
+const ALLOWED_ROLES = ['admin', 'manager', 'editor'] as const;
+
 Deno.serve(async (req: Request) => {
   if (req.method === "OPTIONS") {
     return new Response(null, {
@@ -22,6 +26,12 @@ Deno.serve(async (req: Request) => {
       headers: corsHeaders,
     });
   }
+
+  // Authenticate caller and require admin/manager/editor role before touching
+  // Bunny credentials. Without this guard, any signed-in user could trigger
+  // arbitrary uploads against the project's Bunny library.
+  const auth = await requireRoleCaller(req, corsHeaders, ALLOWED_ROLES);
+  if (!auth.ok) return auth.response;
 
   try {
     const BUNNY_LIBRARY_ID = Deno.env.get("BUNNY_STREAM_LIBRARY_ID");
@@ -41,7 +51,7 @@ Deno.serve(async (req: Request) => {
       throw new Error("No file provided");
     }
 
-    console.log(`Uploading file: ${file.name} (${file.size} bytes)`);
+    console.log(`Uploading file: ${file.name} (${file.size} bytes) by ${auth.user.id} (${auth.role})`);
 
     const videoTitle = title || file.name.split(".")[0];
 
@@ -73,7 +83,6 @@ Deno.serve(async (req: Request) => {
 
     const videoData = await createResponse.json() as { guid: string; videoLibraryId: number };
     const videoGuid = videoData.guid;
-    const videoLibraryId = videoData.videoLibraryId;
 
     console.log(`Video created with GUID: ${videoGuid}`);
 
@@ -99,7 +108,6 @@ Deno.serve(async (req: Request) => {
     const uploadResult = await uploadResponse.json() as { success: boolean; message: string; statusCode: number };
     console.log("Upload result:", uploadResult);
 
-    // Configure video settings with cache headers and encoding optimization
     try {
       const configureResponse = await fetch(`https://video.bunnycdn.com/library/${BUNNY_LIBRARY_ID}/videos/${videoGuid}`, {
         method: "POST",
@@ -109,7 +117,6 @@ Deno.serve(async (req: Request) => {
         },
         body: JSON.stringify({
           enableMP4Fallback: true,
-          // Enable CDN caching
           enableCDN: true,
         }),
       });
@@ -121,13 +128,11 @@ Deno.serve(async (req: Request) => {
       }
     } catch (configError) {
       console.warn("Error configuring video settings:", configError);
-      // Non-critical, continue anyway
     }
 
     const publicUrl = `https://${BUNNY_HOSTNAME}/${videoGuid}/playlist.m3u8`;
     const thumbnailUrl = `https://${BUNNY_HOSTNAME}/${videoGuid}/thumbnail.jpg`;
 
-    // Validate URL format before responding
     if (!publicUrl.startsWith('https://')) {
       throw new Error(`Invalid URL protocol: ${publicUrl}`);
     }
@@ -140,7 +145,7 @@ Deno.serve(async (req: Request) => {
       throw new Error(`Invalid HLS URL format: ${publicUrl}`);
     }
 
-    console.log(`✅ Upload complete - Video ready for playback:
+    console.log(`Upload complete - Video ready for playback:
       - Video GUID: ${videoGuid}
       - Playback URL: ${publicUrl}
       - Thumbnail URL: ${thumbnailUrl}`);
@@ -148,9 +153,9 @@ Deno.serve(async (req: Request) => {
     const response: UploadResponse = {
       success: true,
       videoId: videoGuid,
-      videoGuid: videoGuid,
-      publicUrl: publicUrl,
-      thumbnailUrl: thumbnailUrl,
+      videoGuid,
+      publicUrl,
+      thumbnailUrl,
     };
 
     return new Response(JSON.stringify(response), {
@@ -158,8 +163,7 @@ Deno.serve(async (req: Request) => {
       headers: {
         ...corsHeaders,
         "Content-Type": "application/json",
-        // Add cache headers to response
-        "Cache-Control": "public, max-age=3600", // 1 hour for API response
+        "Cache-Control": "public, max-age=3600",
       },
     });
   } catch (error) {

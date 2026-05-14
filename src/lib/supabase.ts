@@ -2350,12 +2350,25 @@ export const updateUserProfile = async (updates: any): Promise<any> => {
 
     cleanUpdates.updated_at = new Date().toISOString();
 
-    // Update user profile
+    // Update user profile. Column-level grants on `public.users` mean
+    // `.select()` (which translates to `RETURNING *`) fails — we must list
+    // an explicit projection of granted columns.
     const { data, error } = await supabase
       .from('users')
       .update(cleanUpdates)
       .eq('id', user.id)
-      .select()
+      .select(
+        'id, email, display_name, username, avatar_url, bio, country, gender, ' +
+        'role, show_artist_badge, profile_visibility, social_media_platform, ' +
+        'social_media_url, username_changed, username_last_changed_at, ' +
+        'country_last_changed_at, background_image_url, total_earnings, ' +
+        'wallet_address, is_active, show_listening_history, ' +
+        'email_notifications, push_notifications, notification_sound, ' +
+        'quiet_hours_enabled, quiet_hours_start, quiet_hours_end, ' +
+        'receive_new_follower_notifications, receive_content_notifications, ' +
+        'receive_playlist_notifications, receive_system_notifications, ' +
+        'date_of_birth, created_at, updated_at'
+      )
       .single();
 
     if (error) {
@@ -2384,18 +2397,21 @@ export const updateUserProfile = async (updates: any): Promise<any> => {
 
 export const getPublicUserProfile = async (userId: string): Promise<any> => {
   try {
-    // Get user basic info
+    // Public profile screen — runs for anonymous visitors too. The select must
+    // stay inside the anon column whitelist on `public.users`; `email` and
+    // `role` are intentionally excluded (anonymous browsers no longer have
+    // SELECT grants on those, and exposing role would advertise which accounts
+    // are admins/managers). Creator detection is done by probing
+    // `artist_profiles` instead of trusting `role`.
     const { data: userData, error: userError } = await supabase
       .from('users')
       .select(`
         id,
-        email,
         display_name,
         username,
         avatar_url,
         bio,
         country,
-        role,
         show_artist_badge,
         profile_visibility,
         social_media_platform,
@@ -2416,11 +2432,12 @@ export const getPublicUserProfile = async (userId: string): Promise<any> => {
 
     const isPrivateProfile = userData.profile_visibility === 'private';
 
-    // Get artist profile if user is a creator (needed for verified badge, even for private profiles)
+    // Probe for an artist_profiles row instead of gating on `role`. If the
+    // user has one, treat them as a creator (and fetch socials/badges).
     let artistProfile = null;
     let socialLinks: any[] = [];
-    
-    if (userData.role === 'creator' || userData.role === 'admin') {
+
+    {
       const { data: artistData, error: artistError } = await supabase
         .from('artist_profiles')
         .select('*')
@@ -2432,12 +2449,9 @@ export const getPublicUserProfile = async (userId: string): Promise<any> => {
       } else if (artistData) {
         artistProfile = artistData;
 
-        // Get social links (only if profile is public)
         if (!isPrivateProfile) {
           socialLinks = await getArtistSocialLinks(artistData.id);
         }
-      } else {
-        logger.warn('No artist profile found for creator user', { userId, email: userData.email });
       }
     }
 

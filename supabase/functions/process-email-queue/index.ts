@@ -1,11 +1,15 @@
 import "jsr:@supabase/functions-js/edge-runtime.d.ts";
-import { createClient } from 'jsr:@supabase/supabase-js@2';
+import { requireRoleCaller } from "../_shared/auth.ts";
 
 const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
   "Access-Control-Allow-Methods": "GET, POST, PUT, DELETE, OPTIONS",
   "Access-Control-Allow-Headers": "Content-Type, Authorization, X-Client-Info, Apikey",
 };
+
+// Email queue can be drained on-demand from admin pages, support actions, or
+// scheduled jobs. Allow admin/manager (UI) and service-role (cron) callers.
+const ALLOWED_ROLES = ['admin', 'manager'] as const;
 
 interface EmailQueueItem {
   id: string;
@@ -25,11 +29,15 @@ Deno.serve(async (req: Request) => {
     });
   }
 
+  // Authenticate caller before draining the email queue. Beyond admin UI
+  // triggers, scheduled jobs (service role) are also allowed via requireRoleCaller.
+  const auth = await requireRoleCaller(req, corsHeaders, ALLOWED_ROLES);
+  if (!auth.ok) return auth.response;
+  const { supabase } = auth;
+
   try {
-    // Initialize Supabase client with service role key
     const supabaseUrl = Deno.env.get('SUPABASE_URL')!;
     const supabaseServiceKey = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY')!;
-    const supabase = createClient(supabaseUrl, supabaseServiceKey);
 
     console.log('Starting email queue processing...');
 

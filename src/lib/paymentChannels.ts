@@ -38,8 +38,15 @@ export interface PaymentChannelConfig {
 }
 
 /**
- * Get all enabled payment channels for public use
- * Cached for 6 hours as payment channels rarely change
+ * Get all enabled payment channels for public use.
+ *
+ * Reads from `public.enabled_payment_channels_public`, a server-side view
+ * that exposes only fields safe to send to the browser. Provider secrets
+ * (`secret_key`, `encryption_key`, `api_token`, …) are stripped — they live
+ * in `treat_payment_channels.configuration` and are loaded by the
+ * `process-payment` Edge Function from the service-role context only.
+ *
+ * Cached for 6 hours as payment channels rarely change.
  */
 export const getEnabledPaymentChannels = async (): Promise<PaymentChannel[]> => {
   try {
@@ -48,14 +55,23 @@ export const getEnabledPaymentChannels = async (): Promise<PaymentChannel[]> => 
       CACHE_TTL.SIX_HOURS,
       async () => {
         const { data, error } = await supabase
-          .from('treat_payment_channels')
-          .select('id, channel_name, channel_type, is_enabled, icon_url, configuration, display_order, created_at, updated_at')
-          .eq('is_enabled', true)
+          .from('enabled_payment_channels_public')
+          .select('id, channel_name, channel_type, is_enabled, icon_url, public_configuration, display_order, created_at, updated_at')
           .order('display_order', { ascending: true });
 
         if (error) throw error;
 
-        return data || [];
+        return (data || []).map((row: Record<string, unknown>) => ({
+          id: row.id as string,
+          channel_name: row.channel_name as string,
+          channel_type: row.channel_type as string,
+          is_enabled: row.is_enabled as boolean,
+          icon_url: (row.icon_url as string | null) ?? null,
+          configuration: row.public_configuration ?? {},
+          display_order: row.display_order as number,
+          created_at: row.created_at as string,
+          updated_at: row.updated_at as string,
+        }));
       }
     );
   } catch (error) {
@@ -241,36 +257,15 @@ export const processPayment = async (
   currencyData: CurrencyDetectionResult
 ): Promise<{ success: boolean; data?: any; error?: string }> => {
   try {
-    // Get payment channel details
-    const { data: channel, error: channelError } = await supabase
-      .from('treat_payment_channels')
-      .select('*')
-      .eq('id', channelId)
-      .eq('is_enabled', true)
-      .single();
-
-    if (channelError) throw channelError;
-
-    if (!channel) {
-      throw new Error('Payment channel not found or disabled');
-    }
-
-    if (channel.channel_type === 'google_play') {
-      return {
-        success: false,
-        error: 'Google Play purchases use in-app billing, not the card checkout flow.',
-      };
-    }
-
-    // Call the payment processing edge function
+    // Channel type / configuration is intentionally NOT sent from the browser.
+    // process-payment loads them from treat_payment_channels using its
+    // service-role client, so provider secrets never leave the server.
     const { data, error } = await supabase.functions.invoke('process-payment', {
       body: {
         channel_id: channelId,
-        channel_type: channel.channel_type,
         amount: amount,
         package_id: packageId,
         user_email: userEmail,
-        configuration: channel.configuration,
         currency: currencyData.currency.code,
         currency_symbol: currencyData.currency.symbol,
         currency_name: currencyData.currency.name,
