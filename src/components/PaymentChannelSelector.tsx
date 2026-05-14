@@ -9,7 +9,12 @@ import {
 } from '../lib/paymentChannels';
 import { paymentMonitor } from '../lib/paymentMonitor';
 import { supabase } from '../lib/supabase';
-import { purchaseGooglePlayConsumable } from '../lib/playBilling';
+import {
+  consumeGooglePlayPurchase,
+  getOwnedGooglePlayConsumables,
+  purchaseGooglePlayConsumable,
+  type GooglePlayPurchaseResult,
+} from '../lib/playBilling';
 import { Currency, CurrencyDetectionResult } from '../lib/currencyDetection';
 import { CurrencySelector } from './CurrencySelector';
 import { Browser } from '@capacitor/browser';
@@ -107,41 +112,64 @@ export const PaymentChannelSelector: React.FC<PaymentChannelSelectorProps> = ({
           return;
         }
 
+        const verifyGooglePlayTreatPurchase = async (purchase: GooglePlayPurchaseResult): Promise<string> => {
+          const { data, error: fnError } = await supabase.functions.invoke('verify-google-play-purchase', {
+            body: {
+              payment_channel_id: selectedChannel.id,
+              package_id: packageId,
+              purchase_token: purchase.purchaseToken,
+              product_id: purchase.productId,
+              order_id: purchase.orderId,
+              amount_usd: amount,
+            },
+          });
+
+          if (fnError) {
+            const msg =
+              fnError.message ||
+              (data as { error?: string } | null)?.error ||
+              'Could not verify Google Play purchase';
+            throw new Error(msg);
+          }
+
+          const row = data as { success?: boolean; payment_id?: string; error?: string } | null;
+          if (!row?.success || !row.payment_id) {
+            throw new Error(row?.error || 'Could not verify Google Play purchase');
+          }
+
+          return row.payment_id;
+        };
+
+        const completeGooglePlayPurchase = async (purchase: GooglePlayPurchaseResult, paymentId: string) => {
+          try {
+            await consumeGooglePlayPurchase(purchase.purchaseToken);
+          } catch (consumeError) {
+            console.warn('Google Play purchase was credited but could not be consumed:', consumeError);
+            throw new Error(
+              'Your purchase was credited, but Google Play could not release this item for another purchase. Please restart the app before buying this package again.'
+            );
+          }
+
+          onPaymentSuccess({
+            payment_method: 'google_play',
+            payment_reference: purchase.orderId,
+            payment_id: paymentId,
+            status: 'completed',
+            amount,
+          });
+        };
+
+        const ownedPurchases = await getOwnedGooglePlayConsumables(sku);
+        if (ownedPurchases.length > 0) {
+          const ownedPurchase = ownedPurchases[0];
+          const paymentId = await verifyGooglePlayTreatPurchase(ownedPurchase);
+          await completeGooglePlayPurchase(ownedPurchase, paymentId);
+          return;
+        }
+
         const purchase = await purchaseGooglePlayConsumable(sku);
-
-        const { data, error: fnError } = await supabase.functions.invoke('verify-google-play-purchase', {
-          body: {
-            payment_channel_id: selectedChannel.id,
-            package_id: packageId,
-            purchase_token: purchase.purchaseToken,
-            product_id: purchase.productId,
-            order_id: purchase.orderId,
-            amount_usd: amount,
-          },
-        });
-
-        if (fnError) {
-          const msg = fnError.message || (data as { error?: string } | null)?.error || 'Could not verify Google Play purchase';
-          setError(msg);
-          onPaymentError(msg);
-          return;
-        }
-
-        const row = data as { success?: boolean; payment_id?: string; error?: string } | null;
-        if (!row?.success || !row.payment_id) {
-          const msg = row?.error || 'Could not verify Google Play purchase';
-          setError(msg);
-          onPaymentError(msg);
-          return;
-        }
-
-        onPaymentSuccess({
-          payment_method: 'google_play',
-          payment_reference: purchase.orderId,
-          payment_id: row.payment_id,
-          status: 'completed',
-          amount,
-        });
+        const paymentId = await verifyGooglePlayTreatPurchase(purchase);
+        await completeGooglePlayPurchase(purchase, paymentId);
       } catch (err) {
         const msg = err instanceof Error ? err.message : 'Google Play purchase failed';
         setError(msg);

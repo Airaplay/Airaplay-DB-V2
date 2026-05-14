@@ -14,6 +14,25 @@ interface NativePurchaseTransaction {
   orderId?: string;
 }
 
+function normalizeGooglePlayPurchase(
+  transaction: NativePurchaseTransaction,
+  fallbackSku: string
+): GooglePlayPurchaseResult | null {
+  const purchaseToken = transaction.purchaseToken?.trim() || transaction.transactionId?.trim();
+  const productId = transaction.productIdentifier?.trim() || fallbackSku;
+  const orderId = transaction.orderId?.trim() || transaction.transactionId?.trim();
+
+  if (!purchaseToken || !productId || !orderId) {
+    return null;
+  }
+
+  return {
+    purchaseToken,
+    productId,
+    orderId,
+  };
+}
+
 /**
  * Purchase a consumable SKU via Google Play Billing (Android app only).
  * Web bundles include this module; treat checkout hides Google Play on web.
@@ -37,19 +56,53 @@ export async function purchaseGooglePlayConsumable(sku: string): Promise<GoogleP
     autoAcknowledgePurchases: true,
   })) as NativePurchaseTransaction;
 
-  const purchaseToken = transaction.purchaseToken?.trim() || transaction.transactionId?.trim();
-  const productId = transaction.productIdentifier?.trim() || sku;
-  const orderId = transaction.orderId?.trim() || transaction.transactionId?.trim();
+  const purchase = normalizeGooglePlayPurchase(transaction, sku);
 
-  if (!purchaseToken || !productId || !orderId) {
+  if (!purchase) {
     throw new Error(
       `Google Play purchase succeeded but required verification fields are missing for "${sku}".`
     );
   }
 
-  return {
-    purchaseToken,
-    productId,
-    orderId,
-  };
+  return purchase;
+}
+
+/**
+ * Return currently owned consumable purchases for this SKU. This is used to
+ * recover tokens that were credited but not consumed, which blocks repurchase.
+ */
+export async function getOwnedGooglePlayConsumables(sku: string): Promise<GooglePlayPurchaseResult[]> {
+  if (!Capacitor.isNativePlatform() || Capacitor.getPlatform() !== 'android') {
+    return [];
+  }
+
+  const module = await import('@capgo/native-purchases');
+  const { NativePurchases, PURCHASE_TYPE } = module;
+
+  const { purchases } = await NativePurchases.getPurchases({
+    productType: PURCHASE_TYPE.INAPP,
+  });
+
+  return (purchases as NativePurchaseTransaction[])
+    .map((purchase) => normalizeGooglePlayPurchase(purchase, sku))
+    .filter((purchase): purchase is GooglePlayPurchaseResult => purchase?.productId === sku);
+}
+
+/** Consume a verified Google Play in-app purchase so the SKU can be bought again. */
+export async function consumeGooglePlayPurchase(purchaseToken: string): Promise<void> {
+  if (!Capacitor.isNativePlatform() || Capacitor.getPlatform() !== 'android') {
+    return;
+  }
+
+  const trimmedToken = purchaseToken.trim();
+  if (!trimmedToken) {
+    throw new Error('Google Play purchase token is missing.');
+  }
+
+  const module = await import('@capgo/native-purchases');
+  const { NativePurchases } = module;
+
+  await NativePurchases.consumePurchase({
+    purchaseToken: trimmedToken,
+  });
 }
