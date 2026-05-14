@@ -1,10 +1,11 @@
 import React, { useState, useEffect } from 'react';
-import { HelpCircle, Clock, CheckCircle, XCircle, AlertCircle, RefreshCw, MessageSquare, User } from 'lucide-react';
+import { HelpCircle, Clock, CheckCircle, XCircle, AlertCircle, RefreshCw, MessageSquare, User, Send, Mail } from 'lucide-react';
 import { supabase } from '../../lib/supabase';
 import { LoadingLogo } from '../../components/LoadingLogo';
 
 interface SupportTicket {
   id: string;
+  ticket_number: string;
   user_id: string;
   user_email: string;
   user_display_name: string;
@@ -21,10 +22,20 @@ interface SupportTicket {
   resolved_at: string | null;
 }
 
+interface SupportTicketReply {
+  id: string;
+  body: string;
+  is_staff: boolean;
+  author_id: string;
+  author_display_name: string | null;
+  created_at: string;
+}
+
 export const SupportTicketsSection = (): JSX.Element => {
   const [tickets, setTickets] = useState<SupportTicket[]>([]);
   const [isLoading, setIsLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [successMessage, setSuccessMessage] = useState<string | null>(null);
   const [statusFilter, setStatusFilter] = useState<string>('pending');
   const [selectedTicket, setSelectedTicket] = useState<SupportTicket | null>(null);
   const [showModal, setShowModal] = useState(false);
@@ -32,15 +43,46 @@ export const SupportTicketsSection = (): JSX.Element => {
   const [newStatus, setNewStatus] = useState('');
   const [newPriority, setNewPriority] = useState('');
   const [isUpdating, setIsUpdating] = useState(false);
+  const [replies, setReplies] = useState<SupportTicketReply[]>([]);
+  const [loadingReplies, setLoadingReplies] = useState(false);
+  const [replyBody, setReplyBody] = useState('');
+  const [sendingReply, setSendingReply] = useState(false);
 
   useEffect(() => {
     fetchTickets();
   }, [statusFilter]);
 
+  useEffect(() => {
+    if (!showModal || !selectedTicket) {
+      setReplies([]);
+      setReplyBody('');
+      return;
+    }
+
+    const loadReplies = async () => {
+      setLoadingReplies(true);
+      try {
+        const { data, error: rpcError } = await supabase.rpc('admin_get_support_ticket_replies', {
+          p_ticket_id: selectedTicket.id
+        });
+        if (rpcError) throw rpcError;
+        setReplies((data as SupportTicketReply[]) || []);
+      } catch (err) {
+        console.error('Error loading ticket replies:', err);
+        setReplies([]);
+      } finally {
+        setLoadingReplies(false);
+      }
+    };
+
+    void loadReplies();
+  }, [showModal, selectedTicket?.id]);
+
   const fetchTickets = async () => {
     try {
       setIsLoading(true);
       setError(null);
+      setSuccessMessage(null);
 
       const { data, error } = await supabase.rpc('admin_get_support_tickets', {
         p_status: statusFilter === 'all' ? null : statusFilter,
@@ -62,7 +104,7 @@ export const SupportTicketsSection = (): JSX.Element => {
   const handleTicketClick = (ticket: SupportTicket) => {
     setSelectedTicket(ticket);
     setAdminNotes(ticket.admin_notes || '');
-    setNewStatus(ticket.status);
+    setNewStatus(ticket.status === 'closed' ? 'resolved' : ticket.status);
     setNewPriority(ticket.priority);
     setShowModal(true);
   };
@@ -73,13 +115,15 @@ export const SupportTicketsSection = (): JSX.Element => {
     try {
       setIsUpdating(true);
       setError(null);
+      setSuccessMessage(null);
 
-      await supabase.rpc('admin_update_support_ticket', {
+      const { error: rpcError } = await supabase.rpc('admin_update_support_ticket', {
         p_ticket_id: selectedTicket.id,
         p_status: newStatus,
         p_priority: newPriority,
         p_admin_notes: adminNotes || null
       });
+      if (rpcError) throw rpcError;
 
       setShowModal(false);
       setSelectedTicket(null);
@@ -89,6 +133,77 @@ export const SupportTicketsSection = (): JSX.Element => {
       setError(err.message || 'Failed to update ticket');
     } finally {
       setIsUpdating(false);
+    }
+  };
+
+  const handleMarkResolved = async () => {
+    if (!selectedTicket) return;
+    try {
+      setIsUpdating(true);
+      setError(null);
+      setSuccessMessage(null);
+      const { error: rpcError } = await supabase.rpc('admin_update_support_ticket', {
+        p_ticket_id: selectedTicket.id,
+        p_status: 'resolved',
+        p_priority: newPriority,
+        p_admin_notes: adminNotes || null
+      });
+      if (rpcError) throw rpcError;
+      setNewStatus('resolved');
+      setShowModal(false);
+      setSelectedTicket(null);
+      fetchTickets();
+    } catch (err: any) {
+      console.error('Error resolving ticket:', err);
+      setError(err.message || 'Failed to mark ticket resolved');
+    } finally {
+      setIsUpdating(false);
+    }
+  };
+
+  const handleSendReply = async () => {
+    if (!selectedTicket) return;
+    const trimmed = replyBody.trim();
+    if (!trimmed) {
+      setError('Enter a message to send to the user.');
+      return;
+    }
+    try {
+      setSendingReply(true);
+      setError(null);
+      setSuccessMessage(null);
+      const { data: replyResult, error: rpcError } = await supabase.rpc('admin_reply_support_ticket', {
+        p_ticket_id: selectedTicket.id,
+        p_message: trimmed
+      });
+      if (rpcError) throw rpcError;
+      setReplyBody('');
+      await processQueuedSupportEmail();
+      const { data: repliesData, error: reloadErr } = await supabase.rpc('admin_get_support_ticket_replies', {
+        p_ticket_id: selectedTicket.id
+      });
+      if (!reloadErr) setReplies((repliesData as SupportTicketReply[]) || []);
+      const result = replyResult as { recipient_email?: string } | null;
+      if (result?.recipient_email) {
+        setSuccessMessage(`Reply queued for email delivery to ${result.recipient_email}.`);
+      }
+      fetchTickets();
+    } catch (err: any) {
+      console.error('Error sending reply:', err);
+      setError(err.message || 'Failed to send reply');
+    } finally {
+      setSendingReply(false);
+    }
+  };
+
+  const processQueuedSupportEmail = async () => {
+    try {
+      await supabase.functions.invoke('process-email-queue', {
+        method: 'POST',
+        body: { ignore_scheduled_for: true },
+      });
+    } catch (err) {
+      console.warn('Support email queued but not processed immediately:', err);
     }
   };
 
@@ -115,8 +230,6 @@ export const SupportTicketsSection = (): JSX.Element => {
         return <AlertCircle className="w-4 h-4" />;
       case 'resolved':
         return <CheckCircle className="w-4 h-4" />;
-      case 'closed':
-        return <XCircle className="w-4 h-4" />;
       default:
         return <HelpCircle className="w-4 h-4" />;
     }
@@ -153,9 +266,8 @@ export const SupportTicketsSection = (): JSX.Element => {
             className="px-3 py-2 bg-gray-50 border border-gray-200 rounded-lg text-sm text-gray-700 focus:outline-none focus:ring-2 focus:ring-[#309605]"
           >
             <option value="pending">Pending</option>
-            <option value="in_progress">In Progress</option>
+            <option value="in_progress">In Process</option>
             <option value="resolved">Resolved</option>
-            <option value="closed">Closed</option>
             <option value="all">All Tickets</option>
           </select>
 
@@ -172,6 +284,12 @@ export const SupportTicketsSection = (): JSX.Element => {
       {error && (
         <div className="p-3 bg-red-50 border border-red-100 rounded-lg">
           <p className="text-sm text-red-700">{error}</p>
+        </div>
+      )}
+
+      {successMessage && (
+        <div className="p-3 bg-green-50 border border-green-100 rounded-lg">
+          <p className="text-sm text-green-700">{successMessage}</p>
         </div>
       )}
 
@@ -201,13 +319,19 @@ export const SupportTicketsSection = (): JSX.Element => {
                   <div className="flex-1 min-w-0">
                     <div className="flex items-center gap-2 mb-1">
                       <h4 className="font-semibold text-gray-900 text-base">{ticket.subject}</h4>
+                      <span className="px-2 py-1 rounded-full text-xs font-semibold bg-gray-100 text-gray-700 border border-gray-200">
+                        {ticket.ticket_number}
+                      </span>
                       <span className={`px-2 py-1 rounded-full text-xs font-medium border ${getPriorityColor(ticket.priority)}`}>
                         {ticket.priority.toUpperCase()}
                       </span>
                     </div>
                     <div className="flex items-center gap-2 text-sm text-gray-600 mb-2">
                       <User className="w-3 h-3" />
-                      <span>{ticket.user_display_name || ticket.user_email}</span>
+                      <span>{ticket.user_display_name || 'User'}</span>
+                      <span>•</span>
+                      <Mail className="w-3 h-3" />
+                      <span>{ticket.user_email}</span>
                       <span>•</span>
                       <span className="text-xs">{ticket.category}</span>
                     </div>
@@ -224,7 +348,7 @@ export const SupportTicketsSection = (): JSX.Element => {
                       ? 'bg-green-100 text-green-700 border-green-200'
                       : 'bg-gray-100 text-gray-700 border-gray-200'
                   }`}>
-                    {ticket.status.replace('_', ' ').toUpperCase()}
+                    {ticket.status === 'in_progress' ? 'IN PROCESS' : ticket.status.replace('_', ' ').toUpperCase()}
                   </span>
                   <p className="text-xs text-gray-500 mt-2">{formatDate(ticket.created_at)}</p>
                 </div>
@@ -264,10 +388,18 @@ export const SupportTicketsSection = (): JSX.Element => {
                 <div className="p-4 bg-gray-50 rounded-lg">
                   <div className="grid grid-cols-2 gap-4 mb-3">
                     <div>
+                      <label className="text-xs font-medium text-gray-600">Ticket Number</label>
+                      <p className="text-sm font-semibold text-gray-900">{selectedTicket.ticket_number}</p>
+                    </div>
+                    <div>
                       <label className="text-xs font-medium text-gray-600">User</label>
                       <p className="text-sm font-medium text-gray-900">
                         {selectedTicket.user_display_name || selectedTicket.user_email}
                       </p>
+                    </div>
+                    <div>
+                      <label className="text-xs font-medium text-gray-600">Email Address</label>
+                      <p className="text-sm font-medium text-gray-900 break-all">{selectedTicket.user_email}</p>
                     </div>
                     <div>
                       <label className="text-xs font-medium text-gray-600">Category</label>
@@ -289,6 +421,31 @@ export const SupportTicketsSection = (): JSX.Element => {
                   </div>
                 </div>
 
+                {/* Staff replies (stored thread; emails are queued through ZeptoMail) */}
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-2">Staff replies</label>
+                  {loadingReplies ? (
+                    <p className="text-sm text-gray-500 py-2">Loading replies...</p>
+                  ) : replies.length === 0 ? (
+                    <p className="text-sm text-gray-500 py-2 border border-dashed border-gray-200 rounded-lg px-3">
+                      No staff replies yet. Use "Reply to user" below to email the user.
+                    </p>
+                  ) : (
+                    <ul className="space-y-2 max-h-40 overflow-y-auto border border-gray-100 rounded-lg p-3 bg-gray-50/80">
+                      {replies.map((r) => (
+                        <li key={r.id} className="text-sm">
+                          <span className="text-xs text-gray-500">
+                            {formatDate(r.created_at)}
+                            {r.author_display_name ? ` - ${r.author_display_name}` : ''}
+                            {r.is_staff ? ' - Staff' : ''}
+                          </span>
+                          <p className="text-gray-800 whitespace-pre-wrap mt-0.5">{r.body}</p>
+                        </li>
+                      ))}
+                    </ul>
+                  )}
+                </div>
+
                 {/* Status Update */}
                 <div>
                   <label className="block text-sm font-medium text-gray-700 mb-2">Status</label>
@@ -298,9 +455,8 @@ export const SupportTicketsSection = (): JSX.Element => {
                     className="w-full px-4 py-2 bg-white border border-gray-300 rounded-lg text-gray-900 focus:outline-none focus:ring-2 focus:ring-[#309605]"
                   >
                     <option value="pending">Pending</option>
-                    <option value="in_progress">In Progress</option>
+                    <option value="in_progress">In Process</option>
                     <option value="resolved">Resolved</option>
-                    <option value="closed">Closed</option>
                   </select>
                 </div>
 
@@ -329,22 +485,56 @@ export const SupportTicketsSection = (): JSX.Element => {
                     className="w-full px-4 py-2 bg-white border border-gray-300 rounded-lg text-gray-900 focus:outline-none focus:ring-2 focus:ring-[#309605] resize-none"
                     placeholder="Add notes about this ticket..."
                   />
+                  <p className="text-xs text-gray-500 mt-1">
+                    Internal only. Use "Reply to user" to email the user.
+                  </p>
+                </div>
+
+                {/* User-visible reply (queued through ZeptoMail email_queue) */}
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-2">Reply to user</label>
+                  <textarea
+                    value={replyBody}
+                    onChange={(e) => setReplyBody(e.target.value)}
+                    rows={3}
+                    className="w-full px-4 py-2 bg-white border border-gray-300 rounded-lg text-gray-900 focus:outline-none focus:ring-2 focus:ring-[#309605] resize-none"
+                    placeholder={`Write a reply... It will be sent to ${selectedTicket.user_email}.`}
+                  />
+                  <button
+                    type="button"
+                    onClick={() => void handleSendReply()}
+                    disabled={sendingReply || !replyBody.trim()}
+                    className="mt-2 inline-flex items-center gap-2 px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white text-sm font-medium rounded-lg transition-all disabled:opacity-50"
+                  >
+                    <Send className="w-4 h-4" />
+                    {sendingReply ? 'Queueing email...' : 'Send reply to user email'}
+                  </button>
                 </div>
               </div>
 
-              <div className="flex gap-3 mt-6">
+              <div className="flex flex-col sm:flex-row gap-3 mt-6">
                 <button
                   onClick={() => setShowModal(false)}
                   className="flex-1 px-4 py-2 bg-white hover:bg-gray-100 border border-gray-300 rounded-lg text-gray-700 transition-all"
                 >
                   Cancel
                 </button>
+                {selectedTicket.status !== 'resolved' && selectedTicket.status !== 'closed' && (
+                  <button
+                    type="button"
+                    onClick={() => void handleMarkResolved()}
+                    disabled={isUpdating}
+                    className="flex-1 px-4 py-2 bg-white hover:bg-gray-50 border border-[#309605] text-[#309605] rounded-lg transition-all disabled:opacity-50 font-medium"
+                  >
+                    {isUpdating ? 'Saving...' : 'Mark as resolved'}
+                  </button>
+                )}
                 <button
-                  onClick={handleUpdateTicket}
+                  onClick={() => void handleUpdateTicket()}
                   disabled={isUpdating}
-                  className="flex-1 px-4 py-2 bg-[#309605] hover:bg-[#3ba208] text-white rounded-lg transition-all disabled:opacity-50"
+                  className="flex-1 px-4 py-2 bg-[#309605] hover:bg-[#3ba208] text-white rounded-lg transition-all disabled:opacity-50 font-medium"
                 >
-                  {isUpdating ? 'Updating...' : 'Update Ticket'}
+                  {isUpdating ? 'Updating...' : 'Save changes'}
                 </button>
               </div>
             </div>

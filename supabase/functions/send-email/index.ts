@@ -17,7 +17,9 @@ interface SendEmailRequest {
     | 'creator_approved'
     | 'promotion_active'
     | 'newsletter'
-    | 'weekly_report';
+    | 'weekly_report'
+    | 'support_ticket_received'
+    | 'support_ticket_reply';
   recipient_email: string;
   recipient_user_id?: string;
   variables: Record<string, string>;

@@ -259,6 +259,21 @@ export const EmailManagementTab = (): JSX.Element => {
         stream_earnings: '$128.00',
         treat_earnings: '3,500 Treats',
         top_song: 'Amazing Song Title'
+      },
+      support_ticket_received: {
+        user_name: 'John Doe',
+        user_email: 'john.doe@example.com',
+        ticket_number: 'AIR-20260514-001234',
+        ticket_subject: 'Unable to withdraw earnings',
+        ticket_category: 'Payment',
+        ticket_status: 'Pending'
+      },
+      support_ticket_reply: {
+        user_name: 'John Doe',
+        user_email: 'john.doe@example.com',
+        ticket_number: 'AIR-20260514-001234',
+        ticket_subject: 'Unable to withdraw earnings',
+        reply_message: 'Thanks for contacting Airaplay support. We checked your account and your withdrawal is now being reviewed.'
       }
     };
     return samples[templateType] || {};

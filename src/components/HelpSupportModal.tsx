@@ -28,6 +28,7 @@ export const HelpSupportModal: React.FC<HelpSupportModalProps> = ({
   const [category, setCategory] = useState('general');
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [submitSuccess, setSubmitSuccess] = useState(false);
+  const [submittedTicketNumber, setSubmittedTicketNumber] = useState<string | null>(null);
 
   useEffect(() => {
     fetchFAQs();
@@ -72,6 +73,18 @@ export const HelpSupportModal: React.FC<HelpSupportModalProps> = ({
     return category.charAt(0).toUpperCase() + category.slice(1);
   };
 
+  const processQueuedSupportEmail = async () => {
+    try {
+      await supabase.functions.invoke('process-email-queue', {
+        method: 'POST',
+        body: { ignore_scheduled_for: true },
+      });
+    } catch (err) {
+      // Ticket creation should not fail if immediate delivery fails; the queued email remains visible in Email Logs.
+      console.warn('Support confirmation email queued but not processed immediately:', err);
+    }
+  };
+
   const handleSubmitTicket = async () => {
     if (!subject.trim() || !message.trim()) {
       setError('Please fill in all fields');
@@ -90,13 +103,17 @@ export const HelpSupportModal: React.FC<HelpSupportModalProps> = ({
 
       if (submitError) throw submitError;
 
+      const result = data as { ticket_number?: string } | null;
+      setSubmittedTicketNumber(result?.ticket_number || null);
       setSubmitSuccess(true);
       setSubject('');
       setMessage('');
       setCategory('general');
+      await processQueuedSupportEmail();
 
       setTimeout(() => {
         setSubmitSuccess(false);
+        setSubmittedTicketNumber(null);
         setShowContactForm(false);
       }, 3000);
     } catch (err: any) {
@@ -166,7 +183,9 @@ export const HelpSupportModal: React.FC<HelpSupportModalProps> = ({
                 {submitSuccess && (
                   <div className="p-3 bg-green-500/20 border border-green-500/30 rounded-lg">
                     <p className="text-green-400 text-sm">
-                      Support ticket submitted successfully! We&apos;ll get back to you soon.
+                      Support ticket submitted successfully!
+                      {submittedTicketNumber ? ` Ticket number: ${submittedTicketNumber}.` : ''}
+                      {' '}Check your email for the confirmation.
                     </p>
                   </div>
                 )}
@@ -221,6 +240,7 @@ export const HelpSupportModal: React.FC<HelpSupportModalProps> = ({
                       setError(null);
                       setSubject('');
                       setMessage('');
+                      setSubmittedTicketNumber(null);
                     }}
                     className="flex-1 h-11 bg-white/10 hover:bg-white/20 rounded-xl font-medium text-white transition-all"
                   >
