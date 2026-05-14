@@ -1,0 +1,8 @@
+---
+description: Home screen and default landing surface is the admin dashboard.
+alwaysApply: true
+---
+
+# App home / entry
+
+- The **admin dashboard** is the product **home screen**: default landing, primary post-auth destination, and the mental model for “home” in routing and UX unless a task explicitly says otherwise.
