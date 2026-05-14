@@ -1,6 +1,6 @@
 import { useState, useEffect, useCallback, useRef } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { Users, FileText, HelpCircle, BarChart, Settings, LogOut, Home, DollarSign, BarChart2, Bell, UserCog, Zap, Image, Coins, Wallet, Calendar, UserPlus, Megaphone, Flag, Star, Music, Tags, Sparkles, ListMusic, Shield, Award, Trophy, TrendingUp, Activity, Gift, Globe, Monitor, ChevronDown, ChevronRight, Menu, X, BookOpen, ScrollText, Headphones, AlertTriangle } from 'lucide-react';
+import { Users, FileText, HelpCircle, BarChart, Settings, LogOut, Home, DollarSign, BarChart2, Bell, UserCog, Zap, Image, Coins, Wallet, Calendar, UserPlus, Megaphone, Flag, Star, Music, Tags, Sparkles, ListMusic, Shield, Award, Trophy, TrendingUp, Activity, Gift, Globe, Monitor, ChevronDown, ChevronRight, Menu, X, BookOpen, ScrollText, Headphones, AlertTriangle, Banknote } from 'lucide-react';
 import { supabase, getUserRole } from '../../lib/supabase';
 import { hasTrustedAdminEmailSecondFactor } from '../../lib/adminEmailOtpGate';
 import { cacheInvalidation } from '../../lib/enhancedDataFetching';
@@ -43,8 +43,9 @@ import { AccountingSection } from './AccountingSection';
 import { ArtistEarningsLedgerSection } from './ArtistEarningsLedgerSection';
 import { ListenerEarningsLedgerSection } from './ListenerEarningsLedgerSection';
 import { FlaggedManagementSection } from './FlaggedManagementSection';
+import { ExternalRevenueSection } from './ExternalRevenueSection';
 
-type SectionType = 'users' | 'content' | 'faqs' | 'analytics' | 'country_performance' | 'settings' | 'earnings' | 'withdrawal_requests' | 'exchange_rates' | 'analysis' | 'announcements' | 'admin_settings' | 'ad_management' | 'native_ads' | 'web_ads' | 'feature_banners' | 'treat_manager' | 'daily_checkin' | 'referral_management' | 'promotion_manager' | 'reports' | 'featured_artists' | 'mix_manager' | 'daily_mix_manager' | 'global_daily_mix_manager' | 'genre_manager' | 'payment_monitoring' | 'mood_analysis' | 'listener_curations' | 'contribution_rewards' | 'content_thresholds' | 'financial_controls' | 'promotional_credits' | 'support' | 'blog' | 'accounting' | 'artist_earnings_ledger' | 'listener_earnings_ledger' | 'flagged';
+type SectionType = 'users' | 'content' | 'faqs' | 'analytics' | 'country_performance' | 'settings' | 'earnings' | 'withdrawal_requests' | 'exchange_rates' | 'analysis' | 'announcements' | 'admin_settings' | 'ad_management' | 'native_ads' | 'web_ads' | 'feature_banners' | 'treat_manager' | 'daily_checkin' | 'referral_management' | 'promotion_manager' | 'reports' | 'featured_artists' | 'mix_manager' | 'daily_mix_manager' | 'global_daily_mix_manager' | 'genre_manager' | 'payment_monitoring' | 'mood_analysis' | 'listener_curations' | 'contribution_rewards' | 'content_thresholds' | 'financial_controls' | 'promotional_credits' | 'support' | 'blog' | 'accounting' | 'artist_earnings_ledger' | 'listener_earnings_ledger' | 'flagged' | 'external_revenue';
 
 const ADMIN_ROLES = ['admin', 'manager', 'editor', 'account'];
 
@@ -97,6 +98,7 @@ const getSectionLabel = (section: SectionType): string => {
     listener_earnings_ledger: 'Listener Earnings Ledger',
     mood_analysis: 'Mood Analysis',
     promotional_credits: 'Promo Credits',
+    external_revenue: 'External Revenue',
     settings: 'Settings',
   };
   return labels[section] || section;
@@ -276,13 +278,13 @@ export const AdminDashboardScreen = (): JSX.Element => {
   const hasAccessToSection = (section: SectionType): boolean => {
     if (userRole === 'admin') return true;
     if (userRole === 'manager') {
-      return section !== 'admin_settings' && section !== 'treat_manager' && section !== 'payment_monitoring' && section !== 'financial_controls' && section !== 'promotional_credits' && section !== 'country_performance' && section !== 'withdrawal_requests' && section !== 'exchange_rates' && section !== 'accounting' && section !== 'artist_earnings_ledger' && section !== 'listener_earnings_ledger';
+      return section !== 'admin_settings' && section !== 'treat_manager' && section !== 'payment_monitoring' && section !== 'financial_controls' && section !== 'promotional_credits' && section !== 'country_performance' && section !== 'withdrawal_requests' && section !== 'exchange_rates' && section !== 'accounting' && section !== 'artist_earnings_ledger' && section !== 'listener_earnings_ledger' && section !== 'external_revenue';
     }
     if (userRole === 'editor') {
       return ['content', 'faqs', 'blog'].includes(section);
     }
     if (userRole === 'account') {
-      return ['analytics', 'earnings', 'withdrawal_requests', 'exchange_rates', 'support', 'payment_monitoring', 'financial_controls', 'promotional_credits', 'treat_manager', 'country_performance', 'accounting', 'artist_earnings_ledger', 'listener_earnings_ledger'].includes(section);
+      return ['analytics', 'earnings', 'withdrawal_requests', 'exchange_rates', 'support', 'payment_monitoring', 'financial_controls', 'promotional_credits', 'treat_manager', 'country_performance', 'accounting', 'artist_earnings_ledger', 'listener_earnings_ledger', 'external_revenue'].includes(section);
     }
     return false;
   };
@@ -332,6 +334,7 @@ export const AdminDashboardScreen = (): JSX.Element => {
         case 'accounting': return <AccountingSection />;
         case 'artist_earnings_ledger': return <ArtistEarningsLedgerSection />;
         case 'listener_earnings_ledger': return <ListenerEarningsLedgerSection />;
+        case 'external_revenue': return <ExternalRevenueSection />;
         case 'settings':
           return (
             <div className="p-6 bg-white rounded-xl border border-gray-100 shadow-sm">
@@ -504,6 +507,7 @@ export const AdminDashboardScreen = (): JSX.Element => {
             <NavItem section="earnings" icon={<DollarSign className="w-4 h-4" />} label="Earnings & Payouts" />
             <NavItem section="support" icon={<Wallet className="w-4 h-4" />} label="Support & Withdrawals" />
             <NavItem section="treat_manager" icon={<Coins className="w-4 h-4" />} label="Treat Manager" />
+            <NavItem section="external_revenue" icon={<Banknote className="w-4 h-4" />} label="External Revenue" />
             <NavItem section="promotional_credits" icon={<Gift className="w-4 h-4" />} label="Promo Credits" />
           </NavGroup>
 
