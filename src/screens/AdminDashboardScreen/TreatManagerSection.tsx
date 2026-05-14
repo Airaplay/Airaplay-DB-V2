@@ -3372,6 +3372,8 @@ const OfflineDownloadPricingTab = (): JSX.Element => {
 
 export const TreatManagerSection = (): JSX.Element => {
   const [activeTab, setActiveTab] = useState('overview');
+  const tabTriggerClass = 'flex-shrink-0 px-2.5 py-1.5 text-xs font-medium rounded-md data-[state=active]:bg-[#309605] data-[state=active]:text-white data-[state=active]:shadow';
+  const tabIconClass = 'w-3.5 h-3.5 mr-1.5';
 
   return (
     <div className="space-y-6">
@@ -3379,36 +3381,36 @@ export const TreatManagerSection = (): JSX.Element => {
 
       <Tabs value={activeTab} onValueChange={setActiveTab} className="w-full">
         <div className="overflow-x-auto scrollbar-hide mb-4">
-          <TabsList className="flex justify-start bg-gray-100 p-1 rounded-lg shadow-sm min-w-full">
-            <TabsTrigger value="overview" className="flex-shrink-0 px-4 py-2 text-sm font-medium rounded-md data-[state=active]:bg-[#309605] data-[state=active]:text-white data-[state=active]:shadow">
-              <DollarSign className="w-4 h-4 mr-2" /> Overview
+          <TabsList className="flex justify-start bg-gray-100 p-0.5 rounded-lg shadow-sm min-w-full">
+            <TabsTrigger value="overview" className={tabTriggerClass}>
+              <DollarSign className={tabIconClass} /> Overview
             </TabsTrigger>
-            <TabsTrigger value="offline-downloads" className="flex-shrink-0 px-4 py-2 text-sm font-medium rounded-md data-[state=active]:bg-[#309605] data-[state=active]:text-white data-[state=active]:shadow">
-              <Download className="w-4 h-4 mr-2" /> Offline downloads
+            <TabsTrigger value="offline-downloads" className={tabTriggerClass}>
+              <Download className={tabIconClass} /> Offline downloads
             </TabsTrigger>
-            <TabsTrigger value="withdrawal-settings" className="flex-shrink-0 px-4 py-2 text-sm font-medium rounded-md data-[state=active]:bg-[#309605] data-[state=active]:text-white data-[state=active]:shadow">
-              <Settings className="w-4 h-4 mr-2" /> Withdrawal Settings
+            <TabsTrigger value="withdrawal-settings" className={tabTriggerClass}>
+              <Settings className={tabIconClass} /> Withdrawal Settings
             </TabsTrigger>
-            <TabsTrigger value="payment-channels" className="flex-shrink-0 px-4 py-2 text-sm font-medium rounded-md data-[state=active]:bg-[#309605] data-[state=active]:text-white data-[state=active]:shadow">
-              <CreditCard className="w-4 h-4 mr-2" /> Payment Channels
+            <TabsTrigger value="payment-channels" className={tabTriggerClass}>
+              <CreditCard className={tabIconClass} /> Payment Channels
             </TabsTrigger>
-            <TabsTrigger value="treat-package" className="flex-shrink-0 px-4 py-2 text-sm font-medium rounded-md data-[state=active]:bg-[#309605] data-[state=active]:text-white data-[state=active]:shadow">
-              <Package className="w-4 h-4 mr-2" /> Treat Package
+            <TabsTrigger value="treat-package" className={tabTriggerClass}>
+              <Package className={tabIconClass} /> Treat Package
             </TabsTrigger>
-            <TabsTrigger value="signup-bonus" className="flex-shrink-0 px-4 py-2 text-sm font-medium rounded-md data-[state=active]:bg-[#309605] data-[state=active]:text-white data-[state=active]:shadow">
-              <Gift className="w-4 h-4 mr-2" /> Sign-up Bonus
+            <TabsTrigger value="signup-bonus" className={tabTriggerClass}>
+              <Gift className={tabIconClass} /> Sign-up Bonus
             </TabsTrigger>
-            <TabsTrigger value="analytics" className="flex-shrink-0 px-4 py-2 text-sm font-medium rounded-md data-[state=active]:bg-[#309605] data-[state=active]:text-white data-[state=active]:shadow">
-              <BarChart className="w-4 h-4 mr-2" /> Analytics
+            <TabsTrigger value="analytics" className={tabTriggerClass}>
+              <BarChart className={tabIconClass} /> Analytics
             </TabsTrigger>
-            <TabsTrigger value="transactions" className="flex-shrink-0 px-4 py-2 text-sm font-medium rounded-md data-[state=active]:bg-[#309605] data-[state=active]:text-white data-[state=active]:shadow">
-              <Clock className="w-4 h-4 mr-2" /> Transactions
+            <TabsTrigger value="transactions" className={tabTriggerClass}>
+              <Clock className={tabIconClass} /> Transactions
             </TabsTrigger>
-            <TabsTrigger value="collab" className="flex-shrink-0 px-4 py-2 text-sm font-medium rounded-md data-[state=active]:bg-[#309605] data-[state=active]:text-white data-[state=active]:shadow">
-              <Users className="w-4 h-4 mr-2" /> Collab
+            <TabsTrigger value="collab" className={tabTriggerClass}>
+              <Users className={tabIconClass} /> Collab
             </TabsTrigger>
-            <TabsTrigger value="treat-users" className="flex-shrink-0 px-4 py-2 text-sm font-medium rounded-md data-[state=active]:bg-[#309605] data-[state=active]:text-white data-[state=active]:shadow">
-              <Wallet className="w-4 h-4 mr-2" /> Treat Users
+            <TabsTrigger value="treat-users" className={tabTriggerClass}>
+              <Wallet className={tabIconClass} /> Treat Users
             </TabsTrigger>
           </TabsList>
         </div>
