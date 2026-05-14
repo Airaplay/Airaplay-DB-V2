@@ -25,6 +25,9 @@ interface SendEmailRequest {
   variables: Record<string, string>;
 }
 
+const SUPPORT_EMAIL = 'support@airaplay.com';
+const SUPPORT_NAME = 'Airaplay Support';
+
 Deno.serve(async (req: Request) => {
   if (req.method === "OPTIONS") {
     return new Response(null, {
@@ -94,6 +97,11 @@ Deno.serve(async (req: Request) => {
     // Replace variables in subject and content (split/join avoids regex + `$` replacement quirks in long HTML)
     let subject = template.subject;
     let htmlContent = enforceBlackEmailHeaderBackground(template.html_content);
+    const isSupportEmail =
+      template_type === 'support_ticket_received' ||
+      template_type === 'support_ticket_reply';
+    const fromAddress = isSupportEmail ? SUPPORT_EMAIL : config.from_email;
+    const fromName = isSupportEmail ? SUPPORT_NAME : config.from_name;
 
     for (const [key, raw] of Object.entries(variables)) {
       const placeholder = `{{${key}}}`;
@@ -111,8 +119,8 @@ Deno.serve(async (req: Request) => {
       },
       body: JSON.stringify({
         from: {
-          address: config.from_email,
-          name: config.from_name,
+          address: fromAddress,
+          name: fromName,
         },
         to: [
           {
@@ -123,6 +131,14 @@ Deno.serve(async (req: Request) => {
         ],
         subject: subject,
         htmlbody: htmlContent,
+        ...(isSupportEmail && {
+          reply_to: [
+            {
+              address: SUPPORT_EMAIL,
+              name: SUPPORT_NAME,
+            },
+          ],
+        }),
         ...(config.bounce_address && { bounce_address: config.bounce_address }),
       }),
     });
@@ -139,7 +155,7 @@ Deno.serve(async (req: Request) => {
       status: zeptomailResponse.ok ? 'sent' : 'failed',
       provider_message_id: zeptomailData.message_id || null,
       error_message: zeptomailResponse.ok ? null : JSON.stringify(zeptomailData),
-      metadata: { variables },
+      metadata: { variables, from_email: fromAddress, from_name: fromName },
       sent_at: zeptomailResponse.ok ? new Date().toISOString() : null,
     };
 

@@ -185,7 +185,7 @@ export const SupportTicketsSection = (): JSX.Element => {
       if (!reloadErr) setReplies((repliesData as SupportTicketReply[]) || []);
       const result = replyResult as { recipient_email?: string } | null;
       if (result?.recipient_email) {
-        setSuccessMessage(`Reply queued for email delivery to ${result.recipient_email}.`);
+        setSuccessMessage(`Reply queued from support@airaplay.com to ${result.recipient_email}.`);
       }
       fetchTickets();
     } catch (err: any) {
@@ -334,6 +334,10 @@ export const SupportTicketsSection = (): JSX.Element => {
                       <span>{ticket.user_email}</span>
                       <span>•</span>
                       <span className="text-xs">{ticket.category}</span>
+                      <span>•</span>
+                      <span className="text-xs">
+                        {ticket.assigned_to_name ? `Assigned to ${ticket.assigned_to_name}` : 'Unassigned'}
+                      </span>
                     </div>
                     <p className="text-sm text-gray-600 line-clamp-2">{ticket.message}</p>
                   </div>
@@ -404,6 +408,12 @@ export const SupportTicketsSection = (): JSX.Element => {
                     <div>
                       <label className="text-xs font-medium text-gray-600">Category</label>
                       <p className="text-sm font-medium text-gray-900">{selectedTicket.category}</p>
+                    </div>
+                    <div>
+                      <label className="text-xs font-medium text-gray-600">Assigned Rep</label>
+                      <p className="text-sm font-medium text-gray-900">
+                        {selectedTicket.assigned_to_name || 'Unassigned'}
+                      </p>
                     </div>
                   </div>
                   <div className="mb-3">
@@ -493,6 +503,9 @@ export const SupportTicketsSection = (): JSX.Element => {
                 {/* User-visible reply (queued through ZeptoMail email_queue) */}
                 <div>
                   <label className="block text-sm font-medium text-gray-700 mb-2">Reply to user</label>
+                  <div className="mb-2 rounded-lg border border-blue-100 bg-blue-50 p-3 text-xs text-blue-800">
+                    Emails are sent as <strong>Airaplay Support &lt;support@airaplay.com&gt;</strong>. Users can reply to that address; keep the ticket number in the subject when handling mailbox replies.
+                  </div>
                   <textarea
                     value={replyBody}
                     onChange={(e) => setReplyBody(e.target.value)}
@@ -507,7 +520,7 @@ export const SupportTicketsSection = (): JSX.Element => {
                     className="mt-2 inline-flex items-center gap-2 px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white text-sm font-medium rounded-lg transition-all disabled:opacity-50"
                   >
                     <Send className="w-4 h-4" />
-                    {sendingReply ? 'Queueing email...' : 'Send reply to user email'}
+                    {sendingReply ? 'Queueing email...' : 'Send as support@airaplay.com'}
                   </button>
                 </div>
               </div>
