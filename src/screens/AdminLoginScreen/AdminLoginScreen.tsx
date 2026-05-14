@@ -2,7 +2,8 @@ import React, { useState, useEffect, useRef } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { Mail, Lock, Eye, EyeOff, AlertCircle, Clock, Shield, RefreshCw } from 'lucide-react';
 import { Card, CardContent } from '../../components/ui/card';
-import { supabase, getUserRole } from '../../lib/supabase';
+import { supabase } from '../../lib/supabase';
+import { getCurrentAdminAccess } from '../../lib/adminAccess';
 import { LoadingLogo } from '../../components/LoadingLogo';
 import { cacheInvalidation } from '../../lib/enhancedDataFetching';
 import {
@@ -15,8 +16,6 @@ import {
   sendAdminLoginEmailOtp,
   verifyAdminLoginEmailOtp,
 } from '../../lib/adminEmailOtpGate';
-
-const ADMIN_ROLES = ['admin', 'manager', 'editor', 'account'];
 
 const getClientInfo = () => ({
   userAgent: navigator.userAgent || '',
@@ -96,10 +95,10 @@ export const AdminLoginScreen = (): JSX.Element => {
 
     try {
       const { userAgent } = getClientInfo();
-      const role = await getUserRole();
+      const access = await getCurrentAdminAccess();
       await supabase.rpc('log_admin_activity_with_context', {
         action_type_param: 'admin_login',
-        details_param: { role, email },
+        details_param: { role: access.roleName || access.roleKey || access.legacyRole, email },
         ip_address_param: '',
         user_agent_param: userAgent,
       });
@@ -160,8 +159,8 @@ export const AdminLoginScreen = (): JSX.Element => {
       const { data: { session }, error: sessionError } = await supabase.auth.getSession();
       if (sessionError || !session) return;
 
-      const role = await getUserRole();
-      if (!ADMIN_ROLES.includes(role ?? '')) return;
+      const access = await getCurrentAdminAccess();
+      if (!access.hasAccess) return;
 
       if (hasTrustedAdminEmailSecondFactor(session.access_token, session.user.id)) {
         navigate('/admin');
@@ -355,9 +354,9 @@ export const AdminLoginScreen = (): JSX.Element => {
         throw new Error('Authentication failed');
       }
 
-      const role = await getUserRole();
+      const access = await getCurrentAdminAccess();
 
-      if (!ADMIN_ROLES.includes(role ?? '')) {
+      if (!access.hasAccess) {
         await supabase.auth.signOut();
         await recordAttempt(formData.email, false);
         setError('Access denied. You do not have admin privileges.');

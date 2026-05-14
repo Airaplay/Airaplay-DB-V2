@@ -1,7 +1,8 @@
 import { useState, useEffect, useCallback, useRef } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { Users, FileText, HelpCircle, BarChart, Settings, LogOut, Home, DollarSign, BarChart2, Bell, UserCog, Zap, Image, Coins, Wallet, Calendar, UserPlus, Megaphone, Flag, Star, Music, Tags, Sparkles, ListMusic, Shield, Award, Trophy, TrendingUp, Activity, Gift, Globe, Monitor, ChevronDown, ChevronRight, Menu, X, BookOpen, ScrollText, Headphones, AlertTriangle, Banknote } from 'lucide-react';
-import { supabase, getUserRole } from '../../lib/supabase';
+import { supabase } from '../../lib/supabase';
+import { AdminAccess, adminAccessHasFeature, getCurrentAdminAccess } from '../../lib/adminAccess';
 import { hasTrustedAdminEmailSecondFactor } from '../../lib/adminEmailOtpGate';
 import { cacheInvalidation } from '../../lib/enhancedDataFetching';
 import { performCompleteLogout } from '../../lib/logoutService';
@@ -46,8 +47,6 @@ import { FlaggedManagementSection } from './FlaggedManagementSection';
 import { ExternalRevenueSection } from './ExternalRevenueSection';
 
 type SectionType = 'users' | 'content' | 'faqs' | 'analytics' | 'country_performance' | 'settings' | 'earnings' | 'withdrawal_requests' | 'exchange_rates' | 'analysis' | 'announcements' | 'admin_settings' | 'ad_management' | 'native_ads' | 'web_ads' | 'feature_banners' | 'treat_manager' | 'daily_checkin' | 'referral_management' | 'promotion_manager' | 'reports' | 'featured_artists' | 'mix_manager' | 'daily_mix_manager' | 'global_daily_mix_manager' | 'genre_manager' | 'payment_monitoring' | 'mood_analysis' | 'listener_curations' | 'contribution_rewards' | 'content_thresholds' | 'financial_controls' | 'promotional_credits' | 'support' | 'blog' | 'accounting' | 'artist_earnings_ledger' | 'listener_earnings_ledger' | 'flagged' | 'external_revenue';
-
-const ADMIN_ROLES = ['admin', 'manager', 'editor', 'account'];
 
 const getDeviceInfo = () => ({
   userAgent: navigator.userAgent || '',
@@ -104,6 +103,53 @@ const getSectionLabel = (section: SectionType): string => {
   return labels[section] || section;
 };
 
+const SECTION_ORDER: SectionType[] = [
+  'analytics',
+  'country_performance',
+  'analysis',
+  'users',
+  'content',
+  'content_thresholds',
+  'featured_artists',
+  'reports',
+  'flagged',
+  'earnings',
+  'support',
+  'treat_manager',
+  'external_revenue',
+  'promotional_credits',
+  'payment_monitoring',
+  'withdrawal_requests',
+  'exchange_rates',
+  'financial_controls',
+  'accounting',
+  'artist_earnings_ledger',
+  'listener_earnings_ledger',
+  'ad_management',
+  'native_ads',
+  'web_ads',
+  'feature_banners',
+  'promotion_manager',
+  'listener_curations',
+  'contribution_rewards',
+  'daily_checkin',
+  'referral_management',
+  'announcements',
+  'mix_manager',
+  'daily_mix_manager',
+  'global_daily_mix_manager',
+  'genre_manager',
+  'mood_analysis',
+  'faqs',
+  'blog',
+  'settings',
+  'admin_settings',
+];
+
+const getFirstAccessibleSection = (access: AdminAccess): SectionType => {
+  return SECTION_ORDER.find(section => adminAccessHasFeature(access, section)) || 'analytics';
+};
+
 export const AdminDashboardScreen = (): JSX.Element => {
   const navigate = useNavigate();
   const [activeSection, setActiveSection] = useState<SectionType>('analytics');
@@ -111,6 +157,7 @@ export const AdminDashboardScreen = (): JSX.Element => {
   const [error, setError] = useState<string | null>(null);
   const [renderError, setRenderError] = useState<string | null>(null);
   const [userRole, setUserRole] = useState<string | null>(null);
+  const [adminAccess, setAdminAccess] = useState<AdminAccess | null>(null);
   const [userProfile, setUserProfile] = useState<any>(null);
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const [isMobile, setIsMobile] = useState(window.innerWidth < 1025);
@@ -147,17 +194,9 @@ export const AdminDashboardScreen = (): JSX.Element => {
       const { data: { user }, error: authError } = await supabase.auth.getUser();
       if (authError || !user) return false;
 
-      const { data, error: roleError } = await supabase
-        .from('users')
-        .select('role')
-        .eq('id', user.id)
-        .maybeSingle();
+      const freshAccess = await getCurrentAdminAccess();
 
-      if (roleError || !data) return false;
-
-      const freshRole = data.role ?? null;
-
-      if (!ADMIN_ROLES.includes(freshRole ?? '')) {
+      if (!freshAccess.hasAccess) {
         await cacheInvalidation.byTags(['user', 'auth']);
         navigate('/admin/login');
         return false;
@@ -171,7 +210,11 @@ export const AdminDashboardScreen = (): JSX.Element => {
         return false;
       }
 
-      setUserRole(freshRole);
+      setAdminAccess(freshAccess);
+      setUserRole(freshAccess.roleName || freshAccess.roleKey || freshAccess.legacyRole);
+      setActiveSection(current =>
+        adminAccessHasFeature(freshAccess, current) ? current : getFirstAccessibleSection(freshAccess)
+      );
       lastRoleCheckRef.current = Date.now();
       return true;
     } catch {
@@ -224,9 +267,9 @@ export const AdminDashboardScreen = (): JSX.Element => {
         return;
       }
 
-      const role = userData.role ?? null;
+      const access = await getCurrentAdminAccess();
 
-      if (!ADMIN_ROLES.includes(role ?? '')) {
+      if (!access.hasAccess) {
         setError('You do not have permission to access the admin dashboard');
         navigate('/admin/login');
         return;
@@ -241,8 +284,12 @@ export const AdminDashboardScreen = (): JSX.Element => {
         return;
       }
 
-      setUserRole(role);
+      setAdminAccess(access);
+      setUserRole(access.roleName || access.roleKey || userData.role);
       setUserProfile(userData);
+      setActiveSection(current =>
+        adminAccessHasFeature(access, current) ? current : getFirstAccessibleSection(access)
+      );
       lastRoleCheckRef.current = Date.now();
     } catch (err) {
       console.error('Error checking admin access:', err);
@@ -259,37 +306,36 @@ export const AdminDashboardScreen = (): JSX.Element => {
       const stillValid = await reVerifyRole();
       if (!stillValid) return;
     }
+
+    if (!adminAccessHasFeature(adminAccess, section)) {
+      setRenderError(`Your role does not include access to ${getSectionLabel(section)}.`);
+      setSidebarOpen(false);
+      return;
+    }
+
     setActiveSection(section);
     setSidebarOpen(false);
     logAdminAction('view_section', { section });
-  }, [reVerifyRole, logAdminAction, ROLE_RECHECK_INTERVAL]);
+  }, [adminAccess, reVerifyRole, logAdminAction, ROLE_RECHECK_INTERVAL]);
 
   const handleSignOut = async () => {
     try {
       setUserRole(null);
+      setAdminAccess(null);
       setUserProfile(null);
       await performCompleteLogout();
       navigate('/admin/login', { replace: true });
     } catch (error) {
       console.error('Error signing out:', error);
       setUserRole(null);
+      setAdminAccess(null);
       setUserProfile(null);
       navigate('/admin/login', { replace: true });
     }
   };
 
   const hasAccessToSection = (section: SectionType): boolean => {
-    if (userRole === 'admin') return true;
-    if (userRole === 'manager') {
-      return section !== 'admin_settings' && section !== 'treat_manager' && section !== 'payment_monitoring' && section !== 'financial_controls' && section !== 'promotional_credits' && section !== 'country_performance' && section !== 'withdrawal_requests' && section !== 'exchange_rates' && section !== 'accounting' && section !== 'artist_earnings_ledger' && section !== 'listener_earnings_ledger' && section !== 'external_revenue';
-    }
-    if (userRole === 'editor') {
-      return ['content', 'faqs', 'blog'].includes(section);
-    }
-    if (userRole === 'account') {
-      return ['analytics', 'earnings', 'withdrawal_requests', 'exchange_rates', 'support', 'payment_monitoring', 'financial_controls', 'promotional_credits', 'treat_manager', 'country_performance', 'accounting', 'artist_earnings_ledger', 'listener_earnings_ledger', 'external_revenue'].includes(section);
-    }
-    return false;
+    return adminAccessHasFeature(adminAccess, section);
   };
 
   const toggleGroup = (group: string) => {
@@ -298,6 +344,23 @@ export const AdminDashboardScreen = (): JSX.Element => {
 
   const renderSection = () => {
     try {
+      if (!hasAccessToSection(activeSection)) {
+        return (
+          <div className="p-6 bg-white rounded-xl border border-gray-100 shadow-sm">
+            <h2 className="text-xl font-bold text-gray-900 mb-2">Access Restricted</h2>
+            <p className="text-gray-500 mb-4">
+              Your role does not include access to {getSectionLabel(activeSection)}.
+            </p>
+            <button
+              onClick={() => adminAccess && handleSectionChange(getFirstAccessibleSection(adminAccess))}
+              className="px-4 py-2 bg-[#309605] text-white rounded-lg hover:bg-[#3ba208] transition-colors text-sm font-medium"
+            >
+              Go to Available Section
+            </button>
+          </div>
+        );
+      }
+
       switch (activeSection) {
         case 'users': return <UserManagementSection />;
         case 'content': return <ContentManagementSection />;
