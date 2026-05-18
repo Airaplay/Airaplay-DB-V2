@@ -3,11 +3,13 @@ import {
   X, Coins, Check, AlertCircle, Sparkles, Zap, TrendingUp,
   ChevronDown, Grid, Layers, ChevronRight, Loader2, CheckCircle,
 } from 'lucide-react';
-import { supabase, formatTreats } from '../lib/supabase';
+import { Capacitor } from '@capacitor/core';
+import { admobService } from '../lib/admobService';
+import { supabase, formatTreats, getMyAgeInfo } from '../lib/supabase';
 import { PaymentChannelSelector } from './PaymentChannelSelector';
-import { getUserCurrency, CurrencyDetectionResult, Currency, convertAmount, convertAmountWithRoundingInfo, formatCurrencyAmount } from '../lib/currencyDetection';
-import { CACHE_KEYS, getCachedData } from '../lib/treatCache';
+import { getUserCurrency, CurrencyDetectionResult, Currency, convertAmount, formatCurrencyAmount } from '../lib/currencyDetection';
 import { toUserFacingPaymentError, TRY_AGAIN_LABEL } from '../lib/criticalErrorMessages';
+import { MODAL_HEADER_SAFE_AREA_STYLE } from '../lib/modalHeaderSafeArea';
 
 interface PurchaseTreatsModalProps {
   onClose: () => void;
@@ -23,15 +25,12 @@ interface TreatPackage {
   bestValue?: boolean;
 }
 
-const inputCls = 'w-full h-11 bg-white/[0.04] border border-white/[0.07] rounded-2xl px-4 text-white/90 text-sm outline-none focus:border-[#00ad74]/40 focus:bg-white/[0.06] transition-all font-[\'Inter\',sans-serif] [color-scheme:dark]';
-
 export const PurchaseTreatsModal: React.FC<PurchaseTreatsModalProps> = ({ onClose, onSuccess }) => {
   const [selectedPackage, setSelectedPackage] = useState<TreatPackage | null>(null);
   const [currentCardIndex, setCurrentCardIndex] = useState(0);
   const [showPaymentSelector, setShowPaymentSelector] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [success, setSuccess] = useState<string | null>(null);
-  const [treatSettings, setTreatSettings] = useState<any>(null);
   const [treatPackages, setTreatPackages] = useState<TreatPackage[]>([]);
   const [isLoadingPackages, setIsLoadingPackages] = useState(true);
   const [userEmail, setUserEmail] = useState<string>('');
@@ -41,23 +40,90 @@ export const PurchaseTreatsModal: React.FC<PurchaseTreatsModalProps> = ({ onClos
   const [isDragging, setIsDragging] = useState(false);
   const [viewMode, setViewMode] = useState<'carousel' | 'grid'>('carousel');
   const [showAboutTreats, setShowAboutTreats] = useState(false);
-  const [roundingApplied, setRoundingApplied] = useState(false);
-  const [originalAmount, setOriginalAmount] = useState<number | null>(null);
+  const [isAdultForPurchases, setIsAdultForPurchases] = useState<boolean | null>(null);
 
   const carouselRef = useRef<HTMLDivElement>(null);
   const modalRef = useRef<HTMLDivElement>(null);
+  /**
+   * Clearance reserved for adaptive native banner + safe-area. While this modal is open we call
+   * repositionActiveBottomBanner(0): body.modal-open hides the HTML tab bar but AdMob was still offset
+   * by {@link MAIN_TAB_NAV_MARGIN_DP} dp — that leftover strip reads as blank space under the ad.
+   */
+  const MAIN_TAB_NAV_MARGIN_DP = 72;
+  const MAIN_MINI_MARGIN_DP = 70;
+
+  const [nativeBottomStackInner, setNativeBottomStackInner] = useState('0px');
+
+  useEffect(() => {
+    if (!Capacitor.isNativePlatform()) {
+      setNativeBottomStackInner('0px');
+      return;
+    }
+    const read = () => {
+      const bannerActive =
+        document.body.classList.contains('ad-banner-active') ||
+        document.body.classList.contains('ad-banner-above-mini');
+      if (!bannerActive) {
+        setNativeBottomStackInner('0px');
+        return;
+      }
+      // Banner pinned flush to bottom native layer (modal-open); no duplicated tab-bar inset in CSS.
+      setNativeBottomStackInner('(var(--aira-banner-height, 72px))');
+    };
+    read();
+    const observer = new MutationObserver(read);
+    observer.observe(document.body, { attributes: true, attributeFilter: ['class'] });
+    return () => observer.disconnect();
+  }, []);
+
+  /** Scroll padding: native stack + step-specific chrome (package step reserves fixed footer ~6rem) */
+  const scrollPaddingBottomCss = Capacitor.isNativePlatform()
+    ? showPaymentSelector
+      ? `calc(env(safe-area-inset-bottom, 0px) + ${nativeBottomStackInner} + 2rem)`
+      : `calc(env(safe-area-inset-bottom, 0px) + ${nativeBottomStackInner} + 6.125rem)`
+    : showPaymentSelector
+      ? 'max(8rem, env(safe-area-inset-bottom, 0px))'
+      : '9rem';
+
+  const bottomBarBottomCss = Capacitor.isNativePlatform()
+    ? `calc(env(safe-area-inset-bottom, 0px) + ${nativeBottomStackInner})`
+    : 'env(safe-area-inset-bottom, 0px)';
+
   const touchStartX = useRef<number>(0);
   const touchEndX = useRef<number>(0);
   const touchStartY = useRef<number>(0);
   const touchEndY = useRef<number>(0);
 
   useEffect(() => {
-    loadTreatSettings();
     loadTreatPackages();
     loadUserEmail();
     detectUserCurrency();
+    verifyAgeGate();
     document.body.classList.add('modal-open');
-    return () => { document.body.classList.remove('modal-open'); };
+    const repinTimers: number[] = [];
+
+    if (Capacitor.isNativePlatform()) {
+      // Force banner to bottom immediately, then re-assert quickly to beat route/ad handoff races.
+      const repinDelays = [0, 120, 450, 1200];
+      repinDelays.forEach((delayMs) => {
+        const timer = window.setTimeout(() => {
+        void admobService.repositionActiveBottomBanner(0);
+        }, delayMs);
+        repinTimers.push(timer);
+      });
+    }
+
+    return () => {
+      document.body.classList.remove('modal-open');
+      repinTimers.forEach((timer) => window.clearTimeout(timer));
+      if (Capacitor.isNativePlatform()) {
+        window.setTimeout(() => {
+          const mini = document.body.classList.contains('mini-player-active');
+          const margin = MAIN_TAB_NAV_MARGIN_DP + (mini ? MAIN_MINI_MARGIN_DP : 0);
+          void admobService.repositionActiveBottomBanner(margin);
+        }, 0);
+      }
+    };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
@@ -67,19 +133,6 @@ export const PurchaseTreatsModal: React.FC<PurchaseTreatsModalProps> = ({ onClos
       setCurrentCardIndex(0);
     }
   }, [treatPackages]);
-
-  useEffect(() => {
-    if (selectedPackage && currencyData) {
-      const roundingInfo = getConvertedPriceWithRoundingInfo(selectedPackage.price);
-      if (roundingInfo.wasRounded) {
-        setRoundingApplied(true);
-        setOriginalAmount(roundingInfo.originalAmount || null);
-      } else {
-        setRoundingApplied(false);
-        setOriginalAmount(null);
-      }
-    }
-  }, [selectedPackage, currencyData]);
 
   const loadUserEmail = async () => {
     try {
@@ -91,17 +144,8 @@ export const PurchaseTreatsModal: React.FC<PurchaseTreatsModalProps> = ({ onClos
   const detectUserCurrency = async () => {
     try {
       setIsDetectingCurrency(true);
-      const { data: { user } } = await supabase.auth.getUser();
-      if (user) {
-        const cached = await getCachedData(
-          CACHE_KEYS.CURRENCY_DATA(user.id),
-          () => getUserCurrency(),
-          30 * 60 * 1000
-        );
-        setCurrencyData(cached);
-      } else {
-        setCurrencyData(await getUserCurrency());
-      }
+      // Purchase flow should always use fresh currency context.
+      setCurrencyData(await getUserCurrency());
     } catch { /* ignore */ } finally {
       setIsDetectingCurrency(false);
     }
@@ -111,40 +155,16 @@ export const PurchaseTreatsModal: React.FC<PurchaseTreatsModalProps> = ({ onClos
     if (currencyData) setCurrencyData({ ...currencyData, currency: newCurrency, detected: false });
   };
 
-  const loadTreatSettings = async () => {
-    try {
-      const data = await getCachedData(
-        CACHE_KEYS.WITHDRAWAL_SETTINGS,
-        async () => {
-          const { data, error } = await supabase
-            .from('treat_withdrawal_settings')
-            .select('*')
-            .single();
-          if (error && error.code !== 'PGRST116') throw error;
-          return data;
-        },
-        10 * 60 * 1000
-      );
-      setTreatSettings(data);
-    } catch { /* ignore */ }
-  };
-
   const loadTreatPackages = async () => {
     try {
       setIsLoadingPackages(true);
-      const data = await getCachedData(
-        CACHE_KEYS.TREAT_PACKAGES,
-        async () => {
-          const { data, error } = await supabase
-            .from('treat_packages')
-            .select('*')
-            .eq('is_active', true)
-            .order('display_order', { ascending: true });
-          if (error) throw error;
-          return data;
-        },
-        5 * 60 * 1000
-      );
+      // Do not cache treat purchase screen package data.
+      const { data, error } = await supabase
+        .from('treat_packages')
+        .select('*')
+        .eq('is_active', true)
+        .order('display_order', { ascending: true });
+      if (error) throw error;
       if (data && data.length > 0) {
         const packages: TreatPackage[] = data.map((pkg: any) => ({
           id: pkg.id,
@@ -162,7 +182,7 @@ export const PurchaseTreatsModal: React.FC<PurchaseTreatsModalProps> = ({ onClos
       } else {
         setError('No treat packages available at this time');
       }
-    } catch (err: unknown) {
+    } catch (err) {
       setError(toUserFacingPaymentError(err, 'load'));
     } finally {
       setIsLoadingPackages(false);
@@ -170,8 +190,22 @@ export const PurchaseTreatsModal: React.FC<PurchaseTreatsModalProps> = ({ onClos
   };
 
   const handleContinueToPay = () => {
+    if (isAdultForPurchases === false) {
+      setError('You must be 18 or older to purchase Treats.');
+      return;
+    }
     if (!selectedPackage) { setError('Please select a treat package'); return; }
     setShowPaymentSelector(true);
+  };
+
+  const verifyAgeGate = async () => {
+    try {
+      const age = await getMyAgeInfo();
+      setIsAdultForPurchases(age.is_adult === true);
+    } catch {
+      // If age cannot be verified, fail closed for purchases.
+      setIsAdultForPurchases(false);
+    }
   };
 
   const handlePaymentSuccess = async (paymentData: any) => {
@@ -200,10 +234,6 @@ export const PurchaseTreatsModal: React.FC<PurchaseTreatsModalProps> = ({ onClos
   const getTotalTreats = (pkg: TreatPackage) => pkg.treats + pkg.bonus;
   const getValuePerDollar = (pkg: TreatPackage) => getTotalTreats(pkg) / pkg.price;
   const getConvertedPrice = (priceUSD: number) => currencyData ? convertAmount(priceUSD, currencyData.currency) : priceUSD;
-  const getConvertedPriceWithRoundingInfo = (priceUSD: number) => {
-    if (!currencyData) return { amount: priceUSD, wasRounded: false };
-    return convertAmountWithRoundingInfo(priceUSD, currencyData.currency);
-  };
 
   const handleTouchStart = (e: React.TouchEvent) => {
     touchStartX.current = e.touches[0].clientX;
@@ -286,7 +316,10 @@ export const PurchaseTreatsModal: React.FC<PurchaseTreatsModalProps> = ({ onClos
       className="fixed inset-0 bg-[#0a0a0a] z-[110] flex flex-col overflow-hidden"
     >
       {/* ── Header ── */}
-      <header className="px-5 pt-6 pb-4 bg-[#0a0a0a]/90 backdrop-blur-xl border-b border-white/[0.04] flex-shrink-0">
+      <header
+        className="bg-[#0a0a0a]/90 backdrop-blur-xl border-b border-white/[0.04] flex-shrink-0"
+        style={MODAL_HEADER_SAFE_AREA_STYLE}
+      >
         <div className="flex items-start justify-between">
           <div>
             <h1 className="font-['Inter',sans-serif] font-black text-white text-xl tracking-tight leading-tight">
@@ -306,7 +339,10 @@ export const PurchaseTreatsModal: React.FC<PurchaseTreatsModalProps> = ({ onClos
       </header>
 
       {/* ── Scrollable Content ── */}
-      <div className="flex-1 overflow-y-auto px-5 pb-36">
+      <div
+        className="flex-1 overflow-y-auto px-5"
+        style={{ paddingBottom: scrollPaddingBottomCss }}
+      >
 
         {/* ── Loading Skeleton ── */}
         {isLoading && (
@@ -327,11 +363,12 @@ export const PurchaseTreatsModal: React.FC<PurchaseTreatsModalProps> = ({ onClos
         {showPaymentSelector && selectedPackage && currencyData && (
           <div className="pt-5">
             {/* Selected package summary */}
-            <div className="rounded-3xl border border-yellow-500/15 bg-yellow-500/[0.04] p-4 mb-5">
-              <p className="text-[10px] font-bold uppercase tracking-widest text-white/30 font-['Inter',sans-serif] mb-2">
+            <div className="relative rounded-3xl overflow-hidden border border-white/[0.07] bg-white/[0.03] p-5 mb-5">
+              <div className="absolute top-0 right-0 w-32 h-32 bg-[#00ad74]/8 rounded-full blur-3xl -translate-y-1/3 translate-x-1/3 pointer-events-none" />
+              <p className="text-[10px] font-bold uppercase tracking-widest text-white/30 font-['Inter',sans-serif] mb-2 relative">
                 Selected Package
               </p>
-              <div className="flex items-end justify-between">
+              <div className="flex items-end justify-between relative">
                 <div>
                   <p className="font-black text-white text-3xl tabular-nums font-['Inter',sans-serif] leading-none">
                     {formatTreats(selectedPackage.treats)}
@@ -348,6 +385,7 @@ export const PurchaseTreatsModal: React.FC<PurchaseTreatsModalProps> = ({ onClos
             </div>
             <PaymentChannelSelector
               amount={getConvertedPrice(selectedPackage.price)}
+              amountUsd={selectedPackage.price}
               packageId={selectedPackage.id}
               userEmail={userEmail}
               currencyData={currencyData}
@@ -554,18 +592,6 @@ export const PurchaseTreatsModal: React.FC<PurchaseTreatsModalProps> = ({ onClos
               </div>
             )}
 
-            {/* Rounding notice */}
-            {roundingApplied && originalAmount && (
-              <div className="flex items-start gap-3 p-4 rounded-2xl bg-blue-500/[0.06] border border-blue-500/15">
-                <AlertCircle className="w-4 h-4 text-blue-400 flex-shrink-0 mt-0.5" />
-                <div>
-                  <p className="text-blue-400 text-xs font-bold font-['Inter',sans-serif] mb-0.5">Minimum Purchase Applied</p>
-                  <p className="text-white/40 text-xs leading-relaxed font-['Inter',sans-serif]">
-                    Converted price was {currencyData.currency.symbol}{originalAmount.toFixed(2)}, rounded up to {currencyData.currency.symbol}1.00 minimum for {currencyData.currency.code} purchases.
-                  </p>
-                </div>
-              </div>
-            )}
 
             {/* Error / Success banners */}
             {error && (
@@ -577,6 +603,14 @@ export const PurchaseTreatsModal: React.FC<PurchaseTreatsModalProps> = ({ onClos
                 <button type="button" onClick={() => setError(null)} className="sm:ml-auto px-4 py-2 rounded-xl border border-red-400/40 text-red-400 text-sm font-medium hover:bg-red-500/10 transition-colors whitespace-nowrap">
                   {TRY_AGAIN_LABEL}
                 </button>
+              </div>
+            )}
+            {isAdultForPurchases === false && (
+              <div className="flex items-center gap-3 p-4 rounded-2xl bg-amber-500/[0.08] border border-amber-500/20">
+                <AlertCircle className="w-4 h-4 text-amber-300 flex-shrink-0" />
+                <p className="text-amber-200 text-sm font-medium font-['Inter',sans-serif]">
+                  Purchases are only available to users aged 18+.
+                </p>
               </div>
             )}
             {success && (
@@ -601,10 +635,9 @@ export const PurchaseTreatsModal: React.FC<PurchaseTreatsModalProps> = ({ onClos
               {showAboutTreats && (
                 <div className="px-4 pb-4 space-y-2.5">
                   {[
-                    'Use treats to tip your favorite artists',
+                    'Use treats to tip your favorite artists and other users',
                     'Promote your content to reach more listeners',
-                    'Withdraw treats back to USD (minimum 10 treats)',
-                    `1 Treat = $${treatSettings?.treat_to_usd_rate || 1} USD`,
+                    'Use Treat to unlock offline play',
                   ].map((text, i) => (
                     <div key={i} className="flex items-start gap-2.5">
                       <div className="w-1 h-1 rounded-full bg-yellow-400 mt-1.5 flex-shrink-0" />
@@ -620,7 +653,10 @@ export const PurchaseTreatsModal: React.FC<PurchaseTreatsModalProps> = ({ onClos
 
       {/* ── Bottom Action Bar ── */}
       {!showPaymentSelector && !isLoading && currencyData && (
-        <div className="fixed bottom-0 left-0 right-0 z-20 px-5 pb-[calc(env(safe-area-inset-bottom,0px)+1.25rem)] pt-4 bg-[#0a0a0a]/95 backdrop-blur-xl border-t border-white/[0.04]">
+        <div
+          className="fixed left-0 right-0 z-20 px-5 pt-3 pb-[max(0.75rem, env(safe-area-inset-bottom, 0px))] bg-[#0a0a0a]/95 backdrop-blur-xl border-t border-white/[0.04]"
+          style={{ bottom: bottomBarBottomCss }}
+        >
           <div className="flex gap-3">
             <button
               onClick={onClose}
@@ -630,8 +666,8 @@ export const PurchaseTreatsModal: React.FC<PurchaseTreatsModalProps> = ({ onClos
             </button>
             <button
               onClick={handleContinueToPay}
-              disabled={!selectedPackage}
-              className="flex-1 py-4 rounded-2xl bg-yellow-500 text-black text-sm font-black font-['Inter',sans-serif] active:scale-[0.98] transition-all disabled:opacity-40 disabled:cursor-not-allowed flex items-center justify-center gap-2"
+              disabled={!selectedPackage || isAdultForPurchases === false}
+              className="flex-1 py-4 rounded-2xl bg-white text-black text-sm font-black font-['Inter',sans-serif] active:scale-[0.98] transition-all disabled:opacity-40 disabled:cursor-not-allowed flex items-center justify-center gap-2"
             >
               {selectedPackage ? (
                 <>

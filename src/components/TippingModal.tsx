@@ -4,6 +4,7 @@ import { Avatar, AvatarFallback, AvatarImage } from './ui/avatar';
 import { supabase, searchUsersByUsername } from '../lib/supabase';
 import { Skeleton } from './ui/skeleton';
 import { treatCache, CACHE_KEYS, getCachedData } from '../lib/treatCache';
+import { getTreatWalletSpendable } from '../lib/treatWalletSpendable';
 import { CustomConfirmDialog } from './CustomConfirmDialog';
 
 interface TippingModalProps {
@@ -18,6 +19,7 @@ interface TippingModalProps {
 
 interface TreatWallet {
   balance: number;
+  promo_balance: number;
 }
 
 interface TipRecipient {
@@ -87,12 +89,19 @@ export const TippingModal: React.FC<TippingModalProps> = ({
 
       const { data: walletData, error: walletError } = await supabase
         .from('treat_wallets')
-        .select('balance')
+        .select('balance, promo_balance')
         .eq('user_id', user.id)
         .maybeSingle();
 
       if (walletError) throw walletError;
-      setWallet(walletData || { balance: 0 });
+      setWallet(
+        walletData
+          ? {
+              balance: Number(walletData.balance) || 0,
+              promo_balance: Number((walletData as { promo_balance?: unknown }).promo_balance) || 0,
+            }
+          : { balance: 0, promo_balance: 0 }
+      );
 
       if (recipientId) {
         const { data: recipientData, error: recipientError } = await supabase
@@ -196,15 +205,17 @@ export const TippingModal: React.FC<TippingModalProps> = ({
     if (value === '' || /^\d+$/.test(value)) setTipAmount(value);
   };
 
+  const spendable = wallet ? getTreatWalletSpendable(wallet) : 0;
+
   const calculateRemainingBalance = (): number => {
-    if (!wallet || !tipAmount) return wallet?.balance || 0;
-    return Math.max(0, wallet.balance - (parseInt(tipAmount) || 0));
+    if (!wallet || !tipAmount) return spendable;
+    return Math.max(0, spendable - (parseInt(tipAmount) || 0));
   };
 
   const handleTipClick = () => {
     const amount = parseInt(tipAmount);
     if (!amount || amount <= 0) { setError('Please enter a valid tip amount'); return; }
-    if (!wallet || amount > wallet.balance) { setError('Insufficient treats balance'); return; }
+    if (!wallet || amount > spendable) { setError('Insufficient treats balance'); return; }
     if (!selectedRecipient) { setError('Please select a recipient'); return; }
     setShowConfirmTip(true);
   };
@@ -214,7 +225,7 @@ export const TippingModal: React.FC<TippingModalProps> = ({
     if (!selectedRecipient) { setError('Please select a recipient'); return; }
     const amount = parseInt(tipAmount);
     if (!amount || amount <= 0) { setError('Please enter a valid tip amount'); return; }
-    if (!wallet || amount > wallet.balance) { setError('Insufficient treats balance'); return; }
+    if (!wallet || amount > spendable) { setError('Insufficient treats balance'); return; }
 
     setIsSubmitting(true);
     setError(null);
@@ -266,7 +277,7 @@ export const TippingModal: React.FC<TippingModalProps> = ({
   };
 
   const amt = parseInt(tipAmount) || 0;
-  const canSend = amt > 0 && !!wallet && amt <= wallet.balance && !!selectedRecipient && !isSubmitting;
+  const canSend = amt > 0 && !!wallet && amt <= spendable && !!selectedRecipient && !isSubmitting;
 
   return (
     <div className="fixed inset-0 bg-[#0a0a0a] z-[110] overflow-y-auto">
@@ -339,7 +350,7 @@ export const TippingModal: React.FC<TippingModalProps> = ({
                         className="font-['Inter',sans-serif] font-black text-yellow-400 leading-none tabular-nums"
                         style={{ fontSize: 'clamp(1.6rem, 8vw, 2.4rem)' }}
                       >
-                        {fmtShort(wallet.balance)}
+                        {fmtShort(spendable)}
                       </p>
                     </div>
                     <p className="text-[10px] font-bold uppercase tracking-widest text-yellow-500/40">Treats</p>
@@ -483,7 +494,7 @@ export const TippingModal: React.FC<TippingModalProps> = ({
                         <button
                           key={a}
                           onClick={() => setTipAmount(String(a))}
-                          disabled={!!wallet && a > wallet.balance}
+                          disabled={!!wallet && a > spendable}
                           className={`py-3.5 rounded-2xl font-black text-sm transition-all active:scale-[0.96] font-['Inter',sans-serif] ${
                             tipAmount === String(a)
                               ? 'bg-yellow-400 text-black'
@@ -508,12 +519,12 @@ export const TippingModal: React.FC<TippingModalProps> = ({
 
                     {tipAmount && wallet && (
                       <div className={`px-4 py-3 rounded-2xl text-xs font-semibold ${
-                        parseInt(tipAmount) > wallet.balance
+                        parseInt(tipAmount) > spendable
                           ? 'bg-red-500/10 border border-red-500/20 text-red-400'
                           : 'bg-[#00ad74]/10 border border-[#00ad74]/20 text-[#00ad74]'
                       }`}>
-                        {parseInt(tipAmount) > wallet.balance
-                          ? `Insufficient balance — you have ${wallet.balance.toLocaleString()} treats`
+                        {parseInt(tipAmount) > spendable
+                          ? `Insufficient balance — you have ${spendable.toLocaleString()} treats`
                           : `Remaining after tip: ${calculateRemainingBalance().toLocaleString()} treats`
                         }
                       </div>

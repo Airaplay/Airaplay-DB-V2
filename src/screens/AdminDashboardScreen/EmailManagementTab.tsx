@@ -25,6 +25,7 @@ import {
   ALLOWED_IMAGE_EXTENSIONS,
 } from '../../lib/fileSecurity';
 import { enforceBlackEmailHeaderBackground } from '../../lib/emailHeaderStyle';
+import { parseMarketingEmailList } from '../../lib/parseMarketingEmailList';
 
 interface EmailTemplate {
   id: string;
@@ -128,10 +129,14 @@ export const EmailManagementTab = (): JSX.Element => {
     title: '',
     html: '<p></p>',
     unsubscribe_url: 'https://airaplay.com/unsubscribe',
-    audience: 'all' as 'all' | 'listener' | 'creator',
+    audience: 'all' as 'all' | 'listener' | 'creator' | 'custom',
+    customEmailsRaw: '',
   });
   const [isQueueingNewsletter, setIsQueueingNewsletter] = useState(false);
-  const [newsletterQueueResult, setNewsletterQueueResult] = useState<{ queued: number } | null>(null);
+  const [newsletterQueueResult, setNewsletterQueueResult] = useState<{
+    queued: number;
+    skippedInvalid?: number;
+  } | null>(null);
   const [newsletterComposeTab, setNewsletterComposeTab] = useState<'compose' | 'preview'>('compose');
 
   useEffect(() => {
@@ -387,13 +392,15 @@ export const EmailManagementTab = (): JSX.Element => {
     setIsNewsletterComposerOpen(true);
   };
 
+  const parsedCustomEmails = parseMarketingEmailList(newsletterDraft.customEmailsRaw);
+
   const handleQueueNewsletterBroadcast = async () => {
     setError(null);
     setNewsletterQueueResult(null);
 
     const gate = await verifyAdminRole();
     if (!gate.isManager) {
-      setError(gate.error || 'Only admins or managers can queue newsletters.');
+      setError(gate.error || 'Only admins or managers can queue marketing emails.');
       return;
     }
 
@@ -402,24 +409,49 @@ export const EmailManagementTab = (): JSX.Element => {
       return;
     }
     if (!newsletterDraft.html.trim() || newsletterDraft.html.trim() === '<p></p>') {
-      setError('Add newsletter body content (HTML).');
+      setError('Add email body content (HTML).');
       return;
+    }
+
+    if (newsletterDraft.audience === 'custom') {
+      if (parsedCustomEmails.valid.length === 0) {
+        setError('Paste at least one valid email address (one per line or comma-separated).');
+        return;
+      }
+      if (parsedCustomEmails.valid.length > 5000) {
+        setError('Maximum 5,000 addresses per send. Split into multiple batches.');
+        return;
+      }
     }
 
     setIsQueueingNewsletter(true);
     try {
-      const { data, error: rpcError } = await supabase.rpc('admin_queue_newsletter_broadcast', {
-        p_newsletter_title: newsletterDraft.title.trim(),
-        p_newsletter_content: newsletterDraft.html,
-        p_unsubscribe_url: newsletterDraft.unsubscribe_url.trim() || null,
-        p_audience: newsletterDraft.audience,
-      });
+      if (newsletterDraft.audience === 'custom') {
+        const { data, error: rpcError } = await supabase.rpc('admin_queue_marketing_email_list', {
+          p_emails: parsedCustomEmails.valid,
+          p_newsletter_title: newsletterDraft.title.trim(),
+          p_newsletter_content: newsletterDraft.html,
+          p_unsubscribe_url: newsletterDraft.unsubscribe_url.trim() || null,
+        });
 
-      if (rpcError) throw rpcError;
-      const queued = (data as { queued?: number })?.queued ?? 0;
-      setNewsletterQueueResult({ queued });
+        if (rpcError) throw rpcError;
+        const queued = (data as { queued?: number })?.queued ?? 0;
+        const skipped = (data as { skipped_invalid?: number })?.skipped_invalid ?? 0;
+        setNewsletterQueueResult({ queued, skippedInvalid: skipped });
+      } else {
+        const { data, error: rpcError } = await supabase.rpc('admin_queue_newsletter_broadcast', {
+          p_newsletter_title: newsletterDraft.title.trim(),
+          p_newsletter_content: newsletterDraft.html,
+          p_unsubscribe_url: newsletterDraft.unsubscribe_url.trim() || null,
+          p_audience: newsletterDraft.audience,
+        });
+
+        if (rpcError) throw rpcError;
+        const queued = (data as { queued?: number })?.queued ?? 0;
+        setNewsletterQueueResult({ queued });
+      }
     } catch (err: unknown) {
-      setError(err instanceof Error ? err.message : 'Failed to queue newsletter');
+      setError(err instanceof Error ? err.message : 'Failed to queue marketing emails');
     } finally {
       setIsQueueingNewsletter(false);
     }
@@ -712,10 +744,10 @@ export const EmailManagementTab = (): JSX.Element => {
               <button
                 onClick={handleOpenNewsletterComposer}
                 className="px-4 py-2 bg-indigo-600 hover:bg-indigo-700 text-white rounded-lg flex items-center gap-2"
-                title="Write issue content and queue newsletter sends"
+                title="Send marketing emails via ZeptoMail (app users or custom list)"
               >
                 <Newspaper className="w-4 h-4" />
-                Compose newsletter
+                Marketing broadcast
               </button>
               <button
                 onClick={() => setIsTestEmailOpen(true)}
@@ -1314,7 +1346,7 @@ export const EmailManagementTab = (): JSX.Element => {
           >
             <header className="flex shrink-0 items-center justify-between border-b border-[#e8eaed] bg-[#f6f8fc] px-3 py-2.5 sm:px-4">
               <h2 id="newsletter-compose-title" className="text-[15px] font-medium text-[#202124]">
-                New message
+                Marketing broadcast
               </h2>
               <button
                 type="button"
@@ -1366,17 +1398,71 @@ export const EmailManagementTab = (): JSX.Element => {
                       onChange={(e) =>
                         setNewsletterDraft((d) => ({
                           ...d,
-                          audience: e.target.value as 'all' | 'listener' | 'creator',
+                          audience: e.target.value as 'all' | 'listener' | 'creator' | 'custom',
                         }))
                       }
                       disabled={isQueueingNewsletter}
                       className="min-w-0 flex-1 cursor-pointer border-0 bg-transparent py-3 pr-3 text-[15px] text-[#202124] focus:outline-none focus:ring-0 disabled:opacity-50"
                     >
-                      <option value="all">All users with email</option>
-                      <option value="listener">Listeners</option>
-                      <option value="creator">Creators</option>
+                      <option value="all">All app users with email</option>
+                      <option value="listener">Listeners only</option>
+                      <option value="creator">Creators only</option>
+                      <option value="custom">Custom email list (paste or import)</option>
                     </select>
                   </div>
+
+                  {newsletterDraft.audience === 'custom' && (
+                    <div className="border-b border-[#e8eaed] px-3 py-3 sm:px-4">
+                      <label htmlFor="marketing-email-list" className="mb-1.5 block text-xs font-medium text-[#5f6368]">
+                        Email addresses (one per line, or comma / semicolon separated)
+                      </label>
+                      <textarea
+                        id="marketing-email-list"
+                        value={newsletterDraft.customEmailsRaw}
+                        onChange={(e) =>
+                          setNewsletterDraft((d) => ({ ...d, customEmailsRaw: e.target.value }))
+                        }
+                        disabled={isQueueingNewsletter}
+                        rows={8}
+                        spellCheck={false}
+                        className="w-full resize-y rounded border border-[#dadce0] bg-white px-3 py-2 font-mono text-sm text-[#202124] focus:border-[#1a73e8] focus:outline-none focus:ring-1 focus:ring-[#1a73e8] disabled:opacity-50"
+                        placeholder={'user1@example.com\nuser2@example.com'}
+                      />
+                      <div className="mt-2 flex flex-wrap items-center gap-3 text-xs text-[#5f6368]">
+                        <span>
+                          {parsedCustomEmails.valid.length} valid
+                          {parsedCustomEmails.invalid.length > 0
+                            ? ` · ${parsedCustomEmails.invalid.length} invalid (skipped when queuing)`
+                            : ''}
+                        </span>
+                        <label className="cursor-pointer text-[#1a73e8] hover:underline">
+                          Import .txt / .csv
+                          <input
+                            type="file"
+                            accept=".txt,.csv,text/plain,text/csv"
+                            className="sr-only"
+                            disabled={isQueueingNewsletter}
+                            onChange={(e) => {
+                              const file = e.target.files?.[0];
+                              if (!file) return;
+                              const reader = new FileReader();
+                              reader.onload = () => {
+                                const text = typeof reader.result === 'string' ? reader.result : '';
+                                setNewsletterDraft((d) => ({
+                                  ...d,
+                                  customEmailsRaw: d.customEmailsRaw
+                                    ? `${d.customEmailsRaw}\n${text}`
+                                    : text,
+                                }));
+                              };
+                              reader.readAsText(file);
+                              e.target.value = '';
+                            }}
+                          />
+                        </label>
+                      </div>
+                    </div>
+                  )}
 
                   <div className="flex min-h-[48px] items-stretch border-b border-[#e8eaed]">
                     <span className="flex w-14 shrink-0 items-center pl-3 text-right text-[13px] text-[#5f6368] sm:w-[72px] sm:pl-4">
@@ -1414,7 +1500,7 @@ export const EmailManagementTab = (): JSX.Element => {
                   </details>
 
                   <p className="border-b border-[#e8eaed] bg-[#fafafa] px-3 py-2 text-xs leading-relaxed text-[#5f6368] sm:px-4">
-                    Recipients each get this message with their own name and unsubscribe link. Queue adds rows to the email queue; use Run email queue to deliver.
+                    Uses your ZeptoMail config and the Weekly Newsletter template. Queue adds one send per recipient; click Run email queue (20 per run) until the batch is delivered. Max 5,000 addresses per queue.
                   </p>
 
                   <div className="flex min-h-[min(52vh,420px)] flex-1 flex-col px-2 pb-2 pt-2 sm:px-3">
@@ -1449,7 +1535,11 @@ export const EmailManagementTab = (): JSX.Element => {
               {newsletterQueueResult && (
                 <div className="mx-3 mb-3 rounded border border-green-200 bg-green-50 px-3 py-2.5 sm:mx-4">
                   <p className="text-sm text-green-800">
-                    Queued {newsletterQueueResult.queued} message(s). Open Email Logs and use Run email queue to send.
+                    Queued {newsletterQueueResult.queued} message(s).
+                    {newsletterQueueResult.skippedInvalid != null && newsletterQueueResult.skippedInvalid > 0
+                      ? ` Skipped ${newsletterQueueResult.skippedInvalid} invalid address(es).`
+                      : ''}{' '}
+                    Use Run email queue to send via ZeptoMail (repeat until the queue is empty).
                   </p>
                 </div>
               )}

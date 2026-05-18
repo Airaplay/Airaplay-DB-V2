@@ -2,7 +2,7 @@ import { formatDistanceToNowStrict } from 'date-fns';
 import { useState, useEffect, useRef } from 'react';
 import {
   ArrowLeft, Coins, Gift, Clock, BarChart2,
-  ShoppingCart, TrendingUp, ArrowUpRight, ArrowDownLeft,
+  ShoppingCart, ArrowUpRight, ArrowDownLeft,
   Megaphone, ChevronRight, RefreshCw, Zap,
 } from 'lucide-react';
 import { PurchaseTreatsModal } from '../../components/PurchaseStreatsModal';
@@ -12,8 +12,9 @@ import { TreatWithdrawalModal } from '../../components/TreatWithdrawalModal';
 import { AuthModal } from '../../components/AuthModal';
 import { Spinner } from '../../components/Spinner';
 import { supabase } from '../../lib/supabase';
-import { useNavigate } from 'react-router-dom';
+import { useNavigate, useLocation } from 'react-router-dom';
 import { CACHE_KEYS, getCachedData, treatCache } from '../../lib/treatCache';
+import { getTreatWalletSpendable } from '../../lib/treatWalletSpendable';
 
 interface TreatScreenProps {
   onFormVisibilityChange?: (isVisible: boolean) => void;
@@ -21,7 +22,10 @@ interface TreatScreenProps {
 
 interface TreatWallet {
   balance: number;
+  promo_balance: number;
   total_purchased: number;
+  /** Lifetime treats bought (sum of completed purchase transactions; avoids inflated total_purchased). */
+  lifetime_purchased: number;
   total_spent: number;
   total_earned: number;
   total_withdrawn: number;
@@ -29,18 +33,17 @@ interface TreatWallet {
   purchased_balance: number;
 }
 
-interface ActivePromotion {
-  id: string;
-  promotion_type: string;
-  target_title: string;
-  treats_spent: number;
-  duration_hours: number;
-  target_impressions: number;
-  actual_impressions: number;
-  status: string;
-  started_at: string;
-  ends_at: string;
-}
+/** Source of truth for "Purchased" — wallet.total_purchased can be 2× after legacy double wallet updates. */
+const sumCompletedPurchaseTreats = async (userId: string): Promise<number> => {
+  const { data, error } = await supabase
+    .from('treat_transactions')
+    .select('amount')
+    .eq('user_id', userId)
+    .eq('transaction_type', 'purchase')
+    .eq('status', 'completed');
+  if (error) throw error;
+  return (data || []).reduce((sum, row) => sum + (Number(row.amount) || 0), 0);
+};
 
 interface RecentTip {
   id: string;
@@ -62,6 +65,7 @@ const fmtShort = (n: number): string => {
 
 export const TreatScreen = ({ onFormVisibilityChange }: TreatScreenProps): JSX.Element => {
   const navigate = useNavigate();
+  const location = useLocation();
   const [isAuthenticated, setIsAuthenticated] = useState<boolean | null>(null);
   const [isLoading, setIsLoading] = useState(true);
   const [wallet, setWallet] = useState<TreatWallet | null>(null);
@@ -71,7 +75,6 @@ export const TreatScreen = ({ onFormVisibilityChange }: TreatScreenProps): JSX.E
   const [showPromotionModal, setShowPromotionModal] = useState(false);
   const [showWithdrawalModal, setShowWithdrawalModal] = useState(false);
   const [showAuthModal, setShowAuthModal] = useState(false);
-  const [activePromotions, setActivePromotions] = useState<ActivePromotion[]>([]);
   const [recentTips, setRecentTips] = useState<RecentTip[]>([]);
   const [isRefreshing, setIsRefreshing] = useState(false);
   const touchStartY = useRef<number>(0);
@@ -84,6 +87,14 @@ export const TreatScreen = ({ onFormVisibilityChange }: TreatScreenProps): JSX.E
     onFormVisibilityChange?.(isAnyModalOpen);
   }, [showPurchaseModal, showTippingModal, showPromotionModal, showWithdrawalModal, showAuthModal, onFormVisibilityChange]);
 
+  /** Open purchase flow when user arrives from TippingModal with 0 balance */
+  useEffect(() => {
+    const state = location.state as { openPurchaseTreats?: boolean } | null | undefined;
+    if (!state?.openPurchaseTreats) return;
+    setShowPurchaseModal(true);
+    navigate(location.pathname, { replace: true, state: {} });
+  }, [location.pathname, location.state, navigate]);
+
   useEffect(() => {
     checkAuthAndLoadData();
     const { data: { subscription } } = supabase.auth.onAuthStateChange((event, session) => {
@@ -91,7 +102,6 @@ export const TreatScreen = ({ onFormVisibilityChange }: TreatScreenProps): JSX.E
         checkAuthAndLoadData();
       } else if (event === 'SIGNED_OUT') {
         setIsAuthenticated(false);
-        setActivePromotions([]);
         setRecentTips([]);
         setWallet(null);
       }
@@ -105,11 +115,19 @@ export const TreatScreen = ({ onFormVisibilityChange }: TreatScreenProps): JSX.E
       if (user) {
         channelRef = supabase
           .channel('treat_screen_wallet')
-          .on('postgres_changes', { event: 'UPDATE', schema: 'public', table: 'treat_wallets', filter: `user_id=eq.${user.id}` }, (payload) => {
+          .on('postgres_changes', { event: 'UPDATE', schema: 'public', table: 'treat_wallets', filter: `user_id=eq.${user.id}` }, async (payload) => {
             const w = payload.new as any;
+            let lifetimePurchased = Number(w.total_purchased) || 0;
+            try {
+              lifetimePurchased = await sumCompletedPurchaseTreats(user.id);
+            } catch {
+              /* keep wallet total_purchased fallback */
+            }
             setWallet({
               balance: Number(w.balance) || 0,
+              promo_balance: Number(w.promo_balance) || 0,
               total_purchased: Number(w.total_purchased) || 0,
+              lifetime_purchased: lifetimePurchased,
               total_spent: Number(w.total_spent) || 0,
               total_earned: Number(w.total_earned) || 0,
               total_withdrawn: Number(w.total_withdrawn) || 0,
@@ -129,32 +147,37 @@ export const TreatScreen = ({ onFormVisibilityChange }: TreatScreenProps): JSX.E
       const { data: { user } } = await supabase.auth.getUser();
       if (!user) return;
       treatCache.invalidate(CACHE_KEYS.WALLET(user.id));
-      const walletData = await getCachedData(
-        CACHE_KEYS.WALLET(user.id),
-        async () => {
-          const { data, error } = await supabase
-            .from('treat_wallets')
-            .select('balance, total_purchased, total_spent, total_earned, total_withdrawn, earned_balance, purchased_balance')
-            .eq('user_id', user.id)
-            .limit(1);
-          if (error) throw error;
-          if (!data || data.length === 0) {
-            const { data: newWallet, error: createError } = await supabase
+      const [walletData, lifetimePurchased] = await Promise.all([
+        getCachedData(
+          CACHE_KEYS.WALLET(user.id),
+          async () => {
+            const { data, error } = await supabase
               .from('treat_wallets')
-              .insert({ user_id: user.id, balance: 0, total_purchased: 0, total_spent: 0, total_earned: 0, total_withdrawn: 0, earned_balance: 0, purchased_balance: 0 })
-              .select('balance, total_purchased, total_spent, total_earned, total_withdrawn, earned_balance, purchased_balance')
+              .select('balance, promo_balance, total_purchased, total_spent, total_earned, total_withdrawn, earned_balance, purchased_balance')
+              .eq('user_id', user.id)
               .limit(1);
-            if (createError) throw createError;
-            return newWallet[0];
-          }
-          return data[0];
-        },
-        10 * 1000
-      );
+            if (error) throw error;
+            if (!data || data.length === 0) {
+              const { data: newWallet, error: createError } = await supabase
+                .from('treat_wallets')
+                .insert({ user_id: user.id, balance: 0, total_purchased: 0, total_spent: 0, total_earned: 0, total_withdrawn: 0, earned_balance: 0, purchased_balance: 0 })
+                .select('balance, promo_balance, total_purchased, total_spent, total_earned, total_withdrawn, earned_balance, purchased_balance')
+                .limit(1);
+              if (createError) throw createError;
+              return newWallet[0];
+            }
+            return data[0];
+          },
+          10 * 1000
+        ),
+        sumCompletedPurchaseTreats(user.id),
+      ]);
       if (walletData) {
         setWallet({
           balance: Number(walletData.balance) || 0,
+          promo_balance: Number(walletData.promo_balance) || 0,
           total_purchased: Number(walletData.total_purchased) || 0,
+          lifetime_purchased: lifetimePurchased,
           total_spent: Number(walletData.total_spent) || 0,
           total_earned: Number(walletData.total_earned) || 0,
           total_withdrawn: Number(walletData.total_withdrawn) || 0,
@@ -163,38 +186,10 @@ export const TreatScreen = ({ onFormVisibilityChange }: TreatScreenProps): JSX.E
         });
       }
     } catch {
-      setWallet({ balance: 0, total_purchased: 0, total_spent: 0, total_earned: 0, total_withdrawn: 0, earned_balance: 0, purchased_balance: 0 });
+      setWallet({ balance: 0, promo_balance: 0, total_purchased: 0, lifetime_purchased: 0, total_spent: 0, total_earned: 0, total_withdrawn: 0, earned_balance: 0, purchased_balance: 0 });
     } finally {
       setWalletLoading(false);
     }
-  };
-
-  const loadActivePromotions = async () => {
-    try {
-      const { data: { user } } = await supabase.auth.getUser();
-      if (!user) return;
-      const promotions = await getCachedData(
-        CACHE_KEYS.ACTIVE_PROMOTIONS(user.id),
-        async () => {
-          const { data, error } = await supabase
-            .from('treat_promotions')
-            .select('*')
-            .eq('user_id', user.id)
-            .eq('status', 'active')
-            .order('started_at', { ascending: false });
-          if (error) throw error;
-          return (data || []).map(p => ({
-            ...p,
-            treats_spent: Number(p.treats_spent) || 0,
-            duration_hours: Number(p.duration_hours) || 0,
-            target_impressions: Number(p.target_impressions) || 0,
-            actual_impressions: Number(p.actual_impressions) || 0,
-          }));
-        },
-        2 * 60 * 1000
-      );
-      setActivePromotions(promotions);
-    } catch { /* silent */ }
   };
 
   const loadRecentTips = async () => {
@@ -237,7 +232,7 @@ export const TreatScreen = ({ onFormVisibilityChange }: TreatScreenProps): JSX.E
         setIsAuthenticated(!!session);
       }
       if (session) {
-        await Promise.all([loadWallet(), loadActivePromotions(), loadRecentTips()]);
+        await Promise.all([loadWallet(), loadRecentTips()]);
       }
     } catch {
       /* keep current state */
@@ -258,26 +253,6 @@ export const TreatScreen = ({ onFormVisibilityChange }: TreatScreenProps): JSX.E
       return formatDistanceToNowStrict(new Date(dateString), { addSuffix: true });
     } catch {
       return 'Unknown date';
-    }
-  };
-
-  const formatDuration = (hours: number): string => {
-    const h = Number(hours) || 0;
-    if (h < 24) return `${h}h`;
-    if (h < 168) return `${Math.floor(h / 24)}d`;
-    return `${Math.floor(h / 168)}w`;
-  };
-
-  const getPromotionProgress = (promotion: ActivePromotion): number => {
-    try {
-      const now = Date.now();
-      const start = new Date(promotion.started_at).getTime();
-      const end = new Date(promotion.ends_at).getTime();
-      if (now >= end) return 100;
-      if (now <= start) return 0;
-      return Math.round(((now - start) / (end - start)) * 100);
-    } catch {
-      return 0;
     }
   };
 
@@ -359,9 +334,7 @@ export const TreatScreen = ({ onFormVisibilityChange }: TreatScreenProps): JSX.E
 
   const statItems = [
     { label: 'Earned', value: wallet?.total_earned ?? 0 },
-    { label: 'Purchased', value: wallet?.total_purchased ?? 0 },
-    { label: 'Spent', value: wallet?.total_spent ?? 0 },
-    { label: 'Withdrawn', value: wallet?.total_withdrawn ?? 0 },
+    { label: 'Purchased', value: wallet?.lifetime_purchased ?? 0 },
   ];
 
   return (
@@ -369,7 +342,7 @@ export const TreatScreen = ({ onFormVisibilityChange }: TreatScreenProps): JSX.E
       ref={scrollContainerRef}
       onTouchStart={handleTouchStart}
       onTouchEnd={handleTouchEnd}
-      className="flex flex-col h-[100dvh] overflow-y-auto overflow-x-hidden scrollbar-hide bg-[#0a0a0a]"
+      className="flex flex-col h-[100dvh] overflow-y-auto overflow-x-hidden scrollbar-hide bg-[#0a0a0a] content-with-nav"
       style={{ overscrollBehavior: 'contain', WebkitOverflowScrolling: 'touch' }}
     >
       {/* Pull-to-refresh indicator */}
@@ -381,11 +354,14 @@ export const TreatScreen = ({ onFormVisibilityChange }: TreatScreenProps): JSX.E
       )}
 
       {/* ── Header ── */}
-      <header className="sticky top-0 z-10 px-5 pt-6 pb-4 bg-[#0a0a0a]/90 backdrop-blur-xl">
+      <header
+        className="sticky top-0 z-10 px-5 py-5 bg-[#0a0a0a]/90 backdrop-blur-xl"
+        style={{ paddingTop: 'calc(1.25rem + env(safe-area-inset-top, 0px) * 0.25)', paddingBottom: '1.25rem' }}
+      >
         <div className="flex items-center justify-between">
           <div className="flex items-center gap-3">
             <button
-              onClick={() => navigate(-1)}
+              onClick={() => (window.history.length > 1 ? navigate(-1) : navigate('/'))}
               className="w-9 h-9 flex items-center justify-center rounded-full bg-white/8 active:scale-95 transition-transform"
             >
               <ArrowLeft className="w-4 h-4 text-white/80" />
@@ -407,7 +383,7 @@ export const TreatScreen = ({ onFormVisibilityChange }: TreatScreenProps): JSX.E
         </div>
       </header>
 
-      <div className="flex-1 px-5 pb-32 space-y-5">
+      <div className="flex-1 px-5 space-y-5">
 
         {/* ── Hero Balance Card ── */}
         <div className="relative rounded-3xl overflow-hidden border border-yellow-500/20 bg-gradient-to-br from-yellow-600/15 via-orange-600/10 to-transparent">
@@ -417,10 +393,17 @@ export const TreatScreen = ({ onFormVisibilityChange }: TreatScreenProps): JSX.E
             {walletLoading ? (
               <div className="h-12 w-40 bg-white/5 rounded-2xl animate-pulse mb-1" />
             ) : (
-              <p className="font-['Inter',sans-serif] font-black text-yellow-400 leading-none tracking-tight mb-1 tabular-nums"
-                style={{ fontSize: 'clamp(2rem, 12vw, 3.5rem)' }}>
-                {fmt(wallet?.balance ?? 0)}
-              </p>
+              <>
+                <p className="font-['Inter',sans-serif] font-black text-yellow-400 leading-none tracking-tight mb-1 tabular-nums"
+                  style={{ fontSize: 'clamp(2rem, 12vw, 3.5rem)' }}>
+                  {fmt(getTreatWalletSpendable(wallet))}
+                </p>
+                {wallet && wallet.promo_balance > 0 && (
+                  <p className="text-[11px] text-white/45 font-medium mb-1 tabular-nums">
+                    Includes {fmt(wallet.promo_balance)} bonus Treats (non-withdrawable)
+                  </p>
+                )}
+              </>
             )}
             <p className="text-[12px] text-white/35 font-semibold uppercase tracking-widest mb-7">Treats</p>
 
@@ -474,94 +457,21 @@ export const TreatScreen = ({ onFormVisibilityChange }: TreatScreenProps): JSX.E
           ))}
         </div>
 
-        {/* ── Active Promotions ── */}
+        {/* ── Recent Treats (max 8; more in History) ── */}
         <section>
           <div className="flex items-center justify-between mb-4">
             <div>
-              <h2 className="font-['Inter',sans-serif] font-black text-white text-[15px] tracking-tight">Active Promotions</h2>
-              <p className="text-[11px] text-white/35 mt-0.5">Campaigns currently running</p>
+              <h2 className="font-['Inter',sans-serif] font-black text-white text-[15px] tracking-tight">Recent Treats</h2>
+              <p className="text-[11px] text-white/35 mt-0.5">Tips sent and received</p>
             </div>
-            <button
-              onClick={() => navigate('/promotion-center')}
-              className="flex items-center gap-0.5 text-[12px] font-bold text-white/40 active:text-white/70 transition-colors"
-            >
-              See all <ChevronRight className="w-3.5 h-3.5" />
-            </button>
-          </div>
-
-          {activePromotions.length === 0 ? (
-            <div className="flex flex-col items-center justify-center py-12 rounded-3xl border border-dashed border-white/[0.07]">
-              <div className="w-12 h-12 rounded-2xl bg-white/5 flex items-center justify-center mb-3">
-                <Megaphone className="w-5 h-5 text-white/20" />
-              </div>
-              <p className="text-[13px] font-semibold text-white/40 mb-1">No active promotions</p>
-              <p className="text-[11px] text-white/20 mb-5 text-center px-4">Boost your music to reach more listeners</p>
+            {recentTips.length > 0 && (
               <button
-                onClick={() => navigate('/promotion-center')}
-                className="px-5 py-2.5 rounded-full bg-[#00ad74] text-white text-[12px] font-bold active:scale-95 transition-transform"
+                onClick={() => navigate('/transaction-history')}
+                className="flex items-center gap-0.5 text-[12px] font-bold text-white/40 active:text-white/70 transition-colors"
               >
-                Start Promoting
+                History <ChevronRight className="w-3.5 h-3.5" />
               </button>
-            </div>
-          ) : (
-            <div className="space-y-2">
-              {activePromotions.map((promotion) => {
-                const progress = getPromotionProgress(promotion);
-                return (
-                  <div key={promotion.id} className="rounded-2xl bg-white/[0.04] border border-white/[0.07] p-4">
-                    <div className="flex items-start justify-between gap-3 mb-3">
-                      <div className="flex items-center gap-3 min-w-0">
-                        <div className="w-9 h-9 rounded-xl bg-amber-500/15 flex items-center justify-center flex-shrink-0">
-                          <TrendingUp className="w-4 h-4 text-amber-400" />
-                        </div>
-                        <div className="min-w-0">
-                          <p className="font-['Inter',sans-serif] font-bold text-white text-[13px] truncate">{promotion.target_title}</p>
-                          <p className="text-[11px] text-white/40 mt-0.5 capitalize">
-                            {promotion.promotion_type === 'song_promotion' ? 'Song Promotion' : 'Profile Promotion'}
-                          </p>
-                        </div>
-                      </div>
-                      <div className="flex-shrink-0 text-right">
-                        <p className="font-['Inter',sans-serif] font-black text-white text-[15px]">{fmt(Number(promotion.treats_spent) || 0)}</p>
-                        <p className="text-[10px] text-white/30">treats spent</p>
-                      </div>
-                    </div>
-
-                    <div className="mb-2">
-                      <div className="flex justify-between text-[10px] text-white/30 mb-1.5">
-                        <span>Progress</span>
-                        <span>{progress}%</span>
-                      </div>
-                      <div className="w-full bg-white/[0.07] rounded-full h-1.5 overflow-hidden">
-                        <div
-                          className="h-full rounded-full bg-gradient-to-r from-amber-500 to-orange-500 transition-all"
-                          style={{ width: `${progress}%` }}
-                        />
-                      </div>
-                    </div>
-
-                    <div className="flex items-center justify-between text-[10px] text-white/30">
-                      <div className="flex items-center gap-1">
-                        <BarChart2 className="w-3 h-3" />
-                        <span>{fmt(Number(promotion.actual_impressions) || 0)} / {fmt(Number(promotion.target_impressions) || 0)} impressions</span>
-                      </div>
-                      <div className="flex items-center gap-1">
-                        <Clock className="w-3 h-3" />
-                        <span>Ends {formatDate(promotion.ends_at)}</span>
-                      </div>
-                    </div>
-                  </div>
-                );
-              })}
-            </div>
-          )}
-        </section>
-
-        {/* ── Recent Tips ── */}
-        <section>
-          <div className="mb-4">
-            <h2 className="font-['Inter',sans-serif] font-black text-white text-[15px] tracking-tight">Recent Treats</h2>
-            <p className="text-[11px] text-white/35 mt-0.5">Tips sent and received</p>
+            )}
           </div>
 
           {recentTips.length === 0 ? (
@@ -574,7 +484,7 @@ export const TreatScreen = ({ onFormVisibilityChange }: TreatScreenProps): JSX.E
             </div>
           ) : (
             <div className="space-y-1">
-              {recentTips.slice(0, 5).map((tip, idx) => (
+              {recentTips.slice(0, 8).map((tip, idx) => (
                 <div key={tip.id} className="flex items-center gap-3 px-3 py-3 rounded-2xl active:bg-white/[0.04] transition-colors">
                   <span className="w-5 text-center text-[11px] font-black text-white/15 flex-shrink-0 tabular-nums">
                     {idx + 1}
@@ -601,10 +511,18 @@ export const TreatScreen = ({ onFormVisibilityChange }: TreatScreenProps): JSX.E
               ))}
             </div>
           )}
+          {recentTips.length > 8 && (
+            <button
+              onClick={() => navigate('/transaction-history')}
+              className="mt-3 w-full py-3 rounded-2xl border border-white/[0.07] bg-white/[0.02] text-[13px] font-semibold text-white/50 active:bg-white/[0.05] transition-colors"
+            >
+              View full history
+            </button>
+          )}
         </section>
 
         {/* ── Getting Started (empty state) ── */}
-        {activePromotions.length === 0 && recentTips.length === 0 && (
+        {recentTips.length === 0 && (
           <div className="rounded-3xl border border-[#00ad74]/15 bg-gradient-to-br from-[#00ad74]/8 to-transparent p-8 text-center">
             <div className="w-16 h-16 bg-[#00ad74]/15 rounded-3xl flex items-center justify-center mx-auto mb-5">
               <Coins className="w-8 h-8 text-[#00ad74]" />
@@ -613,7 +531,7 @@ export const TreatScreen = ({ onFormVisibilityChange }: TreatScreenProps): JSX.E
               Welcome to Treats!
             </h3>
             <p className="font-['Inter',sans-serif] text-white/40 text-sm mb-7 leading-relaxed">
-              Purchase treats to tip your favourite artists and promote your content to more listeners
+              Purchase treats to tip your favorite artistes and promote your content to more listeners
             </p>
             <button
               onClick={() => setShowPurchaseModal(true)}

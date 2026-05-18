@@ -13,9 +13,16 @@ interface AuthState {
   displayName: string | null;
 }
 
+/** Full-screen loader after interactive login, then dismiss (navigate to Home is handled in AuthModal). */
+const POST_LOGIN_OVERLAY_MS = 900;
+
 interface AuthContextType extends AuthState {
   signOut: () => Promise<void>;
   refreshAuth: () => Promise<void>;
+  /** True while the post-login full-screen loader is visible. */
+  postLoginTransitionActive: boolean;
+  /** Show loader for a fixed duration; call before closing the auth modal on successful sign-in. */
+  startPostLoginTransition: () => void;
 }
 
 const AuthContext = createContext<AuthContextType | undefined>(undefined);
@@ -29,15 +36,141 @@ const INITIAL_STATE: AuthState = {
   displayName: null,
 };
 
+/** Survives AuthProvider remount (Strict Mode, etc.) so first paint matches last known session. */
+type AuthSnapshot = Pick<AuthState, 'user' | 'session' | 'isAuthenticated' | 'displayName'>;
+let lastAuthSnapshot: AuthSnapshot | null = null;
+
 // Survives AuthProvider remount (e.g. React Strict Mode, OAuth redirect). Prevents showing
 // the full-page auth skeleton again after login when the provider remounts.
 let hasInitializedOnce = false;
 
+type SignupBonusClaimResponse = {
+  ok?: boolean;
+  status?: string;
+};
+
+const signupBonusClaimInFlightByUser = new Set<string>();
+const signupBonusClaimCompletedByUser = new Set<string>();
+const SIGNUP_BONUS_TERMINAL_STATUSES = new Set([
+  'granted',
+  'already_claimed',
+]);
+
+function isSignupBonusClaimResponse(value: unknown): value is SignupBonusClaimResponse {
+  return typeof value === 'object' && value !== null;
+}
+
+async function claimSignupBonusBestEffort(userId: string): Promise<void> {
+  if (
+    signupBonusClaimCompletedByUser.has(userId) ||
+    signupBonusClaimInFlightByUser.has(userId)
+  ) {
+    return;
+  }
+
+  signupBonusClaimInFlightByUser.add(userId);
+
+  try {
+    await supabase.rpc('ensure_my_treat_wallet');
+
+    const { data, error } = await supabase.rpc('claim_signup_bonus');
+
+    if (error) {
+      return;
+    }
+
+    const status = isSignupBonusClaimResponse(data) ? data.status : undefined;
+    if (status && SIGNUP_BONUS_TERMINAL_STATUSES.has(status)) {
+      signupBonusClaimCompletedByUser.add(userId);
+    }
+  } catch {
+    // Best-effort only: missing migrations, RPC mismatches, or network errors
+    // must never affect login, refresh, or auth state.
+  } finally {
+    signupBonusClaimInFlightByUser.delete(userId);
+  }
+}
+
+function deriveImmediateDisplayName(user: User | null): string | null {
+  if (!user) return null;
+
+  const metadata = user.user_metadata ?? {};
+  const immediateName =
+    metadata.display_name ??
+    metadata.username ??
+    metadata.preferred_username ??
+    metadata.full_name ??
+    metadata.name ??
+    null;
+
+  if (typeof immediateName === 'string' && immediateName.trim().length > 0) {
+    return immediateName.trim();
+  }
+
+  const email = user.email?.trim();
+  if (email && email.includes('@')) {
+    const localPart = email.split('@')[0]?.trim();
+    if (localPart) return localPart;
+  }
+
+  return null;
+}
+
+function buildInitialAuthState(): AuthState {
+  if (!hasInitializedOnce) {
+    return INITIAL_STATE;
+  }
+  if (lastAuthSnapshot) {
+    return {
+      ...lastAuthSnapshot,
+      isLoading: false,
+      isInitialized: true,
+    };
+  }
+  return {
+    ...INITIAL_STATE,
+    isLoading: false,
+    isInitialized: true,
+  };
+}
+
 export function AuthProvider({ children }: { children: ReactNode }) {
-  const [state, setState] = useState<AuthState>(INITIAL_STATE);
+  const [state, setState] = useState<AuthState>(buildInitialAuthState);
+  const [postLoginTransitionActive, setPostLoginTransitionActive] = useState(false);
   const mountedRef = useRef(true);
   const initializingRef = useRef(false);
   const loaderRemovedRef = useRef(false);
+  const postLoginOverlayTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  const clearPostLoginOverlay = useCallback(() => {
+    if (postLoginOverlayTimerRef.current) {
+      clearTimeout(postLoginOverlayTimerRef.current);
+      postLoginOverlayTimerRef.current = null;
+    }
+    setPostLoginTransitionActive(false);
+  }, []);
+
+  const startPostLoginTransition = useCallback(() => {
+    if (postLoginOverlayTimerRef.current) {
+      clearTimeout(postLoginOverlayTimerRef.current);
+      postLoginOverlayTimerRef.current = null;
+    }
+    setPostLoginTransitionActive(true);
+    postLoginOverlayTimerRef.current = setTimeout(() => {
+      postLoginOverlayTimerRef.current = null;
+      if (mountedRef.current) {
+        setPostLoginTransitionActive(false);
+      }
+    }, POST_LOGIN_OVERLAY_MS);
+  }, []);
+
+  useEffect(() => {
+    return () => {
+      if (postLoginOverlayTimerRef.current) {
+        clearTimeout(postLoginOverlayTimerRef.current);
+      }
+    };
+  }, []);
 
   const safeSetState = useCallback((updater: Partial<AuthState> | ((prev: AuthState) => AuthState)) => {
     if (mountedRef.current) {
@@ -68,8 +201,14 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     const user = session?.user ?? null;
 
     // Set auth state immediately so UI shows logged-in without a loading flash (e.g. after login)
-    const displayNameFallback = user?.user_metadata?.full_name ?? user?.user_metadata?.name ?? null;
+    const displayNameFallback = deriveImmediateDisplayName(user);
     hasInitializedOnce = true;
+    lastAuthSnapshot = {
+      user,
+      session,
+      isAuthenticated: !!user,
+      displayName: displayNameFallback,
+    };
     safeSetState({
       user,
       session,
@@ -91,22 +230,18 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         const displayName = data?.display_name || null;
         if (displayName !== displayNameFallback) {
           safeSetState({ displayName });
+          lastAuthSnapshot = lastAuthSnapshot
+            ? { ...lastAuthSnapshot, displayName }
+            : { user, session, isAuthenticated: !!user, displayName };
         }
       } catch (error) {
         console.error('[AuthContext] Error fetching display name:', error);
       }
 
-      // Fire-and-forget: try to claim the sign-up Treat bonus. The RPC is
-      // idempotent (signup_bonus_claims PK on user_id), only credits when the
-      // admin has enabled it, and writes to NON-withdrawable promo_balance.
-      // It is safe to call on every sign-in / token refresh.
-      void (async () => {
-        try {
-          await supabase.rpc('claim_signup_bonus');
-        } catch {
-          // Swallow — the bonus is best-effort and must never affect auth UX.
-        }
-      })();
+      // Best-effort: the RPC is idempotent server-side and credits only
+      // non-withdrawable promo_balance. This helper also dedupes client-side
+      // and swallows any RPC/schema mismatch so auth UX cannot be affected.
+      void claimSignupBonusBestEffort(user.id);
     }
   }, [safeSetState, removeInitialLoader]);
 
@@ -127,6 +262,13 @@ export function AuthProvider({ children }: { children: ReactNode }) {
             error.message?.includes('refresh_token_not_found')) {
           updateAuthState(null);
         } else {
+          hasInitializedOnce = true;
+          lastAuthSnapshot = {
+            user: null,
+            session: null,
+            isAuthenticated: false,
+            displayName: null,
+          };
           safeSetState({ isLoading: false, isInitialized: true });
           removeInitialLoader();
         }
@@ -147,6 +289,12 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     } catch (error) {
       console.error('[AuthContext] Error during initialization:', error);
       hasInitializedOnce = true;
+      lastAuthSnapshot = {
+        user: null,
+        session: null,
+        isAuthenticated: false,
+        displayName: null,
+      };
       safeSetState({ isLoading: false, isInitialized: true });
       removeInitialLoader();
     } finally {
@@ -156,11 +304,6 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
   useEffect(() => {
     mountedRef.current = true;
-    // If we already initialized once (e.g. before Strict Mode remount or OAuth return), mark
-    // initialized immediately so home doesn't flash the auth skeleton again.
-    if (hasInitializedOnce) {
-      safeSetState({ isInitialized: true });
-    }
     initializeAuth();
 
     const { data: { subscription } } = supabase.auth.onAuthStateChange(
@@ -184,6 +327,13 @@ export function AuthProvider({ children }: { children: ReactNode }) {
             break;
 
           case 'SIGNED_OUT':
+            clearPostLoginOverlay();
+            lastAuthSnapshot = {
+              user: null,
+              session: null,
+              isAuthenticated: false,
+              displayName: null,
+            };
             safeSetState({
               user: null,
               session: null,
@@ -206,31 +356,38 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       mountedRef.current = false;
       subscription.unsubscribe();
     };
-  }, [initializeAuth, updateAuthState, safeSetState, removeInitialLoader]);
+  }, [initializeAuth, updateAuthState, safeSetState, removeInitialLoader, clearPostLoginOverlay]);
 
   const signOut = useCallback(async () => {
-    try {
-      safeSetState({ isLoading: true });
+    clearPostLoginOverlay();
+    // Optimistic sign-out: performCompleteLogout clears caches/IndexedDB and can take
+    // noticeable time. Update React auth immediately so the UI is not still "logged in"
+    // until that work finishes (onAuthStateChange SIGNED_OUT fires late, after signOut).
+    lastAuthSnapshot = {
+      user: null,
+      session: null,
+      isAuthenticated: false,
+      displayName: null,
+    };
+    safeSetState({
+      user: null,
+      session: null,
+      isAuthenticated: false,
+      isLoading: false,
+      isInitialized: true,
+      displayName: null,
+    });
 
+    try {
       const { success, error } = await performCompleteLogout();
 
       if (!success) {
         console.error('[AuthContext] Sign out error:', error);
       }
-
     } catch (error) {
       console.error('[AuthContext] Sign out failed:', error);
-    } finally {
-      safeSetState({
-        user: null,
-        session: null,
-        isAuthenticated: false,
-        isLoading: false,
-        isInitialized: true,
-        displayName: null,
-      });
     }
-  }, [safeSetState]);
+  }, [safeSetState, clearPostLoginOverlay]);
 
   const refreshAuth = useCallback(async () => {
     try {
@@ -253,6 +410,8 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     ...state,
     signOut,
     refreshAuth,
+    postLoginTransitionActive,
+    startPostLoginTransition,
   };
 
   return (

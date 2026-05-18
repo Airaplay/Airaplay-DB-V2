@@ -493,36 +493,8 @@ async function activateUserPackage(supabase: any, paymentId: string): Promise<bo
       return false;
     }
 
-    // CRITICAL: Update wallet balance after transaction is created
-    const { error: walletUpdateError } = await supabase
-      .from("treat_wallets")
-      .update({
-        balance: newBalance,
-        purchased_balance: (Number(walletData.purchased_balance) || 0) + totalTreats,
-        total_purchased: (Number(walletData.total_purchased) || 0) + totalTreats,
-        updated_at: new Date().toISOString(),
-      })
-      .eq("user_id", payment.user_id);
-
-    if (walletUpdateError) {
-      logError({
-        timestamp: new Date().toISOString(),
-        paymentId,
-        step: "update_wallet_balance_failed"
-      }, walletUpdateError);
-      return false;
-    }
-
-    logInfo({
-      timestamp: new Date().toISOString(),
-      paymentId,
-      step: "wallet_balance_updated",
-      details: {
-        previousBalance: currentBalance,
-        newBalance: newBalance,
-        treatsAdded: totalTreats
-      }
-    });
+    /* treat_wallets is updated only by trigger_update_treat_wallet on INSERT.
+       Updating the wallet here as well doubled purchases and balances. */
 
     logInfo({
       timestamp: new Date().toISOString(),

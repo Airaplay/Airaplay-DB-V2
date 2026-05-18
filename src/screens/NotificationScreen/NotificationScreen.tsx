@@ -3,6 +3,10 @@ import { Spinner } from '../../components/Spinner';
 import { ArrowLeft, Send, DollarSign, XCircle, CheckCircle, FileText, AlertCircle, X, Trash2, MessageCircle, CheckCheck, UserPlus, Users, Check } from 'lucide-react';
 import { useNavigate } from 'react-router-dom';
 import { supabase } from '../../lib/supabase';
+import { persistentCache } from '../../lib/persistentCache';
+import { insertNotificationSafe } from '../../lib/notificationService';
+
+const NOTIFICATIONS_CACHE_TTL = 2 * 60 * 1000; // 2 minutes
 import { formatDistanceToNow, isToday, isYesterday, isThisWeek } from 'date-fns';
 import { CustomConfirmDialog } from '../../components/CustomConfirmDialog';
 import { ToastNotification } from '../../components/ToastNotification';
@@ -37,6 +41,8 @@ export const NotificationScreen = () => {
   const [toast, setToast] = useState<{ message: string; type: 'success' | 'error' | 'info' } | null>(null);
   const [isMarkingAllRead, setIsMarkingAllRead] = useState(false);
   const [processingCollabRequestId, setProcessingCollabRequestId] = useState<string | null>(null);
+  const [showConfirmDeleteAll, setShowConfirmDeleteAll] = useState(false);
+  const [isDeletingAll, setIsDeletingAll] = useState(false);
 
   useEffect(() => {
     fetchNotifications();
@@ -110,6 +116,39 @@ export const NotificationScreen = () => {
         return;
       }
 
+      const cacheKey = `notifications_list_${user.id}`;
+      const cached = await persistentCache.get<Notification[]>(cacheKey);
+      if (cached && Array.isArray(cached)) {
+        setNotifications(cached);
+        setIsLoading(false);
+        // Background revalidate
+        fetchNotificationsInner(user.id, cacheKey).then((list) => {
+          if (list) {
+            setNotifications(list);
+            persistentCache.set(cacheKey, list, NOTIFICATIONS_CACHE_TTL).catch(() => {});
+          }
+        }).catch(() => {});
+        return;
+      }
+
+      const list = await fetchNotificationsInner(user.id, cacheKey);
+      if (list) {
+        setNotifications(list);
+        await persistentCache.set(cacheKey, list, NOTIFICATIONS_CACHE_TTL);
+      }
+    } catch (err) {
+      console.error('Error fetching notifications:', err);
+      setToast({
+        message: 'Failed to load notifications',
+        type: 'error',
+      });
+    } finally {
+      setIsLoading(false);
+    }
+  };
+
+  const fetchNotificationsInner = async (userId: string, cacheKey: string): Promise<Notification[] | null> => {
+    try {
       const { data, error: fetchError } = await supabase
         .from('notifications')
         .select(`
@@ -121,14 +160,14 @@ export const NotificationScreen = () => {
             avatar_url
           )
         `)
-        .eq('user_id', user.id)
+        .eq('user_id', userId)
         .order('created_at', { ascending: false });
 
       if (fetchError) {
         const { data: notificationsData, error: notifError } = await supabase
           .from('notifications')
           .select('*')
-          .eq('user_id', user.id)
+          .eq('user_id', userId)
           .order('created_at', { ascending: false });
 
         if (notifError) throw notifError;
@@ -144,31 +183,21 @@ export const NotificationScreen = () => {
           .select('id, display_name, username, avatar_url')
           .in('id', senderIds);
 
-        const sendersMap = new Map(sendersData?.map(s => [s.id, s]) || []);
-
-        const notificationsWithSenders = (notificationsData || []).map((notif: any) => ({
+        const sendersMap = new Map(sendersData?.map((s: any) => [s.id, s]) || []);
+        return (notificationsData || []).map((notif: any) => ({
           ...notif,
           sender: sendersMap.get(notif.sender_id) || null,
         }));
-
-        setNotifications(notificationsWithSenders);
-        return;
       }
 
       const transformedData = (data || []).map((notif: any) => ({
         ...notif,
         sender: notif.sender || null,
       }));
-
-      setNotifications(transformedData);
+      return transformedData;
     } catch (err) {
       console.error('Error fetching notifications:', err);
-      setToast({
-        message: 'Failed to load notifications',
-        type: 'error',
-      });
-    } finally {
-      setIsLoading(false);
+      return null;
     }
   };
 
@@ -266,15 +295,13 @@ export const NotificationScreen = () => {
         .single();
 
       if (senderUserData) {
-        await supabase
-          .from('notifications')
-          .insert({
-            user_id: senderUserData.user_id,
-            title: 'Collaboration Request Accepted',
-            message: `${request.recipient_artist?.stage_name || 'An artist'} accepted your collaboration request!`,
-            type: 'collaboration_accepted',
-            is_read: false
-          });
+        await insertNotificationSafe({
+          user_id: senderUserData.user_id,
+          title: 'Collaboration Request Accepted',
+          message: `${request.recipient_artist?.stage_name || 'An artiste'} accepted your collaboration request!`,
+          type: 'collaboration_accepted',
+          is_read: false
+        });
       }
 
       await supabase
@@ -334,15 +361,13 @@ export const NotificationScreen = () => {
         .single();
 
       if (senderUserData) {
-        await supabase
-          .from('notifications')
-          .insert({
-            user_id: senderUserData.user_id,
-            title: 'Collaboration Request Declined',
-            message: `${request.recipient_artist?.stage_name || 'An artist'} declined your collaboration request`,
-            type: 'collaboration_declined',
-            is_read: false
-          });
+        await insertNotificationSafe({
+          user_id: senderUserData.user_id,
+          title: 'Collaboration Request Declined',
+          message: `${request.recipient_artist?.stage_name || 'An artiste'} declined your collaboration request`,
+          type: 'collaboration_declined',
+          is_read: false
+        });
       }
 
       await supabase
@@ -426,6 +451,37 @@ export const NotificationScreen = () => {
     } finally {
       setDeletingId(null);
       setNotificationToDelete(null);
+    }
+  };
+
+  const handleDeleteAllNotifications = async () => {
+    const { data: { user } } = await supabase.auth.getUser();
+    if (!user) return;
+
+    setShowConfirmDeleteAll(false);
+    setIsDeletingAll(true);
+
+    try {
+      const { error } = await supabase
+        .from('notifications')
+        .delete()
+        .eq('user_id', user.id);
+
+      if (error) throw error;
+
+      setNotifications([]);
+      setToast({
+        message: 'All notifications deleted',
+        type: 'success',
+      });
+    } catch (err) {
+      console.error('Error deleting all notifications:', err);
+      setToast({
+        message: 'Failed to delete all notifications',
+        type: 'error',
+      });
+    } finally {
+      setIsDeletingAll(false);
     }
   };
 
@@ -607,211 +663,254 @@ export const NotificationScreen = () => {
     return (
       <div key={notif.id} className="space-y-2">
         <div
-          className={`flex items-center gap-3 p-4 rounded-2xl transition-all ${
-            !isCollabRequest ? 'active:scale-[0.98]' : ''
+          className={`flex items-start gap-3 sm:gap-4 p-4 rounded-2xl border transition-all ${
+            !isCollabRequest ? 'active:scale-[0.98] cursor-pointer' : ''
           } ${
-            notif.is_read ? 'bg-white/5 active:bg-white/10' : 'bg-white/10 active:bg-white/[0.12]'
+            notif.is_read
+              ? 'bg-white/5 border-white/10 hover:bg-white/[0.07]'
+              : 'bg-white/5 border-white/10 border-l-[3px] border-l-[#309605] hover:bg-white/[0.08]'
           }`}
           onClick={() => !isCollabRequest && handleNotificationClick(notif)}
         >
-        {/* Icon/Avatar */}
-        {isMessageNotif && notif.sender?.avatar_url ? (
-          <div className="w-12 h-12 rounded-full flex-shrink-0 overflow-hidden">
-            <img
-              src={notif.sender.avatar_url}
-              alt={notif.sender.display_name}
-              className="w-full h-full object-cover"
-            />
-          </div>
-        ) : (
-          <div className={`w-12 h-12 rounded-xl flex items-center justify-center flex-shrink-0 relative ${getNotificationColor(notif.type)}`}>
-            {getNotificationIcon(notif.type)}
-            {isMessageNotif && unreadCount > 0 && (
-              <div className="absolute -top-1 -right-1 min-w-[20px] h-5 bg-gradient-to-r from-[#309605] to-[#3ba208] rounded-full flex items-center justify-center px-1.5 shadow-md shadow-[#309605]/20">
-                <span className="text-[10px] font-bold text-white">{unreadCount}</span>
-              </div>
-            )}
-          </div>
-        )}
+          {/* Icon/Avatar — Invite & Earn style rounded-2xl box */}
+          {isMessageNotif && notif.sender?.avatar_url ? (
+            <div className="w-11 h-11 sm:w-12 sm:h-12 rounded-2xl flex-shrink-0 overflow-hidden border border-white/10">
+              <img
+                src={notif.sender.avatar_url}
+                alt={notif.sender.display_name}
+                className="w-full h-full object-cover"
+              />
+            </div>
+          ) : (
+            <div className={`w-11 h-11 sm:w-12 sm:h-12 rounded-2xl flex items-center justify-center flex-shrink-0 border border-white/10 relative ${getNotificationColor(notif.type)}`}>
+              {getNotificationIcon(notif.type)}
+              {isMessageNotif && unreadCount > 0 && (
+                <div className="absolute -top-0.5 -right-0.5 min-w-[18px] h-[18px] rounded-full bg-[#309605]/20 border border-[#309605]/30 flex items-center justify-center">
+                  <span className="text-[10px] font-bold text-[#309605] tabular-nums">{unreadCount}</span>
+                </div>
+              )}
+            </div>
+          )}
 
-        {/* Content */}
-        <div className="flex-1 pr-2">
-          <div className="flex items-start gap-2 mb-1">
-            <h3 className={`text-base ${notif.is_read ? 'font-medium text-white/80' : 'font-semibold text-white'} flex-1 break-words`}>
-              {getNotificationTitle(notif)}
-            </h3>
-            {isMessageNotif && totalMessages > 1 && (
-              <span className="text-xs text-white/40 font-medium flex-shrink-0">
-                ({totalMessages})
-              </span>
+          {/* Content */}
+          <div className="flex-1 min-w-0">
+            <div className="flex items-start justify-between gap-2 mb-0.5">
+              <h3 className={`text-sm font-bold text-white leading-tight flex-1 break-words ${notif.is_read ? 'text-white/90' : ''}`}>
+                {getNotificationTitle(notif)}
+              </h3>
+              {isMessageNotif && totalMessages > 1 && (
+                <span className="text-[10px] font-bold text-white/50 flex-shrink-0 tabular-nums">
+                  {totalMessages}
+                </span>
+              )}
+            </div>
+            <p className="text-[11px] text-white/50 mt-0.5 font-medium">
+              {formatDistanceToNow(new Date(notif.created_at), { addSuffix: true }).replace('about ', '')}
+            </p>
+          </div>
+
+          {/* Actions */}
+          <div className="flex items-center gap-1 flex-shrink-0">
+            {!isCollabRequest && (
+              <button
+                type="button"
+                onClick={(e) => handleDeleteClick(notif, e)}
+                disabled={deletingId === notif.id}
+                className="min-w-[40px] min-h-[40px] flex items-center justify-center rounded-xl hover:bg-white/10 active:bg-white/15 transition-all disabled:opacity-50"
+                aria-label="Delete notification"
+              >
+                {deletingId === notif.id ? (
+                  <Spinner size={16} className="text-white" />
+                ) : (
+                  <Trash2 className="w-4 h-4 text-white/50" />
+                )}
+              </button>
             )}
           </div>
-          <p className="text-xs text-white/40">
-            {formatDistanceToNow(new Date(notif.created_at), { addSuffix: true }).replace('about ', '')}
-          </p>
         </div>
 
-        {/* Right side actions */}
-        <div className="flex items-center gap-2 flex-shrink-0">
-          {!notif.is_read && !isCollabRequest && (
-            <div className="w-2 h-2 bg-[#309605] rounded-full"></div>
-          )}
-          {!isCollabRequest && (
+        {/* Collaboration Request — Invite & Earn button style */}
+        {isCollabRequest && requestId && (
+          <div className="grid grid-cols-2 gap-3 px-1">
             <button
-              onClick={(e) => handleDeleteClick(notif, e)}
-              disabled={deletingId === notif.id}
-              className="p-2.5 hover:bg-red-500/20 active:bg-red-500/30 rounded-full transition-all disabled:opacity-50"
-              aria-label="Delete notification"
+              type="button"
+              onClick={(e) => handleAcceptCollabRequest(notif, e)}
+              disabled={processingCollabRequestId === requestId}
+              className="min-h-[48px] flex items-center justify-center gap-2 rounded-xl bg-white text-black text-sm font-bold hover:opacity-90 active:scale-[0.98] transition-all disabled:opacity-50 disabled:cursor-not-allowed shadow-sm"
             >
-              {deletingId === notif.id ? (
-                <Spinner size={16} className="text-white" />
+              {processingCollabRequestId === requestId ? (
+                <Spinner size={16} className="text-black" />
               ) : (
-                <Trash2 className="w-4 h-4 text-white/50" />
+                <>
+                  <Check className="w-4 h-4" />
+                  Accept
+                </>
               )}
             </button>
-          )}
-        </div>
+            <button
+              type="button"
+              onClick={(e) => handleDeclineCollabRequest(notif, e)}
+              disabled={processingCollabRequestId === requestId}
+              className="min-h-[48px] flex items-center justify-center gap-2 rounded-xl border border-white/10 hover:bg-white/5 hover:border-white/20 text-white text-sm font-semibold transition-all disabled:opacity-50 disabled:cursor-not-allowed active:scale-[0.98]"
+            >
+              {processingCollabRequestId === requestId ? (
+                <Spinner size={16} className="text-white" />
+              ) : (
+                <>
+                  <X className="w-4 h-4" />
+                  Decline
+                </>
+              )}
+            </button>
+          </div>
+        )}
       </div>
-
-      {/* Collaboration Request Action Buttons */}
-      {isCollabRequest && requestId && (
-        <div className="flex gap-2 px-4">
-          <button
-            onClick={(e) => handleAcceptCollabRequest(notif, e)}
-            disabled={processingCollabRequestId === requestId}
-            className="flex-1 px-4 py-2.5 bg-gradient-to-r from-[#309605] to-[#3ba208] hover:from-[#3ba208] hover:to-[#309605] text-white font-semibold rounded-xl transition-all disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center gap-2 active:scale-95 shadow-md shadow-[#309605]/20"
-          >
-            {processingCollabRequestId === requestId ? (
-              <Spinner size={16} className="text-white" />
-            ) : (
-              <>
-                <Check className="w-4 h-4" />
-                Accept
-              </>
-            )}
-          </button>
-          <button
-            onClick={(e) => handleDeclineCollabRequest(notif, e)}
-            disabled={processingCollabRequestId === requestId}
-            className="flex-1 px-4 py-2.5 bg-white/10 hover:bg-white/20 text-white font-semibold rounded-xl transition-all disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center gap-2 active:scale-95"
-          >
-            {processingCollabRequestId === requestId ? (
-              <Spinner size={16} className="text-white" />
-            ) : (
-              <>
-                <X className="w-4 h-4" />
-                Decline
-              </>
-            )}
-          </button>
-        </div>
-      )}
-    </div>
     );
   };
 
   return (
     <div className="min-h-screen min-h-[100dvh] overflow-x-hidden bg-gradient-to-b from-[#1a1a1a] via-[#0d0d0d] to-[#000000] text-white content-with-nav overflow-y-auto">
-      {/* Header */}
-      <div className="sticky top-0 z-10 bg-[#1a1a1a]/95 backdrop-blur-xl border-b border-white/10">
-        <div className="flex items-center gap-4 px-4 py-4">
+      {/* Sticky header — Invite & Earn style */}
+        <div
+          className="sticky top-0 z-10 bg-gradient-to-b from-[#1a1a1a] to-transparent backdrop-blur-sm border-b border-white/10 px-4 py-3.5 flex items-center gap-3"
+          style={{ paddingTop: 'calc(1.25rem + env(safe-area-inset-top, 0px) * 0.25)', paddingBottom: '1.25rem' }}
+        >
           <button
-            onClick={() => navigate(-1)}
-            className="p-2 active:bg-white/10 rounded-full transition-all active:scale-95"
+            type="button"
+            onClick={() => (window.history.length > 1 ? navigate(-1) : navigate('/'))}
+            className="min-w-[44px] min-h-[44px] p-2 rounded-full hover:bg-white/10 active:bg-white/15 transition-colors flex items-center justify-center -ml-1"
+            aria-label="Go back"
           >
-            <ArrowLeft className="w-6 h-6 text-white" />
+            <ArrowLeft className="w-5 h-5 text-white/80" />
           </button>
-          <h1 className="text-2xl font-bold flex-1">Notifications</h1>
-          {unreadCount > 0 && (
-            <div className="min-w-[28px] h-7 px-2.5 bg-gradient-to-r from-[#309605] to-[#3ba208] rounded-full flex items-center justify-center shadow-md shadow-[#309605]/20">
-              <span className="text-xs font-bold text-white">{unreadCount}</span>
+          <div className="min-w-0 flex-1 flex items-center gap-2">
+            <div>
+              <p className="text-[11px] font-bold uppercase tracking-[0.18em] text-white/60 mb-0.5">
+                Inbox
+              </p>
+              <h1 className="text-[15px] font-black tracking-tight text-white leading-none">
+                Notifications
+              </h1>
             </div>
-          )}
+            {unreadCount > 0 && (
+              <div className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-[#309605]/20 border border-[#309605]/30 flex-shrink-0">
+                <span className="text-[10px] font-bold text-[#309605] tabular-nums">{unreadCount}</span>
+                <span className="text-[10px] font-bold text-[#309605] uppercase tracking-wider">unread</span>
+              </div>
+            )}
+          </div>
         </div>
 
-        {/* Tabs and Mark All Read */}
-        <div className="px-4 pb-4">
-          <div className="flex gap-2 items-center">
+        {/* Tabs + Mark all read — Invite & Earn card style */}
+        <div className="px-4 sm:px-6 py-4 space-y-3 max-w-[600px] mx-auto">
+          <p className="text-[11px] font-bold uppercase tracking-[0.18em] text-white/60 px-1">
+            Filter
+          </p>
+          <div className="rounded-2xl border border-white/10 bg-white/5 p-1.5 flex items-center gap-2">
             <button
+              type="button"
               onClick={() => setActiveTab('all')}
-              className={`flex-1 py-3 rounded-xl font-semibold text-sm transition-all active:scale-95 ${
+              className={`flex-1 min-h-[44px] py-2.5 rounded-xl text-sm font-bold transition-all active:scale-[0.98] ${
                 activeTab === 'all'
-                  ? 'bg-white text-black shadow-lg'
-                  : 'bg-white/5 text-white/60 active:bg-white/10'
+                  ? 'bg-white text-black shadow-sm'
+                  : 'text-white/60 hover:text-white/80 hover:bg-white/5'
               }`}
             >
               All
             </button>
             <button
+              type="button"
               onClick={() => setActiveTab('unread')}
-              className={`flex-1 py-3 rounded-xl font-semibold text-sm transition-all flex items-center justify-center gap-2 active:scale-95 ${
+              className={`flex-1 min-h-[44px] py-2.5 rounded-xl text-sm font-bold transition-all flex items-center justify-center gap-2 active:scale-[0.98] ${
                 activeTab === 'unread'
-                  ? 'bg-white text-black shadow-lg'
-                  : 'bg-white/5 text-white/60 active:bg-white/10'
+                  ? 'bg-white text-black shadow-sm'
+                  : 'text-white/60 hover:text-white/80 hover:bg-white/5'
               }`}
             >
               Unread
               {unreadCount > 0 && activeTab !== 'unread' && (
-                <span className="min-w-[20px] h-5 px-1.5 bg-gradient-to-r from-[#309605] to-[#3ba208] rounded-full flex items-center justify-center text-[10px] font-bold text-white shadow-md shadow-[#309605]/20">
+                <span className="min-w-[20px] h-5 px-1.5 rounded-full bg-[#309605]/20 border border-[#309605]/30 flex items-center justify-center text-[10px] font-bold text-[#309605]">
                   {unreadCount}
                 </span>
               )}
             </button>
             {unreadCount > 0 && (
               <button
+                type="button"
                 onClick={markAllAsRead}
                 disabled={isMarkingAllRead}
-                className="p-3 bg-white/5 active:bg-white/10 rounded-xl transition-all active:scale-95 disabled:opacity-50"
+                className="min-w-[44px] min-h-[44px] flex items-center justify-center rounded-xl bg-white/5 hover:bg-white/10 border border-white/10 text-white/70 hover:text-white transition-all disabled:opacity-50"
                 aria-label="Mark all as read"
               >
                 {isMarkingAllRead ? (
                   <Spinner size={20} className="text-white" />
                 ) : (
-                  <CheckCheck className="w-5 h-5 text-white/60" />
+                  <CheckCheck className="w-5 h-5" />
+                )}
+              </button>
+            )}
+            {notifications.length > 0 && (
+              <button
+                type="button"
+                onClick={() => setShowConfirmDeleteAll(true)}
+                disabled={isDeletingAll}
+                className="min-w-[44px] min-h-[44px] flex items-center justify-center rounded-xl bg-white/5 hover:bg-red-500/10 border border-white/10 text-white/50 hover:text-red-400 transition-all disabled:opacity-50"
+                aria-label="Delete all notifications"
+                title="Delete all"
+              >
+                {isDeletingAll ? (
+                  <Spinner size={20} className="text-white" />
+                ) : (
+                  <Trash2 className="w-5 h-5" />
                 )}
               </button>
             )}
           </div>
         </div>
-      </div>
 
-      {/* Content */}
-      <div className="px-4 py-4">
-        {isLoading ? (
-          <div className="flex items-center justify-center py-20">
-            <Spinner size={40} className="text-white" />
-          </div>
-        ) : filteredNotifications.length === 0 ? (
-          <div className="text-center py-20 px-4">
-            <div className="w-24 h-24 bg-white/5 rounded-3xl flex items-center justify-center mx-auto mb-6">
-              <AlertCircle className="w-12 h-12 text-white/40" />
+        {/* Content — Invite & Earn layout */}
+        <div className="px-4 sm:px-6 py-2 sm:py-4 space-y-6 sm:space-y-8 max-w-[600px] mx-auto">
+          {isLoading ? (
+            <div className="space-y-3">
+              {[1, 2, 3, 4, 5].map((i) => (
+                <div key={i} className="h-20 sm:h-24 bg-white/5 rounded-2xl animate-pulse" />
+              ))}
             </div>
-            <h3 className="text-xl font-bold text-white mb-3">
-              {activeTab === 'unread' ? "All Caught Up!" : 'No Notifications'}
-            </h3>
-            <p className="text-sm text-white/50 max-w-xs mx-auto leading-relaxed">
-              {activeTab === 'unread'
-                ? 'No unread notifications. Check back later for updates!'
-                : "You don't have any notifications yet."}
-            </p>
-          </div>
-        ) : (
-          <div className="space-y-6">
-            {groupedNotifications.map((group, groupIndex) => (
-              <div key={groupIndex}>
-                <h2 className="text-xs font-bold text-white/50 mb-3 px-1 uppercase tracking-wider">{group.title}</h2>
-                <div className="space-y-2">
-                  {group.notifications.map((notif) => (
-                    <NotificationCard key={notif.id} notif={notif} />
-                  ))}
+          ) : filteredNotifications.length === 0 ? (
+            <div className="rounded-2xl border border-white/10 bg-white/5 overflow-hidden">
+              <div className="p-8 sm:p-10 text-center">
+                <div className="w-16 h-16 sm:w-20 sm:h-20 rounded-2xl bg-white/10 flex items-center justify-center mx-auto mb-4">
+                  <AlertCircle className="w-8 h-8 sm:w-10 sm:h-10 text-white/40" />
                 </div>
+                <h3 className="text-lg sm:text-xl font-black text-white tracking-tight mb-2">
+                  {activeTab === 'unread' ? 'All Caught Up!' : 'No Notifications'}
+                </h3>
+                <p className="text-[13px] sm:text-sm text-white/50 leading-relaxed max-w-xs mx-auto">
+                  {activeTab === 'unread'
+                    ? 'No unread notifications. Check back later for updates!'
+                    : "You don't have any notifications yet."}
+                </p>
               </div>
-            ))}
-          </div>
-        )}
-      </div>
+            </div>
+          ) : (
+            <div className="space-y-6 sm:space-y-8">
+              {groupedNotifications.map((group, groupIndex) => (
+                <div key={groupIndex} className="space-y-3">
+                  <p className="text-[11px] font-bold uppercase tracking-[0.18em] text-white/60 px-1">
+                    {group.title}
+                  </p>
+                  <div className="space-y-2">
+                    {group.notifications.map((notif) => (
+                      <NotificationCard key={notif.id} notif={notif} />
+                    ))}
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
 
-      {/* Delete Confirmation */}
+      {/* Delete single — Confirmation */}
       <CustomConfirmDialog
         isOpen={showConfirmDelete}
         title="Delete Notification?"
@@ -825,6 +924,19 @@ export const NotificationScreen = () => {
           setNotificationToDelete(null);
         }}
         isLoading={deletingId !== null}
+      />
+
+      {/* Delete all — Confirmation */}
+      <CustomConfirmDialog
+        isOpen={showConfirmDeleteAll}
+        title="Delete All Notifications?"
+        message="All your notifications will be permanently deleted. This action cannot be undone."
+        confirmText="Delete All"
+        cancelText="Cancel"
+        variant="danger"
+        onConfirm={handleDeleteAllNotifications}
+        onCancel={() => setShowConfirmDeleteAll(false)}
+        isLoading={isDeletingAll}
       />
 
       {/* Toast Notification */}

@@ -1,6 +1,5 @@
 import React, { useState, useEffect } from 'react';
 import { CreditCard, Wallet, DollarSign, Check, AlertCircle, Smartphone } from 'lucide-react';
-import { Card, CardContent } from './ui/card';
 import {
   getEnabledTreatPaymentChannels,
   getPlayProductIdForTreatPackage,
@@ -11,23 +10,26 @@ import { paymentMonitor } from '../lib/paymentMonitor';
 import { supabase } from '../lib/supabase';
 import {
   consumeGooglePlayPurchase,
-  getOwnedGooglePlayConsumables,
+  getOwnedGooglePlayConsumable,
   purchaseGooglePlayConsumable,
-  type GooglePlayPurchaseResult,
 } from '../lib/playBilling';
-import { Currency, CurrencyDetectionResult } from '../lib/currencyDetection';
+import type { GooglePlayPurchaseResult } from '../lib/playBilling';
+import { Currency, CurrencyDetectionResult, formatCurrencyAmount } from '../lib/currencyDetection';
 import { CurrencySelector } from './CurrencySelector';
 import { Browser } from '@capacitor/browser';
 import { Capacitor } from '@capacitor/core';
 
 interface PaymentChannelSelectorProps {
+  /** Amount shown to the user and charged in their selected currency */
   amount: number;
+  /** Canonical package price in USD (stored as amount_usd in the database) */
+  amountUsd: number;
   packageId: string;
   userEmail: string;
   currencyData: CurrencyDetectionResult;
-  onCurrencyChange: (_currency: Currency) => void;
-  onPaymentSuccess: (_paymentData: any) => void;
-  onPaymentError: (_error: string) => void;
+  onCurrencyChange: React.Dispatch<Currency>;
+  onPaymentSuccess: React.Dispatch<Record<string, unknown>>;
+  onPaymentError: React.Dispatch<string>;
   onCancel: () => void;
 }
 
@@ -37,8 +39,33 @@ interface PaymentProcessingState {
   isVerifying: boolean;
 }
 
+interface GooglePlayVerificationResult {
+  success?: boolean;
+  payment_id?: string;
+  error?: string;
+  duplicate?: boolean;
+}
+
+const isEdgeFunctionRelayFailure = (message: string | undefined): boolean => {
+  if (!message) return false;
+  const normalized = message.toLowerCase();
+  return (
+    normalized.includes('failed to send a request to the edge function') ||
+    normalized.includes('network request failed') ||
+    normalized.includes('failed to fetch') ||
+    normalized.includes('fetch failed')
+  );
+};
+
+const isAlreadyConsumedPurchaseError = (message: string | undefined): boolean => {
+  if (!message) return false;
+  const normalized = message.toLowerCase();
+  return normalized.includes('already consumed') || normalized.includes('not owned') || normalized.includes('item_not_owned');
+};
+
 export const PaymentChannelSelector: React.FC<PaymentChannelSelectorProps> = ({
   amount,
+  amountUsd,
   packageId,
   userEmail,
   currencyData,
@@ -112,64 +139,107 @@ export const PaymentChannelSelector: React.FC<PaymentChannelSelectorProps> = ({
           return;
         }
 
-        const verifyGooglePlayTreatPurchase = async (purchase: GooglePlayPurchaseResult): Promise<string> => {
-          const { data, error: fnError } = await supabase.functions.invoke('verify-google-play-purchase', {
-            body: {
-              payment_channel_id: selectedChannel.id,
-              package_id: packageId,
-              purchase_token: purchase.purchaseToken,
-              product_id: purchase.productId,
-              order_id: purchase.orderId,
-              amount_usd: amount,
-            },
-          });
+        // Best effort: refresh auth before verification; do not block if refresh transiently fails.
+        const refreshAuthForVerification = async () => {
+          try {
+            await supabase.auth.refreshSession();
+          } catch (refreshErr) {
+            console.warn('[PaymentChannelSelector] Session refresh failed before Google Play verification, continuing:', refreshErr);
+          }
+        };
 
-          if (fnError) {
-            const msg =
-              fnError.message ||
-              (data as { error?: string } | null)?.error ||
-              'Could not verify Google Play purchase';
-            throw new Error(msg);
+        const verifyGooglePlayPurchase = async (purchase: GooglePlayPurchaseResult): Promise<GooglePlayVerificationResult> => {
+          await refreshAuthForVerification();
+
+          const payload = {
+            payment_channel_id: selectedChannel.id,
+            package_id: packageId,
+            purchase_token: purchase.purchaseToken,
+            product_id: purchase.productId,
+            order_id: purchase.orderId,
+            amount_usd: amountUsd,
+          };
+
+          let data: unknown = null;
+          let fnError: { message?: string } | null = null;
+          const maxAttempts = 3;
+
+          for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+            const response = await supabase.functions.invoke('verify-google-play-purchase', {
+              body: payload,
+            });
+            data = response.data;
+            fnError = response.error as { message?: string } | null;
+
+            if (!fnError) break;
+
+            const shouldRetry = isEdgeFunctionRelayFailure(fnError.message) && attempt < maxAttempts;
+            if (!shouldRetry) break;
+
+            // Short exponential backoff for transient relay failures.
+            const retryDelayMs = 800 * attempt;
+            await new Promise((resolve) => setTimeout(resolve, retryDelayMs));
           }
 
-          const row = data as { success?: boolean; payment_id?: string; error?: string } | null;
+          if (fnError) {
+            throw new Error(fnError.message || (data as { error?: string } | null)?.error || 'Could not verify Google Play purchase');
+          }
+
+          const row = data as GooglePlayVerificationResult | null;
           if (!row?.success || !row.payment_id) {
             throw new Error(row?.error || 'Could not verify Google Play purchase');
           }
 
-          return row.payment_id;
+          return row;
         };
 
-        const completeGooglePlayPurchase = async (purchase: GooglePlayPurchaseResult, paymentId: string) => {
+        const finishGooglePlayPurchase = async (purchaseToken: string): Promise<boolean> => {
           try {
-            await consumeGooglePlayPurchase(purchase.purchaseToken);
-          } catch (consumeError) {
-            console.warn('Google Play purchase was credited but could not be consumed:', consumeError);
-            throw new Error(
-              'Your purchase was credited, but Google Play could not release this item for another purchase. Please restart the app before buying this package again.'
-            );
+            await consumeGooglePlayPurchase(purchaseToken);
+            return true;
+          } catch (consumeErr) {
+            const consumeMessage = consumeErr instanceof Error ? consumeErr.message : 'Could not finish Google Play purchase';
+            if (isAlreadyConsumedPurchaseError(consumeMessage)) {
+              return true;
+            }
+
+            console.warn('[PaymentChannelSelector] Google Play purchase verified but consumption failed:', consumeErr);
+            const msg =
+              'Payment verified and treats were credited, but Google Play could not finish this purchase. Please try again in a moment before buying this package again.';
+            setError(msg);
+            onPaymentError(msg);
+            return false;
           }
+        };
+
+        const ownedPurchase = await getOwnedGooglePlayConsumable(sku);
+        if (ownedPurchase) {
+          const ownedRow = await verifyGooglePlayPurchase(ownedPurchase);
+          const finishedOwnedPurchase = await finishGooglePlayPurchase(ownedPurchase.purchaseToken);
+          if (!finishedOwnedPurchase) return;
 
           onPaymentSuccess({
             payment_method: 'google_play',
-            payment_reference: purchase.orderId,
-            payment_id: paymentId,
+            payment_reference: ownedPurchase.orderId,
+            payment_id: ownedRow.payment_id,
             status: 'completed',
             amount,
           });
-        };
-
-        const ownedPurchases = await getOwnedGooglePlayConsumables(sku);
-        if (ownedPurchases.length > 0) {
-          const ownedPurchase = ownedPurchases[0];
-          const paymentId = await verifyGooglePlayTreatPurchase(ownedPurchase);
-          await completeGooglePlayPurchase(ownedPurchase, paymentId);
           return;
         }
 
         const purchase = await purchaseGooglePlayConsumable(sku);
-        const paymentId = await verifyGooglePlayTreatPurchase(purchase);
-        await completeGooglePlayPurchase(purchase, paymentId);
+        const row = await verifyGooglePlayPurchase(purchase);
+        const finishedPurchase = await finishGooglePlayPurchase(purchase.purchaseToken);
+        if (!finishedPurchase) return;
+
+        onPaymentSuccess({
+          payment_method: 'google_play',
+          payment_reference: purchase.orderId,
+          payment_id: row.payment_id,
+          status: 'completed',
+          amount,
+        });
       } catch (err) {
         const msg = err instanceof Error ? err.message : 'Google Play purchase failed';
         setError(msg);
@@ -251,6 +321,7 @@ export const PaymentChannelSelector: React.FC<PaymentChannelSelectorProps> = ({
       const result = await processPayment(
         selectedChannel.id,
         amount,
+        amountUsd,
         packageId,
         userEmail,
         currencyData
@@ -263,7 +334,7 @@ export const PaymentChannelSelector: React.FC<PaymentChannelSelectorProps> = ({
         const paymentId = paymentData.payment_id;
 
         setProcessingState({
-          paymentId,
+          paymentId: paymentId,
           isMonitoring: true,
           isVerifying: false,
         });
@@ -610,12 +681,15 @@ export const PaymentChannelSelector: React.FC<PaymentChannelSelectorProps> = ({
     }
   };
 
+  const hasOnlyGooglePlayChannel =
+    paymentChannels.length === 1 && paymentChannels[0]?.channel_type === 'google_play';
+
   if (isLoading) {
     return (
       <div className="space-y-4">
-        <div className="flex items-center justify-center py-8">
-          <div className="w-6 h-6 border-2 border-[#309605] border-t-transparent rounded-full animate-spin"></div>
-          <p className="font-['Inter',sans-serif] text-white/70 text-sm ml-3">
+        <div className="flex items-center justify-center py-8 rounded-3xl border border-white/[0.07] bg-white/[0.03]">
+          <div className="w-5 h-5 border-2 border-[#00ad74] border-t-transparent rounded-full animate-spin"></div>
+          <p className="font-['Inter',sans-serif] text-white/60 text-sm ml-3">
             Loading payment options...
           </p>
         </div>
@@ -626,7 +700,7 @@ export const PaymentChannelSelector: React.FC<PaymentChannelSelectorProps> = ({
   if (error && paymentChannels.length === 0) {
     return (
       <div className="space-y-4">
-        <div className="p-4 bg-red-500/20 border border-red-500/30 rounded-lg">
+        <div className="p-4 bg-red-500/10 border border-red-500/20 rounded-2xl">
           <div className="flex items-center gap-2">
             <AlertCircle className="w-4 h-4 text-red-400" />
             <p className="font-['Inter',sans-serif] text-red-400 text-sm">{error}</p>
@@ -635,13 +709,13 @@ export const PaymentChannelSelector: React.FC<PaymentChannelSelectorProps> = ({
         <div className="flex gap-3">
           <button
             onClick={onCancel}
-            className="flex-1 h-12 bg-white/10 hover:bg-white/20 border border-white/20 rounded-xl font-['Inter',sans-serif] font-medium text-white transition-all duration-200"
+            className="flex-1 h-12 bg-white/[0.05] border border-white/[0.07] rounded-2xl font-['Inter',sans-serif] font-semibold text-white/60 active:bg-white/[0.08] transition-all duration-200"
           >
             Cancel
           </button>
           <button
             onClick={loadPaymentChannels}
-            className="flex-1 h-12 bg-gradient-to-r from-[#309605] to-[#3ba208] hover:from-[#3ba208] hover:to-[#309605] rounded-xl font-['Inter',sans-serif] font-medium text-white transition-all duration-200"
+            className="flex-1 h-12 bg-white rounded-2xl font-['Inter',sans-serif] font-black text-black active:scale-[0.98] transition-all duration-200"
           >
             Retry
           </button>
@@ -653,8 +727,8 @@ export const PaymentChannelSelector: React.FC<PaymentChannelSelectorProps> = ({
   if (paymentChannels.length === 0) {
     return (
       <div className="space-y-4">
-        <div className="p-6 bg-white/5 rounded-lg text-center">
-          <div className="w-12 h-12 bg-white/10 rounded-full flex items-center justify-center mx-auto mb-3">
+        <div className="p-6 border border-white/[0.07] bg-white/[0.03] rounded-3xl text-center">
+          <div className="w-12 h-12 bg-white/[0.05] rounded-2xl flex items-center justify-center mx-auto mb-3">
             <CreditCard className="w-6 h-6 text-white/60" />
           </div>
           <h3 className="font-['Inter',sans-serif] font-semibold text-white text-base mb-2">
@@ -668,7 +742,7 @@ export const PaymentChannelSelector: React.FC<PaymentChannelSelectorProps> = ({
         </div>
         <button
           onClick={onCancel}
-          className="w-full h-12 bg-white/10 hover:bg-white/20 border border-white/20 rounded-xl font-['Inter',sans-serif] font-medium text-white transition-all duration-200"
+          className="w-full h-12 bg-white rounded-2xl font-['Inter',sans-serif] font-black text-black active:scale-[0.98] transition-all duration-200"
         >
           Close
         </button>
@@ -680,8 +754,8 @@ export const PaymentChannelSelector: React.FC<PaymentChannelSelectorProps> = ({
   if (processingState.isVerifying) {
     return (
       <div className="space-y-6">
-        <div className="flex flex-col items-center justify-center py-12">
-          <div className="w-16 h-16 border-4 border-[#309605] border-t-transparent rounded-full animate-spin mb-4"></div>
+        <div className="flex flex-col items-center justify-center py-12 rounded-3xl border border-white/[0.07] bg-white/[0.03]">
+          <div className="w-14 h-14 border-4 border-[#00ad74] border-t-transparent rounded-full animate-spin mb-4"></div>
           <h3 className="font-['Inter',sans-serif] font-semibold text-white text-lg mb-2">
             Verifying Payment
           </h3>
@@ -696,10 +770,10 @@ export const PaymentChannelSelector: React.FC<PaymentChannelSelectorProps> = ({
   return (
     <div className="space-y-6">
       {/* Currency Selector */}
-      <div>
-        <h3 className="font-['Inter',sans-serif] font-semibold text-white text-base mb-3">
+      <div className="rounded-3xl border border-white/[0.07] bg-white/[0.03] p-5">
+        <p className="text-[10px] font-bold uppercase tracking-widest text-white/30 font-['Inter',sans-serif] mb-3">
           Payment Currency
-        </h3>
+        </p>
         <CurrencySelector
           selectedCurrency={currencyData.currency}
           onCurrencyChange={onCurrencyChange}
@@ -708,64 +782,64 @@ export const PaymentChannelSelector: React.FC<PaymentChannelSelectorProps> = ({
         />
       </div>
 
-      <div>
-        <h3 className="font-['Inter',sans-serif] font-semibold text-white text-base mb-4">
-          Choose Payment Method
-        </h3>
+      {!hasOnlyGooglePlayChannel && (
+        <div className="rounded-3xl border border-white/[0.07] bg-white/[0.03] p-5">
+          <p className="text-[10px] font-bold uppercase tracking-widest text-white/30 font-['Inter',sans-serif] mb-3">
+            Choose Payment Method
+          </p>
 
-        <div className="space-y-3">
-          {paymentChannels.map((channel) => (
-            <Card
-              key={channel.id}
-              onClick={() => setSelectedChannel(channel)}
-              className={`cursor-pointer transition-all duration-200 ${
-                selectedChannel?.id === channel.id
-                  ? 'bg-[#309605]/20 border-[#309605]/50'
-                  : 'bg-white/5 border-white/20 hover:bg-white/10 hover:border-white/30'
-              }`}
-            >
-              <CardContent className="p-4">
+          <div className="space-y-3">
+            {paymentChannels.map((channel) => (
+              <button
+                key={channel.id}
+                onClick={() => setSelectedChannel(channel)}
+                className={`w-full text-left rounded-2xl px-4 py-4 transition-all duration-200 border ${
+                  selectedChannel?.id === channel.id
+                    ? 'bg-[#00ad74]/10 border-[#00ad74]/20'
+                    : 'bg-white/[0.04] border-white/[0.07] active:bg-white/[0.08]'
+                }`}
+              >
                 <div className="flex items-center justify-between">
-                  <div className="flex items-center gap-4">
-                    <div className={`w-12 h-12 rounded-full flex items-center justify-center ${
+                  <div className="flex items-center gap-3">
+                    <div className={`w-10 h-10 rounded-xl flex items-center justify-center ${
                       selectedChannel?.id === channel.id
-                        ? 'bg-[#309605]/30 text-[#309605]'
-                        : 'bg-white/10 text-white/70'
+                        ? 'bg-[#00ad74]/15 text-[#00ad74]'
+                        : 'bg-white/[0.08] text-white/60'
                     }`}>
                       {channel.icon_url ? (
                         <img
                           src={channel.icon_url}
                           alt={channel.channel_name}
-                          className="w-8 h-8 object-contain"
+                          className="w-6 h-6 object-contain"
                         />
                       ) : (
                         getChannelIcon(channel.channel_type)
                       )}
                     </div>
                     <div>
-                      <h4 className="font-['Inter',sans-serif] font-medium text-white text-base">
+                      <h4 className="font-['Inter',sans-serif] font-semibold text-white text-sm">
                         {getChannelDisplayName(channel)}
                       </h4>
-                      <p className="font-['Inter',sans-serif] text-white/60 text-sm">
+                      <p className="font-['Inter',sans-serif] text-white/40 text-[11px]">
                         {getChannelDescription(channel.channel_type)}
                       </p>
                     </div>
                   </div>
 
                   {selectedChannel?.id === channel.id && (
-                    <div className="w-6 h-6 bg-[#309605] rounded-full flex items-center justify-center">
-                      <Check className="w-4 h-4 text-white" />
+                    <div className="w-5 h-5 bg-[#00ad74] rounded-full flex items-center justify-center">
+                      <Check className="w-3 h-3 text-black" />
                     </div>
                   )}
                 </div>
-              </CardContent>
-            </Card>
-          ))}
+              </button>
+            ))}
+          </div>
         </div>
-      </div>
+      )}
 
       {error && (
-        <div className="p-3 bg-red-500/20 border border-red-500/30 rounded-lg">
+        <div className="p-3 bg-red-500/10 border border-red-500/20 rounded-2xl">
           <div className="flex items-center gap-2">
             <AlertCircle className="w-4 h-4 text-red-400" />
             <p className="font-['Inter',sans-serif] text-red-400 text-sm">{error}</p>
@@ -774,15 +848,15 @@ export const PaymentChannelSelector: React.FC<PaymentChannelSelectorProps> = ({
       )}
 
       {selectedChannel && (
-        <div className="p-4 bg-white/5 rounded-lg">
-          <h4 className="font-['Inter',sans-serif] font-medium text-white text-sm mb-3">
+        <div className="p-4 bg-white/[0.03] border border-white/[0.07] rounded-3xl">
+          <h4 className="font-['Inter',sans-serif] font-medium text-white/80 text-sm mb-3">
             Payment Summary
           </h4>
           <div className="space-y-2">
             <div className="flex justify-between items-center">
               <span className="font-['Inter',sans-serif] text-white/70 text-sm">Amount:</span>
               <span className="font-['Inter',sans-serif] font-bold text-white text-lg">
-                {currencyData.currency.symbol}{amount.toFixed(2)}
+                {formatCurrencyAmount(amount, currencyData.currency)}
               </span>
             </div>
             <div className="flex justify-between items-center">
@@ -799,22 +873,22 @@ export const PaymentChannelSelector: React.FC<PaymentChannelSelectorProps> = ({
         <button
           onClick={onCancel}
           disabled={isProcessing}
-          className="flex-1 h-12 bg-white/10 hover:bg-white/20 border border-white/20 rounded-xl font-['Inter',sans-serif] font-medium text-white transition-all duration-200 disabled:opacity-50"
+          className="flex-1 h-12 bg-white/[0.05] border border-white/[0.07] rounded-2xl font-['Inter',sans-serif] font-semibold text-white/60 active:bg-white/[0.08] transition-all duration-200 disabled:opacity-50"
         >
           Cancel
         </button>
         <button
           onClick={handlePayment}
           disabled={!selectedChannel || isProcessing}
-          className="flex-1 h-12 bg-gradient-to-r from-[#309605] to-[#3ba208] hover:from-[#3ba208] hover:to-[#309605] disabled:opacity-50 disabled:cursor-not-allowed rounded-xl font-['Inter',sans-serif] font-medium text-white transition-all duration-200 shadow-lg shadow-[#309605]/25"
+          className="flex-1 h-12 bg-white text-black disabled:opacity-40 disabled:cursor-not-allowed rounded-2xl font-['Inter',sans-serif] font-black transition-all duration-200 active:scale-[0.98]"
         >
           {isProcessing ? (
             <div className="flex items-center justify-center gap-2">
-              <div className="w-4 h-4 border-2 border-white border-t-transparent rounded-full animate-spin"></div>
+              <div className="w-4 h-4 border-2 border-black/70 border-t-transparent rounded-full animate-spin"></div>
               Processing...
             </div>
           ) : (
-            `Pay ${currencyData.currency.symbol}${amount.toFixed(2)}`
+            `Pay ${formatCurrencyAmount(amount, currencyData.currency)}`
           )}
         </button>
       </div>

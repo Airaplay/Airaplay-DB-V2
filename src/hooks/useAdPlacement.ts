@@ -1,10 +1,16 @@
 import { useCallback, useEffect, useState } from 'react';
 import { admobService } from '../lib/admobService';
-import { getActivePlacement, getActivePlacementsForScreen, checkPlacementConditions, AdPlacement } from '../lib/adPlacementService';
+import {
+  getActivePlacement,
+  getActivePlacementsForScreen,
+  checkPlacementConditions,
+  AdPlacement,
+} from '../lib/adPlacementService';
+import { resolveRewardedInterstitialAdUnitId } from '../lib/adPlacementConstants';
 import { BannerAdPosition } from '@capacitor-community/admob';
-import { getFullscreenAdCooldownMsSync } from '../lib/fullscreenAdCooldownConfig';
 
 // Global fullscreen ad cooldown so fullscreen ads (rewarded or interstitial) never appear too frequently across screens
+const FULLSCREEN_AD_COOLDOWN_MS = 3.5 * 60 * 1000; // 3 minutes 30 seconds
 let lastFullscreenAdTime = 0;
 let fullscreenAdLock = false;
 
@@ -128,7 +134,7 @@ export function useAdPlacement(screenName?: string) {
     ) => {
       try {
         const now = Date.now();
-        if (fullscreenAdLock || (now - lastFullscreenAdTime) < getFullscreenAdCooldownMsSync()) {
+        if (fullscreenAdLock || (now - lastFullscreenAdTime) < FULLSCREEN_AD_COOLDOWN_MS) {
           console.log('Fullscreen ad skipped by cooldown (interstitial).');
           return;
         }
@@ -183,7 +189,7 @@ export function useAdPlacement(screenName?: string) {
     async (placementKey?: string, context?: Record<string, any>): Promise<void> => {
       try {
         const now = Date.now();
-        if (fullscreenAdLock || (now - lastFullscreenAdTime) < getFullscreenAdCooldownMsSync()) {
+        if (fullscreenAdLock || (now - lastFullscreenAdTime) < FULLSCREEN_AD_COOLDOWN_MS) {
           console.log('Fullscreen ad skipped by cooldown (rewarded).');
           return;
         }
@@ -236,7 +242,7 @@ export function useAdPlacement(screenName?: string) {
   const showSongBonusRewarded = useCallback(async (context: { contentId: string }): Promise<void> => {
     try {
       const now = Date.now();
-      if (fullscreenAdLock || (now - lastFullscreenAdTime) < getFullscreenAdCooldownMsSync()) {
+      if (fullscreenAdLock || (now - lastFullscreenAdTime) < FULLSCREEN_AD_COOLDOWN_MS) {
         console.log('Fullscreen ad skipped by cooldown (song bonus rewarded).');
         return;
       }
@@ -257,7 +263,8 @@ export function useAdPlacement(screenName?: string) {
   }, []);
 
   /**
-   * Show a rewarded interstitial ad by placement key or screen
+   * Rewarded interstitial uses env + {@link resolveRewardedInterstitialAdUnitId} only (no `ad_placements` / Supabase).
+   * `placementKey` is optional metadata for impression logging (e.g. `between_songs_rewarded_interstitial`).
    */
   const showRewardedInterstitial = useCallback(
     async (
@@ -267,42 +274,18 @@ export function useAdPlacement(screenName?: string) {
     ): Promise<void> => {
       try {
         const now = Date.now();
-        if (fullscreenAdLock || (now - lastFullscreenAdTime) < getFullscreenAdCooldownMsSync()) {
+        if (fullscreenAdLock || (now - lastFullscreenAdTime) < FULLSCREEN_AD_COOLDOWN_MS) {
           console.log('Fullscreen ad skipped by cooldown (rewarded interstitial).');
           return;
         }
         fullscreenAdLock = true;
 
-        let placement: AdPlacement | null = null;
-
-        if (placementKey) {
-          placement = await getActivePlacement(placementKey);
-        } else if (screenName && placements.length > 0) {
-          placement = placements.find(p => p.ad_type === 'rewarded_interstitial' && checkPlacementConditions(p, context || {})) || null;
-        }
-
-        if (placementKey && (!placement || placement.ad_type !== 'rewarded_interstitial')) {
-          await admobService.showRewardedInterstitial(
-            context?.contentId,
-            context?.contentType || 'general',
-            placementKey,
-            undefined,
-            options
-          );
-          lastFullscreenAdTime = Date.now();
-          return;
-        }
-
-        if (!placement || placement.ad_type !== 'rewarded_interstitial') {
-          console.warn('No rewarded interstitial placement found');
-          return;
-        }
-
+        const unitId = resolveRewardedInterstitialAdUnitId();
         await admobService.showRewardedInterstitial(
           context?.contentId,
           context?.contentType || 'general',
-          placement.placement_key,
-          placement.ad_unit_id || undefined,
+          placementKey,
+          unitId,
           options
         );
         lastFullscreenAdTime = Date.now();
@@ -313,7 +296,7 @@ export function useAdPlacement(screenName?: string) {
         fullscreenAdLock = false;
       }
     },
-    [screenName, placements]
+    []
   );
 
   /**

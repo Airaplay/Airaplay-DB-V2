@@ -186,64 +186,38 @@ export const setCurrencyPreference = (currencyCode: string): void => {
 };
 
 /**
- * Premium currencies that require minimum 1 unit rounding
- */
-const PREMIUM_CURRENCIES = ['GBP', 'EUR'];
-
-/**
- * Apply automatic rounding for premium currencies (GBP/EUR)
- * If converted amount is less than 1 unit, round UP to exactly 1 unit
- */
-const applyPremiumCurrencyRounding = (amount: number, currencyCode: string): { amount: number; wasRounded: boolean } => {
-  const isPremiumCurrency = PREMIUM_CURRENCIES.includes(currencyCode);
-
-  if (isPremiumCurrency && amount < 1.00) {
-    return {
-      amount: 1.00,
-      wasRounded: true
-    };
-  }
-
-  return {
-    amount,
-    wasRounded: false
-  };
-};
-
-/**
- * Convert amount from USD to target currency with automatic premium currency rounding
- * GBP/EUR amounts less than 1 unit are automatically rounded UP to exactly 1 unit
+ * Convert amount from USD to target currency (display and checkout use the same value).
  */
 export const convertAmount = (amountUSD: number, targetCurrency: Currency): number => {
-  const convertedAmount = Math.round(amountUSD * targetCurrency.exchangeRate * 100) / 100;
-  const { amount } = applyPremiumCurrencyRounding(convertedAmount, targetCurrency.code);
-  return amount;
+  if (!Number.isFinite(amountUSD) || amountUSD <= 0) return 0;
+  if (targetCurrency.code === 'USD' || targetCurrency.exchangeRate <= 0) {
+    return Math.round(amountUSD * 100) / 100;
+  }
+  return Math.round(amountUSD * targetCurrency.exchangeRate * 100) / 100;
 };
 
 /**
- * Convert amount with rounding information
- * Returns both the converted amount and whether rounding was applied
+ * Convert a local-currency amount back to USD (inverse of {@link convertAmount}).
+ * exchangeRate is units of local currency per 1 USD.
  */
-export const convertAmountWithRoundingInfo = (amountUSD: number, targetCurrency: Currency): {
-  amount: number;
-  wasRounded: boolean;
-  originalAmount?: number;
-} => {
-  const convertedAmount = Math.round(amountUSD * targetCurrency.exchangeRate * 100) / 100;
-  const { amount, wasRounded } = applyPremiumCurrencyRounding(convertedAmount, targetCurrency.code);
-
-  return {
-    amount,
-    wasRounded,
-    originalAmount: wasRounded ? convertedAmount : undefined
-  };
+export const convertToUsd = (amountLocal: number, sourceCurrency: Currency): number => {
+  if (!Number.isFinite(amountLocal) || amountLocal <= 0) return 0;
+  if (sourceCurrency.code === 'USD' || sourceCurrency.exchangeRate <= 0) {
+    return Math.round(amountLocal * 100) / 100;
+  }
+  return Math.round((amountLocal / sourceCurrency.exchangeRate) * 100) / 100;
 };
 
 /**
- * Format amount with currency symbol
+ * Format amount with currency symbol (preserves sub-unit prices, e.g. $0.49, £0.79).
  */
 export const formatCurrencyAmount = (amount: number, currency: Currency): string => {
-  return `${currency.symbol}${amount.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+  const zeroDecimalCurrencies = new Set(['JPY', 'KRW', 'VND']);
+  const fractionDigits = zeroDecimalCurrencies.has(currency.code) ? 0 : 2;
+  return `${currency.symbol}${amount.toLocaleString(undefined, {
+    minimumFractionDigits: fractionDigits,
+    maximumFractionDigits: fractionDigits,
+  })}`;
 };
 
 /**

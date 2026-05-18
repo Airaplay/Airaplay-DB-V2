@@ -1,7 +1,7 @@
 import { Capacitor } from '@capacitor/core';
 import { supabase } from './supabase';
 import { CurrencyDetectionResult } from './currencyDetection';
-import { fetchWithCache, CACHE_KEYS, CACHE_TTL } from './configCache';
+import { configCache, CACHE_KEYS } from './configCache';
 
 export interface PaymentChannel {
   id: string;
@@ -39,41 +39,19 @@ export interface PaymentChannelConfig {
 
 /**
  * Get all enabled payment channels for public use.
- *
- * Reads from `public.enabled_payment_channels_public`, a server-side view
- * that exposes only fields safe to send to the browser. Provider secrets
- * (`secret_key`, `encryption_key`, `api_token`, …) are stripped — they live
- * in `treat_payment_channels.configuration` and are loaded by the
- * `process-payment` Edge Function from the service-role context only.
- *
- * Cached for 6 hours as payment channels rarely change.
+ * Not cached: admin changes must show up immediately on all devices (persistent cache only ran per-client).
  */
 export const getEnabledPaymentChannels = async (): Promise<PaymentChannel[]> => {
   try {
-    return fetchWithCache(
-      CACHE_KEYS.PAYMENT_CHANNELS,
-      CACHE_TTL.SIX_HOURS,
-      async () => {
-        const { data, error } = await supabase
-          .from('enabled_payment_channels_public')
-          .select('id, channel_name, channel_type, is_enabled, icon_url, public_configuration, display_order, created_at, updated_at')
-          .order('display_order', { ascending: true });
+    const { data, error } = await supabase
+      .from('treat_payment_channels')
+      .select('id, channel_name, channel_type, is_enabled, icon_url, configuration, display_order, created_at, updated_at')
+      .eq('is_enabled', true)
+      .order('display_order', { ascending: true });
 
-        if (error) throw error;
+    if (error) throw error;
 
-        return (data || []).map((row: Record<string, unknown>) => ({
-          id: row.id as string,
-          channel_name: row.channel_name as string,
-          channel_type: row.channel_type as string,
-          is_enabled: row.is_enabled as boolean,
-          icon_url: (row.icon_url as string | null) ?? null,
-          configuration: row.public_configuration ?? {},
-          display_order: row.display_order as number,
-          created_at: row.created_at as string,
-          updated_at: row.updated_at as string,
-        }));
-      }
-    );
+    return data || [];
   } catch (error) {
     console.error('Error fetching enabled payment channels:', error);
     throw error;
@@ -81,17 +59,19 @@ export const getEnabledPaymentChannels = async (): Promise<PaymentChannel[]> => 
 };
 
 /**
- * Treat checkout channels: Play-distributed Android app uses only `google_play` when configured;
- * web and other native targets use non-Play channels (Paystack, Flutterwave, etc.).
+ * Treat checkout channels:
+ * - Return all enabled channels so users can see every admin-enabled option.
+ * - On Android native, prioritize Google Play at the top when available.
  */
 export const getEnabledTreatPaymentChannels = async (): Promise<PaymentChannel[]> => {
   const rows = await getEnabledPaymentChannels();
   const androidNative = Capacitor.isNativePlatform() && Capacitor.getPlatform() === 'android';
   if (androidNative) {
     const play = rows.filter((c) => c.channel_type === 'google_play');
-    return play;
+    const others = rows.filter((c) => c.channel_type !== 'google_play');
+    return [...play, ...others];
   }
-  return rows.filter((c) => c.channel_type !== 'google_play');
+  return rows;
 };
 
 export function parseProductIdByPackage(configuration: unknown): Record<string, string> | null {
@@ -161,6 +141,7 @@ export const createPaymentChannel = async (channelData: PaymentChannelConfig): P
 
     if (error) throw error;
 
+    configCache.invalidate(CACHE_KEYS.PAYMENT_CHANNELS);
     return data;
   } catch (error) {
     console.error('Error creating payment channel:', error);
@@ -188,6 +169,7 @@ export const updatePaymentChannel = async (
 
     if (error) throw error;
 
+    configCache.invalidate(CACHE_KEYS.PAYMENT_CHANNELS);
     return data;
   } catch (error) {
     console.error('Error updating payment channel:', error);
@@ -206,6 +188,7 @@ export const deletePaymentChannel = async (channelId: string): Promise<void> => 
       .eq('id', channelId);
 
     if (error) throw error;
+    configCache.invalidate(CACHE_KEYS.PAYMENT_CHANNELS);
   } catch (error) {
     console.error('Error deleting payment channel:', error);
     throw error;
@@ -239,6 +222,7 @@ export const togglePaymentChannelStatus = async (channelId: string): Promise<Pay
 
     if (error) throw error;
 
+    configCache.invalidate(CACHE_KEYS.PAYMENT_CHANNELS);
     return data;
   } catch (error) {
     console.error('Error toggling payment channel status:', error);
@@ -252,20 +236,43 @@ export const togglePaymentChannelStatus = async (channelId: string): Promise<Pay
 export const processPayment = async (
   channelId: string,
   amount: number,
+  amountUsd: number,
   packageId: string,
   userEmail: string,
   currencyData: CurrencyDetectionResult
 ): Promise<{ success: boolean; data?: any; error?: string }> => {
   try {
-    // Channel type / configuration is intentionally NOT sent from the browser.
-    // process-payment loads them from treat_payment_channels using its
-    // service-role client, so provider secrets never leave the server.
+    // Get payment channel details
+    const { data: channel, error: channelError } = await supabase
+      .from('treat_payment_channels')
+      .select('*')
+      .eq('id', channelId)
+      .eq('is_enabled', true)
+      .single();
+
+    if (channelError) throw channelError;
+
+    if (!channel) {
+      throw new Error('Payment channel not found or disabled');
+    }
+
+    if (channel.channel_type === 'google_play') {
+      return {
+        success: false,
+        error: 'Google Play purchases use in-app billing, not the card checkout flow.',
+      };
+    }
+
+    // Call the payment processing edge function
     const { data, error } = await supabase.functions.invoke('process-payment', {
       body: {
         channel_id: channelId,
+        channel_type: channel.channel_type,
         amount: amount,
+        amount_usd: amountUsd,
         package_id: packageId,
         user_email: userEmail,
+        configuration: channel.configuration,
         currency: currencyData.currency.code,
         currency_symbol: currencyData.currency.symbol,
         currency_name: currencyData.currency.name,

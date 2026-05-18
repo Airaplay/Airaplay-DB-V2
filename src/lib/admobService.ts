@@ -6,7 +6,9 @@ import {
   BannerAdPosition,
   BannerAdPluginEvents,
   AdMobRewardItem,
+  AdMobRewardInterstitialItem,
   RewardAdPluginEvents,
+  RewardInterstitialAdPluginEvents,
   InterstitialAdPluginEvents
 } from '@capacitor-community/admob';
 import { supabase } from './supabase';
@@ -17,10 +19,13 @@ import {
   MAIN_APP_BOTTOM_BANNER_PLACEMENT,
   isFullScreenPlayerBottomBannerKey,
   isOverlayModalBannerPlacementKey,
+  resolveRewardedInterstitialAdUnitId,
 } from './adPlacementConstants';
 import { BANNER_PRELOAD_PARAMS_MAX_AGE_MS } from './bannerRefreshConstants';
 
 const isNative = Capacitor.isNativePlatform();
+const SONG_BONUS_PLACEMENT_KEY = 'song_bonus_rewarded';
+const SONG_BONUS_LISTENER_SCORE_REWARD = 4;
 
 /** Fully resolved banner request so native `showBanner` can run without awaiting Supabase (used for preload + scheduled swap). */
 type ResolvedBannerParams = {
@@ -47,7 +52,19 @@ export interface AdMobConfig {
   testMode?: boolean;
 }
 
+type FullscreenFrequencyOptions = {
+  /** Internal callers that already acquired the service-level fullscreen slot set this to avoid double-locking. */
+  bypassFrequencyGate?: boolean;
+};
+
+type MutingFullscreenOptions = FullscreenFrequencyOptions & {
+  muteAppAudio?: boolean;
+};
+
 class AdMobService {
+  /** App-open ad safety gate: never show any ad before 1 minute from app launch. */
+  private readonly appLaunchAtMs = Date.now();
+  private static readonly STARTUP_AD_GUARD_MS = 60_000; // 1 minute after launch
   private config: AdMobConfig | null = null;
   private isInitialized = false;
   private bannerVisible = false; // Only call native hide/remove when we actually showed a banner (avoids native crash)
@@ -115,8 +132,38 @@ class AdMobService {
   private fullscreenAdLock = false;
   private lastFullscreenAdTime = 0;
   // Global cooldown so fullscreen ads can never stack on top of each other.
-  private static readonly FULLSCREEN_AD_COOLDOWN_MS = 1 * 60 * 1000; // 1 minute
-  private pendingFullscreenAd: { contentId?: string; contentType?: string; interstitialPlacementKey?: string; rewardedPlacementKey?: string } | null = null;
+  private static readonly FULLSCREEN_AD_COOLDOWN_MS = 3.5 * 60 * 1000; // 3 minutes 30 seconds
+  private pendingFullscreenAd: {
+    contentId?: string;
+    contentType?: string;
+    interstitialPlacementKey?: string;
+    rewardedPlacementKey?: string;
+    rewardedInterstitialPlacementKey?: string;
+    preferRewardedInterstitial?: boolean;
+  } | null = null;
+
+  /** Ensures ad rendering cannot happen before startup guard duration elapses. */
+  private async waitForStartupAdGuard(): Promise<void> {
+    const elapsedMs = Date.now() - this.appLaunchAtMs;
+    const remainingMs = AdMobService.STARTUP_AD_GUARD_MS - elapsedMs;
+    if (remainingMs <= 0) return;
+    await new Promise<void>((resolve) => setTimeout(resolve, remainingMs));
+  }
+
+  private tryAcquireFullscreenAdSlot(): boolean {
+    const now = Date.now();
+    if (this.fullscreenAdLock || (now - this.lastFullscreenAdTime) < AdMobService.FULLSCREEN_AD_COOLDOWN_MS) {
+      console.log('AdMob: Fullscreen ad skipped by service cooldown');
+      return false;
+    }
+    this.fullscreenAdLock = true;
+    return true;
+  }
+
+  private releaseFullscreenAdSlot(): void {
+    this.fullscreenAdLock = false;
+    this.lastFullscreenAdTime = Date.now();
+  }
 
   /**
    * Initialize AdMob from database configuration
@@ -139,7 +186,13 @@ class AdMobService {
 
       if (error || !adNetwork) {
         console.warn('AdMob network not found in database, using fallback config:', error);
-        const hasConfig = config && (config.appId || config.bannerAdId || config.interstitialAdId || config.rewardedAdId);
+        const hasConfig =
+          config &&
+          (config.appId ||
+            config.bannerAdId ||
+            config.interstitialAdId ||
+            config.rewardedAdId ||
+            config.rewardedInterstitialAdId);
         if (hasConfig) {
           this.config = { ...config };
         } else {
@@ -189,9 +242,39 @@ class AdMobService {
       // Warm the default interstitial in the background so the first show() is faster.
       // After each dismiss we prepare again (see showInterstitial) so the next slot stays loaded.
       void this.prepareInterstitial().catch(() => {});
+      void this.prepareRewardedInterstitialAd().catch(() => {});
     } catch (error) {
       console.error('Failed to initialize AdMob:', error);
       this.isInitialized = false;
+    }
+  }
+
+  async showAppOpenAd(adUnitId: string): Promise<void> {
+    if (!isNative || !this.isInitialized) return;
+    await this.waitForStartupAdGuard();
+
+    const validAdId = adUnitId.trim();
+    if (!validAdId) return;
+
+    const appOpenApi = AdMob as unknown as {
+      prepareAppOpenAd?: (options: { adId: string }) => Promise<void>;
+      showAppOpenAd?: () => Promise<void>;
+    };
+
+    if (typeof appOpenApi.prepareAppOpenAd !== 'function' || typeof appOpenApi.showAppOpenAd !== 'function') {
+      console.warn('AdMob: App Open API not available in current plugin build');
+      return;
+    }
+
+    if (!this.tryAcquireFullscreenAdSlot()) return;
+
+    try {
+      await appOpenApi.prepareAppOpenAd({ adId: validAdId });
+      await appOpenApi.showAppOpenAd();
+    } catch (error) {
+      console.warn('AdMob: App open ad skipped', error);
+    } finally {
+      this.releaseFullscreenAdSlot();
     }
   }
 
@@ -338,6 +421,9 @@ class AdMobService {
 
     void AdMob.addListener(BannerAdPluginEvents.Loaded, () => {
       this.lastBannerNativeLoadedAt = Date.now();
+      // Eagerly resolve the next refresh’s placement/ad unit while the current creative is showing so the
+      // scheduled swap only triggers native loadAd (see preloadNextBannerRefresh + BANNER_PRELOAD_PARAMS_MAX_AGE_MS).
+      void this.preloadNextBannerRefresh().catch(() => {});
     })
       .then((handle) => {
         this.bannerLoadedListenerHandle = handle;
@@ -853,7 +939,14 @@ class AdMobService {
       });
 
       // Estimate revenue (simplified - in production, get actual CPM from ad network)
-      const estimatedCPM = adType === 'rewarded' ? 3.0 : adType === 'interstitial' ? 2.0 : 1.0;
+      const estimatedCPM =
+        adType === 'rewarded'
+          ? 3.0
+          : adType === 'rewarded_interstitial'
+            ? 2.8
+            : adType === 'interstitial'
+              ? 2.0
+              : 1.0;
       const estimatedRevenue = (estimatedCPM / 1000) * (completed ? 1 : 0.5); // Partial credit if not completed
 
       await logAdRevenue({
@@ -1010,21 +1103,26 @@ class AdMobService {
     contentType: string = 'general',
     placementKey?: string,
     adUnitId?: string,
-    options?: { muteAppAudio?: boolean }
+    options?: MutingFullscreenOptions
   ): Promise<void> {
     if (!isNative || !this.isInitialized) {
       console.log('AdMob: Interstitial skipped (not native or not initialized)');
       return;
     }
+    await this.waitForStartupAdGuard();
 
-    // Check display rules before showing ad
-    const shouldShowAd = await this.checkDisplayRules(contentType);
-    if (!shouldShowAd) {
-      console.log('AdMob: Interstitial blocked by display rules');
-      return;
-    }
+    const acquiredFullscreenSlot = options?.bypassFrequencyGate === true ? false : this.tryAcquireFullscreenAdSlot();
+    if (options?.bypassFrequencyGate !== true && !acquiredFullscreenSlot) return;
+    const shouldMute = options?.muteAppAudio ?? true;
 
     try {
+      // Check display rules before showing ad
+      const shouldShowAd = await this.checkDisplayRules(contentType);
+      if (!shouldShowAd) {
+        console.log('AdMob: Interstitial blocked by display rules');
+        return;
+      }
+
       let adUnitIdToUse: string | undefined = adUnitId;
       let placementKeyToUse: string | undefined = placementKey;
 
@@ -1057,8 +1155,6 @@ class AdMobService {
       // Prepare the ad first
       await this.prepareInterstitial(placementKeyToUse);
 
-      const shouldMute = options?.muteAppAudio ?? true;
-
       // Optionally mute app audio while interstitial is visible (default: true).
       const restoreUnmute = () => {
         if (shouldMute && typeof AdMob.setApplicationMuted === 'function') {
@@ -1089,6 +1185,10 @@ class AdMobService {
         AdMob.setApplicationMuted({ muted: false }).catch(() => {});
       }
       throw error;
+    } finally {
+      if (acquiredFullscreenSlot) {
+        this.releaseFullscreenAdSlot();
+      }
     }
   }
 
@@ -1128,23 +1228,63 @@ class AdMobService {
     }
   }
 
-  async showRewardedAd(contentId?: string, contentType: string = 'general', placementKey?: string, adUnitId?: string): Promise<AdMobRewardItem | null> {
+  /**
+   * Preload rewarded interstitial — env / init config only (no Supabase).
+   * Pass `explicitAdUnitId` after a show to reload the same unit without any placement lookup.
+   */
+  async prepareRewardedInterstitialAd(explicitAdUnitId?: string) {
+    if (!isNative || !this.isInitialized) return;
+
+    try {
+      const trimmedExplicit = explicitAdUnitId?.trim();
+      const adUnitIdToUse =
+        trimmedExplicit && trimmedExplicit.startsWith('ca-app-pub')
+          ? trimmedExplicit
+          : this.config?.rewardedInterstitialAdId?.trim() || resolveRewardedInterstitialAdUnitId();
+
+      if (!adUnitIdToUse) return;
+
+      await AdMob.prepareRewardInterstitialAd({
+        adId: adUnitIdToUse,
+      });
+    } catch (error) {
+      console.error('Failed to prepare rewarded interstitial:', error);
+    }
+  }
+
+  async showRewardedAd(
+    contentId?: string,
+    contentType: string = 'general',
+    placementKey?: string,
+    adUnitId?: string,
+    options?: FullscreenFrequencyOptions
+  ): Promise<AdMobRewardItem | null> {
     if (!isNative || !this.isInitialized) {
       console.log('AdMob: Rewarded ad skipped (not native or not initialized)');
       return null;
     }
+    await this.waitForStartupAdGuard();
 
-    // Check display rules before showing ad
-    const shouldShowAd = await this.checkDisplayRules(contentType);
-    if (!shouldShowAd) {
-      console.log('AdMob: Rewarded ad blocked by display rules');
-      return null;
-    }
+    const acquiredFullscreenSlot = options?.bypassFrequencyGate === true ? false : this.tryAcquireFullscreenAdSlot();
+    if (options?.bypassFrequencyGate !== true && !acquiredFullscreenSlot) return null;
+    const releaseFullscreenSlotIfAcquired = () => {
+      if (acquiredFullscreenSlot) {
+        this.releaseFullscreenAdSlot();
+      }
+    };
 
     let resolvedAdUnitId: string | undefined;
     let resolvedPlacementKey: string | undefined;
 
     try {
+      // Check display rules before showing ad
+      const shouldShowAd = await this.checkDisplayRules(contentType);
+      if (!shouldShowAd) {
+        console.log('AdMob: Rewarded ad blocked by display rules');
+        releaseFullscreenSlotIfAcquired();
+        return null;
+      }
+
       const directPubId =
         typeof adUnitId === 'string' && adUnitId.trim().startsWith('ca-app-pub');
       // Caller passed an explicit AdMob unit id (e.g. `VITE_ADMOB_REWARDED_ID`) — use it for prepare/show, not DB placement unit.
@@ -1172,6 +1312,7 @@ class AdMobService {
             // Fallback to config if available
             if (!this.config?.rewardedAdId) {
               console.error('No rewarded ad unit available');
+              releaseFullscreenSlotIfAcquired();
               return null;
             }
             adUnitIdToUse = this.config.rewardedAdId;
@@ -1181,6 +1322,7 @@ class AdMobService {
           adUnitIdToUse = this.config.rewardedAdId;
         } else {
           console.error('No rewarded ad unit ID available');
+          releaseFullscreenSlotIfAcquired();
           return null;
         }
 
@@ -1191,10 +1333,11 @@ class AdMobService {
       }
     } catch (error) {
       console.error('Failed to prepare rewarded ad:', error);
+      releaseFullscreenSlotIfAcquired();
       return null;
     }
 
-    return new Promise(async (resolve, reject) => {
+    const rewardedPromise = new Promise<AdMobRewardItem | null>(async (resolve, reject) => {
       let rewardItem: AdMobRewardItem | null = null;
       let adStartTime = Date.now();
       let finalAdUnitId = resolvedAdUnitId;
@@ -1212,12 +1355,13 @@ class AdMobService {
           // Log reward completion
           const { data: { user } } = await supabase.auth.getUser();
           if (user) {
+            const isSongBonusReward = finalPlacementKey === SONG_BONUS_PLACEMENT_KEY;
             await logAdReward({
               userId: user.id,
               adUnitId: finalAdUnitId,
               placementKey: finalPlacementKey,
-              rewardType: 'treats',
-              rewardAmount: reward.amount,
+              rewardType: isSongBonusReward ? 'listener_score' : 'treats',
+              rewardAmount: isSongBonusReward ? SONG_BONUS_LISTENER_SCORE_REWARD : reward.amount,
               completed: true,
               completionDuration: duration,
               metadata: { rewardType: reward.type }
@@ -1262,68 +1406,71 @@ class AdMobService {
         reject(error);
       });
     });
+
+    try {
+      return await rewardedPromise;
+    } finally {
+      releaseFullscreenSlotIfAcquired();
+    }
   }
 
   /**
-   * Show a rewarded interstitial ad - a hybrid ad format that combines rewarded and interstitial features.
-   * Uses rewarded ads under the hood (since @capacitor-community/admob v7 doesn't natively support rewarded interstitial).
-   * This is designed for between-song experiences where users can optionally skip after a timer.
-   * 
-   * @returns Promise<AdMobRewardItem | null> - Returns reward item if user watched the ad, null if skipped/dismissed
+   * Rewarded interstitial (fullscreen) via native `RewardedInterstitialAd`.
+   * Ad unit comes from init config, {@link resolveRewardedInterstitialAdUnitId}, or a `ca-app-pub` `adUnitId` — not Supabase.
+   * `placementKey` is optional metadata for logging only.
+   * If no RI unit exists but {@link AdMobConfig.rewardedAdId} is set, falls back to {@link showRewardedAd}.
    */
   async showRewardedInterstitial(
     contentId?: string,
     contentType: string = 'general',
     placementKey?: string,
     adUnitId?: string,
-    options?: { muteAppAudio?: boolean }
-  ): Promise<AdMobRewardItem | null> {
+    options?: MutingFullscreenOptions
+  ): Promise<AdMobRewardInterstitialItem | null> {
     if (!isNative || !this.isInitialized) {
       console.log('AdMob: Rewarded interstitial skipped (not native or not initialized)');
       return null;
     }
+    await this.waitForStartupAdGuard();
 
-    // Check display rules before showing ad
-    const shouldShowAd = await this.checkDisplayRules(contentType);
-    if (!shouldShowAd) {
-      console.log('AdMob: Rewarded interstitial blocked by display rules');
-      return null;
-    }
+    const acquiredFullscreenSlot = options?.bypassFrequencyGate === true ? false : this.tryAcquireFullscreenAdSlot();
+    if (options?.bypassFrequencyGate !== true && !acquiredFullscreenSlot) return null;
+    const shouldMute = options?.muteAppAudio ?? true;
+
+    const directPubId =
+      typeof adUnitId === 'string' && adUnitId.trim().startsWith('ca-app-pub');
 
     try {
-      let adUnitIdToUse: string | undefined = adUnitId;
-      let placementKeyToUse: string | undefined = placementKey;
-
-      // Try to get rewarded interstitial placement, fallback to rewarded ad unit
-      if (placementKey) {
-        const placement = await getActivePlacement(placementKey);
-        if (placement && placement.ad_unit && placement.ad_type === 'rewarded_interstitial') {
-          adUnitIdToUse = placement.ad_unit.unit_id;
-          if (!adUnitId) {
-            adUnitId = placement.ad_unit.id;
-          }
-          placementKeyToUse = placement.placement_key;
-        } else {
-          console.warn(`Placement '${placementKey}' not found or not a rewarded interstitial ad`);
-          // Fallback to config rewarded interstitial ID or rewarded ID
-          if (!this.config?.rewardedInterstitialAdId && !this.config?.rewardedAdId) {
-            throw new Error('No rewarded interstitial ad unit available');
-          }
-          adUnitIdToUse = this.config.rewardedInterstitialAdId || this.config.rewardedAdId;
-        }
-      } else if (this.config?.rewardedInterstitialAdId || this.config?.rewardedAdId) {
-        // Fallback to config rewarded interstitial ID or rewarded ID
-        adUnitIdToUse = this.config.rewardedInterstitialAdId || this.config.rewardedAdId;
-      } else {
-        throw new Error('No rewarded interstitial ad unit ID available');
+      const shouldShowAd = await this.checkDisplayRules(contentType);
+      if (!shouldShowAd) {
+        console.log('AdMob: Rewarded interstitial blocked by display rules');
+        return null;
       }
 
-      // Prepare the ad first
-      await this.prepareRewardedAd(placementKeyToUse);
+      let adUnitIdToUse: string | undefined;
+      const placementKeyToUse = placementKey;
 
-      const shouldMute = options?.muteAppAudio ?? true;
+      if (directPubId) {
+        adUnitIdToUse = adUnitId!.trim();
+      } else {
+        adUnitIdToUse =
+          this.config?.rewardedInterstitialAdId?.trim() || resolveRewardedInterstitialAdUnitId();
+        if (!adUnitIdToUse && this.config?.rewardedAdId) {
+          const r = await this.showRewardedAd(contentId, contentType, placementKey, this.config.rewardedAdId, {
+            bypassFrequencyGate: true,
+          });
+          if (!r) return null;
+          return { type: r.type, amount: r.amount };
+        }
+        if (!adUnitIdToUse) {
+          throw new Error('No rewarded interstitial ad unit ID available');
+        }
+      }
 
-      // Optionally mute app audio while ad is visible (default: true).
+      await AdMob.prepareRewardInterstitialAd({
+        adId: adUnitIdToUse!,
+      });
+
       const restoreUnmute = () => {
         if (shouldMute && typeof AdMob.setApplicationMuted === 'function') {
           AdMob.setApplicationMuted({ muted: false }).catch(() => {});
@@ -1333,30 +1480,37 @@ class AdMobService {
         await AdMob.setApplicationMuted({ muted: true });
       }
 
-      return new Promise(async (resolve, reject) => {
-        let rewardItem: AdMobRewardItem | null = null;
-        let adStartTime = Date.now();
-        let finalAdUnitId = adUnitId;
-        let finalPlacementKey = placementKey;
+      return await new Promise<AdMobRewardInterstitialItem | null>(async (resolve, reject) => {
+        let rewardItem: AdMobRewardInterstitialItem | null = null;
+        const adStartTime = Date.now();
+        const finalAdUnitId = adUnitIdToUse!;
+        const finalPlacementKey = placementKeyToUse;
 
         const rewardListener = await AdMob.addListener(
-          RewardAdPluginEvents.Rewarded,
-          async (reward: AdMobRewardItem) => {
+          RewardInterstitialAdPluginEvents.Rewarded,
+          async (reward: AdMobRewardInterstitialItem) => {
             rewardItem = reward;
             const duration = Math.floor((Date.now() - adStartTime) / 1000);
-            
-            // Record completed rewarded interstitial ad impression
-            await this.recordImpression('rewarded_interstitial', contentId, contentType, duration, true, finalPlacementKey, finalAdUnitId);
-            
-            // Log reward completion
+
+            await this.recordImpression(
+              'rewarded_interstitial',
+              contentId,
+              contentType,
+              duration,
+              true,
+              finalPlacementKey,
+              finalAdUnitId
+            );
+
             const { data: { user } } = await supabase.auth.getUser();
             if (user) {
+              const isSongBonusReward = finalPlacementKey === SONG_BONUS_PLACEMENT_KEY;
               await logAdReward({
                 userId: user.id,
                 adUnitId: finalAdUnitId,
                 placementKey: finalPlacementKey,
-                rewardType: 'treats',
-                rewardAmount: reward.amount,
+                rewardType: isSongBonusReward ? 'listener_score' : 'treats',
+                rewardAmount: isSongBonusReward ? SONG_BONUS_LISTENER_SCORE_REWARD : reward.amount,
                 completed: true,
                 completionDuration: duration,
                 metadata: { rewardType: reward.type, adFormat: 'rewarded_interstitial' }
@@ -1366,16 +1520,23 @@ class AdMobService {
         );
 
         const dismissListener = await AdMob.addListener(
-          RewardAdPluginEvents.Dismissed,
+          RewardInterstitialAdPluginEvents.Dismissed,
           async () => {
             restoreUnmute();
-            
-            // If ad was dismissed without reward, still record impression
+            void this.prepareRewardedInterstitialAd(finalAdUnitId);
+
             if (!rewardItem) {
               const duration = Math.floor((Date.now() - adStartTime) / 1000);
-              await this.recordImpression('rewarded_interstitial', contentId, contentType, duration, false, finalPlacementKey, finalAdUnitId);
-              
-              // Log skipped reward
+              await this.recordImpression(
+                'rewarded_interstitial',
+                contentId,
+                contentType,
+                duration,
+                false,
+                finalPlacementKey,
+                finalAdUnitId
+              );
+
               const { data: { user } } = await supabase.auth.getUser();
               if (user) {
                 await logAdReward({
@@ -1390,14 +1551,14 @@ class AdMobService {
                 });
               }
             }
-            
+
             rewardListener.remove();
             dismissListener.remove();
             resolve(rewardItem);
           }
         );
 
-        AdMob.showRewardVideoAd().catch((error) => {
+        AdMob.showRewardInterstitialAd().catch((error) => {
           restoreUnmute();
           rewardListener.remove();
           dismissListener.remove();
@@ -1411,6 +1572,10 @@ class AdMobService {
         AdMob.setApplicationMuted({ muted: false }).catch(() => {});
       }
       throw error;
+    } finally {
+      if (acquiredFullscreenSlot) {
+        this.releaseFullscreenAdSlot();
+      }
     }
   }
 
@@ -1431,19 +1596,15 @@ class AdMobService {
     preferRewardedInterstitial?: boolean;
   } = {}): Promise<void> {
     if (!isNative) return;
+    await this.waitForStartupAdGuard();
     if (!this.isInitialized) {
       this.pendingFullscreenAd = { ...options };
       return;
     }
 
-    const now = Date.now();
-    if (this.fullscreenAdLock || (now - this.lastFullscreenAdTime) < AdMobService.FULLSCREEN_AD_COOLDOWN_MS) {
-      return;
-    }
+    if (!this.tryAcquireFullscreenAdSlot()) return;
 
     const contentType = options.contentType ?? 'general';
-    const shouldShow = await this.checkDisplayRules(contentType);
-    if (!shouldShow) return;
 
     // If preferRewardedInterstitial is true, try it first
     const preferRewardedInterstitial = options.preferRewardedInterstitial ?? false;
@@ -1451,19 +1612,28 @@ class AdMobService {
     const interstitialKey = options.interstitialPlacementKey ?? 'after_song_play_interstitial';
     const rewardedKey = options.rewardedPlacementKey ?? 'after_video_play_rewarded';
 
-    this.fullscreenAdLock = true;
     try {
+      const shouldShow = await this.checkDisplayRules(contentType);
+      if (!shouldShow) return;
+
       if (preferRewardedInterstitial) {
         // Try rewarded interstitial first
         try {
-          await this.showRewardedInterstitial(options.contentId, contentType, rewardedInterstitialKey, undefined, { muteAppAudio: true });
+          await this.showRewardedInterstitial(options.contentId, contentType, rewardedInterstitialKey, undefined, {
+            muteAppAudio: true,
+            bypassFrequencyGate: true,
+          });
         } catch (e) {
           // Fallback to regular interstitial or rewarded
           const useInterstitial = Math.random() < 0.5;
           if (useInterstitial) {
-            await this.showInterstitial(options.contentId, contentType, interstitialKey).catch(() => {});
+            await this.showInterstitial(options.contentId, contentType, interstitialKey, undefined, {
+              bypassFrequencyGate: true,
+            }).catch(() => {});
           } else {
-            await this.showRewardedAd(options.contentId, contentType, rewardedKey).catch(() => {});
+            await this.showRewardedAd(options.contentId, contentType, rewardedKey, undefined, {
+              bypassFrequencyGate: true,
+            }).catch(() => {});
           }
         }
       } else {
@@ -1471,23 +1641,30 @@ class AdMobService {
         const useInterstitial = Math.random() < 0.5;
         if (useInterstitial) {
           try {
-            await this.showInterstitial(options.contentId, contentType, interstitialKey);
+            await this.showInterstitial(options.contentId, contentType, interstitialKey, undefined, {
+              bypassFrequencyGate: true,
+            });
           } catch (e) {
-            await this.showRewardedAd(options.contentId, contentType, rewardedKey).catch(() => {});
+            await this.showRewardedAd(options.contentId, contentType, rewardedKey, undefined, {
+              bypassFrequencyGate: true,
+            }).catch(() => {});
           }
         } else {
           try {
-            await this.showRewardedAd(options.contentId, contentType, rewardedKey);
+            await this.showRewardedAd(options.contentId, contentType, rewardedKey, undefined, {
+              bypassFrequencyGate: true,
+            });
           } catch (e) {
-            await this.showInterstitial(options.contentId, contentType, interstitialKey).catch(() => {});
+            await this.showInterstitial(options.contentId, contentType, interstitialKey, undefined, {
+              bypassFrequencyGate: true,
+            }).catch(() => {});
           }
         }
       }
     } catch (e) {
       console.warn('AdMob: showInterstitialOrRewarded failed', e);
     } finally {
-      this.fullscreenAdLock = false;
-      this.lastFullscreenAdTime = Date.now();
+      this.releaseFullscreenAdSlot();
     }
   }
 

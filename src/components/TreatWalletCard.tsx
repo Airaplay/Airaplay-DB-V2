@@ -3,9 +3,11 @@ import { Coins, TrendingUp, Gift, Download } from 'lucide-react';
 import { Card, CardContent } from './ui/card';
 import { supabase } from '../lib/supabase';
 import { CACHE_KEYS, getCachedData, treatCache } from '../lib/treatCache';
+import { getTreatWalletSpendable } from '../lib/treatWalletSpendable';
 
 interface TreatWallet {
   balance: number;
+  promo_balance: number;
   total_purchased: number;
   total_spent: number;
   total_earned: number;
@@ -53,6 +55,7 @@ export const TreatWalletCard = ({ onPurchase, onTip, onPromote, onWithdraw, show
               const updatedWallet = payload.new as any;
               setWallet({
                 balance: Number(updatedWallet.balance) || 0,
+                promo_balance: Number(updatedWallet.promo_balance) || 0,
                 total_purchased: Number(updatedWallet.total_purchased) || 0,
                 total_spent: Number(updatedWallet.total_spent) || 0,
                 total_earned: Number(updatedWallet.total_earned) || 0,
@@ -85,7 +88,7 @@ export const TreatWalletCard = ({ onPurchase, onTip, onPromote, onWithdraw, show
           // Use limit(1) instead of single() for better performance
           const { data, error } = await supabase
             .from('treat_wallets')
-            .select('balance, total_purchased, total_spent, total_earned, total_withdrawn, earned_balance, purchased_balance')
+            .select('balance, promo_balance, total_purchased, total_spent, total_earned, total_withdrawn, earned_balance, purchased_balance')
             .eq('user_id', user.id)
             .limit(1);
 
@@ -105,7 +108,7 @@ export const TreatWalletCard = ({ onPurchase, onTip, onPromote, onWithdraw, show
                 earned_balance: 0,
                 purchased_balance: 0
               })
-              .select('balance, total_purchased, total_spent, total_earned, total_withdrawn, earned_balance, purchased_balance')
+              .select('balance, promo_balance, total_purchased, total_spent, total_earned, total_withdrawn, earned_balance, purchased_balance')
               .limit(1);
 
             if (createError) throw createError;
@@ -120,6 +123,7 @@ export const TreatWalletCard = ({ onPurchase, onTip, onPromote, onWithdraw, show
       if (walletData) {
         setWallet({
           balance: Number(walletData.balance) || 0,
+          promo_balance: Number(walletData.promo_balance) || 0,
           total_purchased: Number(walletData.total_purchased) || 0,
           total_spent: Number(walletData.total_spent) || 0,
           total_earned: Number(walletData.total_earned) || 0,
@@ -132,6 +136,7 @@ export const TreatWalletCard = ({ onPurchase, onTip, onPromote, onWithdraw, show
       // Set default values on error to prevent infinite loading
       setWallet({
         balance: 0,
+        promo_balance: 0,
         total_purchased: 0,
         total_spent: 0,
         total_earned: 0,
@@ -193,8 +198,13 @@ export const TreatWalletCard = ({ onPurchase, onTip, onPromote, onWithdraw, show
           
           <div className="text-right">
             <p className="font-['Inter',sans-serif] font-bold text-white text-2xl">
-              {Number(wallet?.balance || 0).toLocaleString()}
+              {Number(getTreatWalletSpendable(wallet)).toLocaleString()}
             </p>
+            {wallet && wallet.promo_balance > 0 && (
+              <p className="font-['Inter',sans-serif] text-white/50 text-[11px] mt-0.5">
+                {wallet.promo_balance.toLocaleString()} bonus (non-withdrawable)
+              </p>
+            )}
             <p className="font-['Inter',sans-serif] text-white/70 text-sm">
               treats
             </p>
