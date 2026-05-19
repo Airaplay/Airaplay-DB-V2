@@ -457,7 +457,13 @@ export const EmailManagementTab = (): JSX.Element => {
         setNewsletterQueueResult({ queued });
       }
     } catch (err: unknown) {
-      setError(err instanceof Error ? err.message : 'Failed to queue marketing emails');
+      const msg =
+        err && typeof err === 'object' && 'message' in err
+          ? String((err as { message?: string }).message)
+          : err instanceof Error
+            ? err.message
+            : 'Failed to queue marketing emails';
+      setError(msg || 'Failed to queue marketing emails');
     } finally {
       setIsQueueingNewsletter(false);
     }
@@ -1480,7 +1486,7 @@ export const EmailManagementTab = (): JSX.Element => {
                       onChange={(e) => setNewsletterDraft((d) => ({ ...d, title: e.target.value }))}
                       disabled={isQueueingNewsletter}
                       className="min-w-0 flex-1 border-0 bg-transparent py-3 pr-3 text-[15px] text-[#202124] placeholder:text-[#80868b] focus:outline-none focus:ring-0 disabled:opacity-50"
-                      placeholder="Email subject (inbox + headline)"
+                      placeholder="Email subject"
                       autoComplete="off"
                     />
                   </div>

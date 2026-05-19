@@ -1,8 +1,8 @@
 /*
-  # Admin: queue marketing emails to a custom email list
+  # Fix admin_queue_marketing_email_list skipped count
 
-  Enqueues one `newsletter` email per validated address (ZeptoMail via email_queue).
-  Matches registered users by email for personalization when possible.
+  The skipped CTE was referenced after the WITH block ended, causing:
+  relation "skipped" does not exist (42P01) on every custom-list queue.
 */
 
 CREATE OR REPLACE FUNCTION public.admin_queue_marketing_email_list(
@@ -121,9 +121,3 @@ BEGIN
   );
 END;
 $$;
-
-REVOKE ALL ON FUNCTION public.admin_queue_marketing_email_list(text[], text, text, text) FROM PUBLIC;
-GRANT EXECUTE ON FUNCTION public.admin_queue_marketing_email_list(text[], text, text, text) TO authenticated;
-
-COMMENT ON FUNCTION public.admin_queue_marketing_email_list(text[], text, text, text) IS
-  'Admin RPC: enqueue newsletter template for each address in a custom list (max 5000 per call).';

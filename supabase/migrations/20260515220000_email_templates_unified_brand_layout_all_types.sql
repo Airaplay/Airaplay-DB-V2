@@ -363,7 +363,6 @@ body { margin: 0; padding: 0; background: #e8ebe8; -webkit-font-smoothing: antia
 <img src="https://vwcadgjaivvffxwgnkzy.supabase.co/storage/v1/object/public/app-assets/official_airaplay_logo.png" alt="Airaplay" width="200" style="max-width:200px;height:auto;display:block;margin:0 auto;border:0;">
 </div>
 <div class="body">
-<h1>{{newsletter_title}}</h1>
 <p>Hi {{user_name}},</p>
 <div class="newsletter-content">{{newsletter_content}}</div>
 <p style="font-size:13px;"><a href="{{unsubscribe_url}}" style="color:#555555;">Unsubscribe</a></p>
