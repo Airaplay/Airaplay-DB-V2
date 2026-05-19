@@ -3,16 +3,23 @@
 const supabasePublic =
   (import.meta.env.VITE_SUPABASE_URL as string | undefined)?.replace(/\/+$/, '') || '';
 
-/** Hosted in `app-assets` when uploaded; falls back to official badge artwork. */
-export const EMAIL_PLAY_STORE_BADGE_SRC =
-  supabasePublic
-    ? `${supabasePublic}/storage/v1/object/public/app-assets/google-play-badge.png`
-    : 'https://play.google.com/intl/en_us/badges/static/images/badges/en_badge_web_generic.png';
+/** Hosted in `app-assets` (public bucket). Filenames match Supabase uploads. */
+const APP_ASSETS = 'app-assets';
+const PLAY_STORE_BADGE_FILE = 'Play Store.jpg';
+const APP_STORE_BADGE_FILE = 'App store.jpg';
 
-export const EMAIL_APP_STORE_BADGE_SRC =
-  supabasePublic
-    ? `${supabasePublic}/storage/v1/object/public/app-assets/app-store-badge.png`
-    : 'https://tools.applemediaservices.com/api/badges/download-on-the-app-store/black/en-us?size=250x83';
+function appAssetPublicUrl(fileName: string): string {
+  return `${supabasePublic}/storage/v1/object/public/${APP_ASSETS}/${encodeURIComponent(fileName)}`;
+}
+
+/** Hosted in `app-assets` when uploaded; falls back to official badge artwork. */
+export const EMAIL_PLAY_STORE_BADGE_SRC = supabasePublic
+  ? appAssetPublicUrl(PLAY_STORE_BADGE_FILE)
+  : 'https://play.google.com/intl/en_us/badges/static/images/badges/en_badge_web_generic.png';
+
+export const EMAIL_APP_STORE_BADGE_SRC = supabasePublic
+  ? appAssetPublicUrl(APP_STORE_BADGE_FILE)
+  : 'https://tools.applemediaservices.com/api/badges/download-on-the-app-store/black/en-us?size=250x83';
 
 export const DEFAULT_PLAY_STORE_URL =
   'https://play.google.com/store/apps/details?id=com.airaplay.app';
