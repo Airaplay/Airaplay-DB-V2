@@ -12,7 +12,9 @@ import {
   Save,
   X,
   RefreshCw,
-  Newspaper
+  Newspaper,
+  Bookmark,
+  Trash2,
 } from 'lucide-react';
 import { supabase } from '../../lib/supabase';
 import { verifyAdminRole } from '../../lib/adminVerification';
@@ -58,6 +60,27 @@ interface ZeptoMailConfig {
   bounce_address: string | null;
   is_active: boolean;
 }
+
+type MarketingAudience = 'all' | 'listener' | 'creator' | 'custom';
+
+interface MarketingEmailDraft {
+  id: string;
+  name: string;
+  title: string;
+  html_content: string;
+  audience: MarketingAudience;
+  custom_emails_raw: string;
+  unsubscribe_url: string;
+  updated_at: string;
+}
+
+const DEFAULT_NEWSLETTER_DRAFT = {
+  title: '',
+  html: '<p></p>',
+  unsubscribe_url: 'https://airaplay.com/unsubscribe',
+  audience: 'all' as MarketingAudience,
+  customEmailsRaw: '',
+};
 
 export const EmailManagementTab = (): JSX.Element => {
   const [activeSubTab, setActiveSubTab] = useState<'templates' | 'logs' | 'config'>('templates');
@@ -125,13 +148,11 @@ export const EmailManagementTab = (): JSX.Element => {
   const [weeklyReportResult, setWeeklyReportResult] = useState<{ queued: number; date_range?: string } | null>(null);
 
   const [isNewsletterComposerOpen, setIsNewsletterComposerOpen] = useState(false);
-  const [newsletterDraft, setNewsletterDraft] = useState({
-    title: '',
-    html: '<p></p>',
-    unsubscribe_url: 'https://airaplay.com/unsubscribe',
-    audience: 'all' as 'all' | 'listener' | 'creator' | 'custom',
-    customEmailsRaw: '',
-  });
+  const [newsletterDraft, setNewsletterDraft] = useState({ ...DEFAULT_NEWSLETTER_DRAFT });
+  const [activeMarketingDraftId, setActiveMarketingDraftId] = useState<string | null>(null);
+  const [marketingSavedDrafts, setMarketingSavedDrafts] = useState<MarketingEmailDraft[]>([]);
+  const [isSavingMarketingDraft, setIsSavingMarketingDraft] = useState(false);
+  const [marketingDraftMessage, setMarketingDraftMessage] = useState<string | null>(null);
   const [isQueueingNewsletter, setIsQueueingNewsletter] = useState(false);
   const [newsletterQueueResult, setNewsletterQueueResult] = useState<{
     queued: number;
@@ -386,11 +407,154 @@ export const EmailManagementTab = (): JSX.Element => {
     return replaceEmailPlaceholders(html, vars);
   };
 
+  const fetchMarketingSavedDrafts = async () => {
+    const { data, error: fetchError } = await supabase
+      .from('marketing_email_drafts')
+      .select('id, name, title, html_content, audience, custom_emails_raw, unsubscribe_url, updated_at')
+      .order('updated_at', { ascending: false })
+      .limit(50);
+
+    if (fetchError) {
+      console.error('Failed to load marketing drafts:', fetchError);
+      return;
+    }
+    setMarketingSavedDrafts((data as MarketingEmailDraft[]) ?? []);
+  };
+
   const handleOpenNewsletterComposer = () => {
     setNewsletterQueueResult(null);
     setError(null);
+    setMarketingDraftMessage(null);
+    setActiveMarketingDraftId(null);
+    setNewsletterDraft({ ...DEFAULT_NEWSLETTER_DRAFT });
     setNewsletterComposeTab('compose');
     setIsNewsletterComposerOpen(true);
+    void fetchMarketingSavedDrafts();
+  };
+
+  const handleNewMarketingDraft = () => {
+    setActiveMarketingDraftId(null);
+    setNewsletterDraft({ ...DEFAULT_NEWSLETTER_DRAFT });
+    setNewsletterQueueResult(null);
+    setMarketingDraftMessage(null);
+    setError(null);
+  };
+
+  const handleLoadMarketingDraft = (draftId: string) => {
+    if (!draftId) {
+      handleNewMarketingDraft();
+      return;
+    }
+    const draft = marketingSavedDrafts.find((d) => d.id === draftId);
+    if (!draft) return;
+    setActiveMarketingDraftId(draft.id);
+    setNewsletterDraft({
+      title: draft.title,
+      html: draft.html_content || '<p></p>',
+      unsubscribe_url: draft.unsubscribe_url || DEFAULT_NEWSLETTER_DRAFT.unsubscribe_url,
+      audience: draft.audience,
+      customEmailsRaw: draft.custom_emails_raw || '',
+    });
+    setNewsletterQueueResult(null);
+    setMarketingDraftMessage(`Loaded “${draft.name}”.`);
+    setError(null);
+  };
+
+  const handleSaveMarketingDraft = async () => {
+    setMarketingDraftMessage(null);
+    setError(null);
+
+    const gate = await verifyAdminRole();
+    if (!gate.isManager) {
+      setError(gate.error || 'Only admins or managers can save drafts.');
+      return;
+    }
+
+    if (!newsletterDraft.title.trim()) {
+      setError('Add a subject before saving a draft.');
+      return;
+    }
+    if (!newsletterDraft.html.trim() || newsletterDraft.html.trim() === '<p></p>') {
+      setError('Add message content before saving a draft.');
+      return;
+    }
+
+    const existing = activeMarketingDraftId
+      ? marketingSavedDrafts.find((d) => d.id === activeMarketingDraftId)
+      : null;
+    const defaultName = newsletterDraft.title.trim().slice(0, 80) || 'Marketing draft';
+    const nameInput = window.prompt('Draft name', existing?.name || defaultName);
+    if (nameInput === null) return;
+    const name = nameInput.trim() || defaultName;
+
+    setIsSavingMarketingDraft(true);
+    try {
+      const payload = {
+        name,
+        title: newsletterDraft.title.trim(),
+        html_content: newsletterDraft.html,
+        audience: newsletterDraft.audience,
+        custom_emails_raw: newsletterDraft.customEmailsRaw,
+        unsubscribe_url: newsletterDraft.unsubscribe_url.trim() || DEFAULT_NEWSLETTER_DRAFT.unsubscribe_url,
+        updated_at: new Date().toISOString(),
+      };
+
+      if (activeMarketingDraftId) {
+        const { error: updateError } = await supabase
+          .from('marketing_email_drafts')
+          .update(payload)
+          .eq('id', activeMarketingDraftId);
+        if (updateError) throw updateError;
+        setMarketingDraftMessage(`Draft “${name}” saved.`);
+      } else {
+        const { data: userData } = await supabase.auth.getUser();
+        if (!userData.user) throw new Error('Sign in required to save drafts');
+
+        const { data: inserted, error: insertError } = await supabase
+          .from('marketing_email_drafts')
+          .insert({ ...payload, created_by: userData.user.id })
+          .select('id')
+          .single();
+        if (insertError) throw insertError;
+        setActiveMarketingDraftId(inserted.id);
+        setMarketingDraftMessage(`Draft “${name}” saved.`);
+      }
+
+      await fetchMarketingSavedDrafts();
+    } catch (err: unknown) {
+      const msg =
+        err && typeof err === 'object' && 'message' in err
+          ? String((err as { message?: string }).message)
+          : err instanceof Error
+            ? err.message
+            : 'Failed to save draft';
+      setError(msg);
+    } finally {
+      setIsSavingMarketingDraft(false);
+    }
+  };
+
+  const handleDeleteMarketingDraft = async () => {
+    if (!activeMarketingDraftId) return;
+    const draft = marketingSavedDrafts.find((d) => d.id === activeMarketingDraftId);
+    if (!draft) return;
+    if (!window.confirm(`Delete saved draft “${draft.name}”?`)) return;
+
+    setIsSavingMarketingDraft(true);
+    try {
+      const { error: deleteError } = await supabase
+        .from('marketing_email_drafts')
+        .delete()
+        .eq('id', activeMarketingDraftId);
+      if (deleteError) throw deleteError;
+      handleNewMarketingDraft();
+      setMarketingDraftMessage('Draft deleted.');
+      await fetchMarketingSavedDrafts();
+    } catch (err: unknown) {
+      setError(err instanceof Error ? err.message : 'Failed to delete draft');
+    } finally {
+      setIsSavingMarketingDraft(false);
+    }
   };
 
   const parsedCustomEmails = parseMarketingEmailList(newsletterDraft.customEmailsRaw);
@@ -1373,6 +1537,49 @@ export const EmailManagementTab = (): JSX.Element => {
               </button>
             </header>
 
+            <div className="flex shrink-0 flex-wrap items-center gap-2 border-b border-[#e8eaed] bg-[#fafafa] px-3 py-2 sm:px-4">
+              <label htmlFor="marketing-saved-draft" className="text-xs font-medium text-[#5f6368]">
+                Saved drafts
+              </label>
+              <select
+                id="marketing-saved-draft"
+                value={activeMarketingDraftId ?? ''}
+                onChange={(e) => handleLoadMarketingDraft(e.target.value)}
+                disabled={isQueueingNewsletter || isSavingMarketingDraft}
+                className="min-w-[140px] max-w-[220px] flex-1 rounded border border-[#dadce0] bg-white px-2 py-1.5 text-sm text-[#202124] focus:border-[#1a73e8] focus:outline-none focus:ring-1 focus:ring-[#1a73e8] disabled:opacity-50"
+              >
+                <option value="">New message…</option>
+                {marketingSavedDrafts.map((d) => (
+                  <option key={d.id} value={d.id}>
+                    {d.name}
+                  </option>
+                ))}
+              </select>
+              <button
+                type="button"
+                onClick={handleNewMarketingDraft}
+                disabled={isQueueingNewsletter || isSavingMarketingDraft}
+                className="rounded-md px-2 py-1.5 text-xs font-medium text-[#1a73e8] hover:bg-blue-50 disabled:opacity-50"
+              >
+                New
+              </button>
+              {activeMarketingDraftId && (
+                <button
+                  type="button"
+                  onClick={handleDeleteMarketingDraft}
+                  disabled={isQueueingNewsletter || isSavingMarketingDraft}
+                  className="inline-flex items-center gap-1 rounded-md px-2 py-1.5 text-xs font-medium text-red-600 hover:bg-red-50 disabled:opacity-50"
+                  title="Delete saved draft"
+                >
+                  <Trash2 className="h-3.5 w-3.5" />
+                  Delete
+                </button>
+              )}
+              {marketingDraftMessage && (
+                <span className="text-xs text-green-700">{marketingDraftMessage}</span>
+              )}
+            </div>
+
             <div className="flex shrink-0 gap-6 border-b border-[#e8eaed] px-3 sm:px-4">
               <button
                 type="button"
@@ -1557,6 +1764,24 @@ export const EmailManagementTab = (): JSX.Element => {
                       : ''}{' '}
                     Use Run email queue to send via ZeptoMail (20 per click; repeat until the queue is empty).
                   </p>
+                  <button
+                    type="button"
+                    onClick={() => void handleSaveMarketingDraft()}
+                    disabled={isSavingMarketingDraft || isQueueingNewsletter}
+                    className="mt-2 inline-flex items-center gap-1.5 text-sm font-medium text-green-900 underline-offset-2 hover:underline disabled:cursor-not-allowed disabled:opacity-50"
+                  >
+                    {isSavingMarketingDraft ? (
+                      <>
+                        <LoadingLogo variant="pulse" size={14} />
+                        Saving…
+                      </>
+                    ) : (
+                      <>
+                        <Bookmark className="h-3.5 w-3.5" />
+                        Save as draft for later
+                      </>
+                    )}
+                  </button>
                 </div>
               )}
             </div>
@@ -1573,6 +1798,25 @@ export const EmailManagementTab = (): JSX.Element => {
                 Discard
               </button>
               <div className="flex flex-wrap items-center justify-end gap-2">
+                <button
+                  type="button"
+                  onClick={() => void handleSaveMarketingDraft()}
+                  disabled={isSavingMarketingDraft || isQueueingNewsletter}
+                  className="inline-flex items-center gap-2 rounded-md border border-[#dadce0] bg-white px-3 py-2 text-sm font-medium text-[#3c4043] shadow-sm hover:bg-gray-50 disabled:cursor-not-allowed disabled:opacity-50"
+                  title="Save subject, body, and audience to reuse later"
+                >
+                  {isSavingMarketingDraft ? (
+                    <>
+                      <LoadingLogo variant="pulse" size={16} />
+                      Saving…
+                    </>
+                  ) : (
+                    <>
+                      <Bookmark className="h-4 w-4" />
+                      Save draft
+                    </>
+                  )}
+                </button>
                 <button
                   type="button"
                   onClick={handleRunEmailQueue}
