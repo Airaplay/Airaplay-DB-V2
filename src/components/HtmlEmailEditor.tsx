@@ -21,7 +21,17 @@ import {
   List,
   ListOrdered,
   RotateCcw,
+  MousePointerClick,
+  Smartphone,
 } from 'lucide-react';
+import {
+  buildAppStoreBadgeHtml,
+  buildEmailCtaButtonHtml,
+  buildPlayStoreBadgeHtml,
+  buildStoreBadgesRowHtml,
+  DEFAULT_APP_STORE_URL,
+  DEFAULT_PLAY_STORE_URL,
+} from '../lib/emailComposerSnippets';
 
 const emailImageResizeDirections: ResizableNodeViewDirection[] = [
   'bottom-right',
@@ -75,6 +85,8 @@ type Props = {
   disabled?: boolean;
   /** Gmail-style single frame: gray toolbar, flat icon buttons, larger compose area */
   layout?: 'default' | 'compose';
+  /** Show CTA button + Play/App Store badge quick inserts (marketing composer). */
+  quickInserts?: boolean;
 };
 
 function looksLikeHtml(s: string): boolean {
@@ -96,6 +108,7 @@ export const HtmlEmailEditor = ({
   onUploadImage,
   disabled,
   layout = 'default',
+  quickInserts = false,
 }: Props): JSX.Element => {
   const [mode, setMode] = useState<'visual' | 'html'>('visual');
   const [htmlDraft, setHtmlDraft] = useState(value);
@@ -176,6 +189,39 @@ export const HtmlEmailEditor = ({
   const onPickImage = () => {
     setUploadError(null);
     fileInputRef.current?.click();
+  };
+
+  const insertHtmlBlock = (html: string) => {
+    if (!editor || mode !== 'visual') return;
+    editor.chain().focus().insertContent(html).run();
+  };
+
+  const insertCtaButton = () => {
+    const label = window.prompt('Button label', 'Download Airaplay');
+    if (label === null) return;
+    const url = window.prompt('Button link URL', 'https://airaplay.com');
+    if (url === null) return;
+    insertHtmlBlock(buildEmailCtaButtonHtml(label, url));
+  };
+
+  const insertPlayStoreBadge = () => {
+    const url = window.prompt('Google Play link', DEFAULT_PLAY_STORE_URL);
+    if (url === null) return;
+    insertHtmlBlock(buildPlayStoreBadgeHtml(url));
+  };
+
+  const insertAppStoreBadge = () => {
+    const url = window.prompt('App Store link', DEFAULT_APP_STORE_URL);
+    if (url === null) return;
+    insertHtmlBlock(buildAppStoreBadgeHtml(url));
+  };
+
+  const insertBothStoreBadges = () => {
+    const play = window.prompt('Google Play link', DEFAULT_PLAY_STORE_URL);
+    if (play === null) return;
+    const apple = window.prompt('App Store link', DEFAULT_APP_STORE_URL);
+    if (apple === null) return;
+    insertHtmlBlock(buildStoreBadgesRowHtml(play, apple));
   };
 
   const onImageSelected = async (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -332,6 +378,54 @@ export const HtmlEmailEditor = ({
           >
             <AlignRight className="w-4 h-4" />
           </button>
+          {quickInserts && (
+            <>
+              <div className={isCompose ? 'mx-0.5 h-6 w-px bg-[#dadce0]' : 'mx-1 h-6 w-px bg-gray-200'} />
+              <button
+                type="button"
+                onClick={insertCtaButton}
+                disabled={visualToolbarDisabled}
+                className={toolbarBtnClass(false)}
+                title="Insert call-to-action button"
+              >
+                <MousePointerClick className="h-4 w-4" />
+                {!isCompose && <span className="text-xs">Button</span>}
+              </button>
+              <button
+                type="button"
+                onClick={insertPlayStoreBadge}
+                disabled={visualToolbarDisabled}
+                className={toolbarBtnClass(false)}
+                title="Insert Google Play badge"
+              >
+                <Smartphone className="h-4 w-4" />
+                {!isCompose && <span className="text-xs">Play</span>}
+              </button>
+              <button
+                type="button"
+                onClick={insertAppStoreBadge}
+                disabled={visualToolbarDisabled}
+                className={toolbarBtnClass(false)}
+                title="Insert App Store badge"
+              >
+                <Smartphone className="h-4 w-4" />
+                {!isCompose && <span className="text-xs">App Store</span>}
+              </button>
+              <button
+                type="button"
+                onClick={insertBothStoreBadges}
+                disabled={visualToolbarDisabled}
+                className={
+                  isCompose
+                    ? 'rounded-md px-2 py-1.5 text-xs font-medium text-gray-700 hover:bg-gray-200/80 disabled:opacity-40'
+                    : 'rounded border border-gray-300 bg-white px-2 py-1 text-xs text-gray-700 disabled:opacity-50'
+                }
+                title="Insert Play Store + App Store badges side by side"
+              >
+                Store badges
+              </button>
+            </>
+          )}
         </div>
 
       <button

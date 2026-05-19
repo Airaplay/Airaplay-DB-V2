@@ -1512,7 +1512,7 @@ export const EmailManagementTab = (): JSX.Element => {
                   </details>
 
                   <p className="border-b border-[#e8eaed] bg-[#fafafa] px-3 py-2 text-xs leading-relaxed text-[#5f6368] sm:px-4">
-                    Uses your ZeptoMail config and the Weekly Newsletter template. Queue adds one send per recipient; click Run email queue (20 per run) until the batch is delivered. Max 5,000 addresses per queue.
+                    Uses your ZeptoMail config and the Weekly Newsletter template. Toolbar: insert a CTA button, Google Play badge, App Store badge, or both. Queue adds one send per recipient; click Run email queue (20 per run) until the batch is delivered. Max 5,000 addresses per queue.
                   </p>
 
                   <div className="flex min-h-[min(52vh,420px)] flex-1 flex-col px-2 pb-2 pt-2 sm:px-3">
@@ -1522,6 +1522,7 @@ export const EmailManagementTab = (): JSX.Element => {
                     <div className="flex min-h-[280px] flex-1 flex-col sm:min-h-[320px]">
                       <HtmlEmailEditor
                         layout="compose"
+                        quickInserts
                         value={newsletterDraft.html}
                         disabled={isQueueingNewsletter}
                         onUploadImage={uploadTemplateImage}
