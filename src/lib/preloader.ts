@@ -1,28 +1,29 @@
-// Preload critical resources
+/** Consumer app only — admin / web dashboard does not use Pexels placeholders on first paint. */
+function shouldPreloadConsumerPlaceholders(): boolean {
+  if (import.meta.env.VITE_APP_TARGET === 'web') return false;
+  if (typeof window !== 'undefined' && window.location.pathname.startsWith('/admin')) {
+    return false;
+  }
+  return true;
+}
+
+// Preload common music-app placeholder images (not used on admin dashboard).
 const preloadCriticalResources = () => {
-  // Preload common placeholder images
+  if (!shouldPreloadConsumerPlaceholders()) return;
+
   const criticalImages = [
     'https://images.pexels.com/photos/1190298/pexels-photo-1190298.jpeg?auto=compress&cs=tinysrgb&w=400',
     'https://images.pexels.com/photos/167636/pexels-photo-167636.jpeg?auto=compress&cs=tinysrgb&w=400',
-    'https://images.pexels.com/photos/1105666/pexels-photo-1105666.jpeg?auto=compress&cs=tinysrgb&w=400'
+    'https://images.pexels.com/photos/1105666/pexels-photo-1105666.jpeg?auto=compress&cs=tinysrgb&w=400',
   ];
 
-  criticalImages.forEach(src => {
+  criticalImages.forEach((src) => {
     const link = document.createElement('link');
     link.rel = 'preload';
     link.as = 'image';
     link.href = src;
     document.head.appendChild(link);
   });
-
-  // Preload critical fonts
-  const fontLink = document.createElement('link');
-  fontLink.rel = 'preload';
-  fontLink.as = 'font';
-  fontLink.type = 'font/woff2';
-  fontLink.href = 'https://fonts.gstatic.com/s/inter/v12/UcCO3FwrK3iLTeHuS_fvQtMwCp50KnMw2boKoduKmMEVuLyfAZ9hiA.woff2';
-  fontLink.crossOrigin = 'anonymous';
-  document.head.appendChild(fontLink);
 };
 
 // Remove initial loading screen

@@ -41,6 +41,14 @@ Deno.serve(async (req: Request) => {
 
     console.log('Starting email queue processing...');
 
+    // Recover rows left in "processing" after a timeout/crash so they can be retried.
+    const staleBefore = new Date(Date.now() - 5 * 60 * 1000).toISOString();
+    await supabase
+      .from('email_queue')
+      .update({ status: 'pending', updated_at: new Date().toISOString() })
+      .eq('status', 'processing')
+      .lt('updated_at', staleBefore);
+
     // Get pending emails from queue
     const { data: pendingEmails, error: fetchError } = await supabase
       .from('email_queue')

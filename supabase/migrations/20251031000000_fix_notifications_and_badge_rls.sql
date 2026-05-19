@@ -37,6 +37,11 @@ DROP POLICY IF EXISTS "Everyone can view verified badge config" ON verified_badg
 
 -- Step 3: Recreate verified_badge_config policies with inline admin checks
 
+DROP POLICY IF EXISTS "verified_badge_config_select_all" ON verified_badge_config;
+DROP POLICY IF EXISTS "verified_badge_config_insert_admin" ON verified_badge_config;
+DROP POLICY IF EXISTS "verified_badge_config_update_admin" ON verified_badge_config;
+DROP POLICY IF EXISTS "verified_badge_config_delete_admin" ON verified_badge_config;
+
 -- SELECT policy: Everyone can view (needed for profile display)
 CREATE POLICY "verified_badge_config_select_all"
   ON verified_badge_config

@@ -136,6 +136,7 @@ export const EmailManagementTab = (): JSX.Element => {
   const [newsletterQueueResult, setNewsletterQueueResult] = useState<{
     queued: number;
     skippedInvalid?: number;
+    cappedAtMax?: boolean;
   } | null>(null);
   const [newsletterComposeTab, setNewsletterComposeTab] = useState<'compose' | 'preview'>('compose');
 
@@ -435,9 +436,14 @@ export const EmailManagementTab = (): JSX.Element => {
         });
 
         if (rpcError) throw rpcError;
-        const queued = (data as { queued?: number })?.queued ?? 0;
+        const queued = (data as { queued?: number; max_per_request?: number })?.queued ?? 0;
         const skipped = (data as { skipped_invalid?: number })?.skipped_invalid ?? 0;
-        setNewsletterQueueResult({ queued, skippedInvalid: skipped });
+        const maxPerRequest = (data as { max_per_request?: number })?.max_per_request ?? 5000;
+        setNewsletterQueueResult({
+          queued,
+          skippedInvalid: skipped,
+          cappedAtMax: queued >= maxPerRequest && parsedCustomEmails.valid.length > maxPerRequest,
+        });
       } else {
         const { data, error: rpcError } = await supabase.rpc('admin_queue_newsletter_broadcast', {
           p_newsletter_title: newsletterDraft.title.trim(),
@@ -1474,7 +1480,7 @@ export const EmailManagementTab = (): JSX.Element => {
                       onChange={(e) => setNewsletterDraft((d) => ({ ...d, title: e.target.value }))}
                       disabled={isQueueingNewsletter}
                       className="min-w-0 flex-1 border-0 bg-transparent py-3 pr-3 text-[15px] text-[#202124] placeholder:text-[#80868b] focus:outline-none focus:ring-0 disabled:opacity-50"
-                      placeholder="Newsletter subject / headline"
+                      placeholder="Email subject (inbox + headline)"
                       autoComplete="off"
                     />
                   </div>
@@ -1538,8 +1544,11 @@ export const EmailManagementTab = (): JSX.Element => {
                     Queued {newsletterQueueResult.queued} message(s).
                     {newsletterQueueResult.skippedInvalid != null && newsletterQueueResult.skippedInvalid > 0
                       ? ` Skipped ${newsletterQueueResult.skippedInvalid} invalid address(es).`
+                      : ''}
+                    {newsletterQueueResult.cappedAtMax
+                      ? ' List was capped at 5,000 per batch — queue again for the remainder.'
                       : ''}{' '}
-                    Use Run email queue to send via ZeptoMail (repeat until the queue is empty).
+                    Use Run email queue to send via ZeptoMail (20 per click; repeat until the queue is empty).
                   </p>
                 </div>
               )}

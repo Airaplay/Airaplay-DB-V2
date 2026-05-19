@@ -115,6 +115,12 @@ Deno.serve(async (req: Request) => {
       htmlContent = htmlContent.split(placeholder).join(value);
     }
 
+    // Marketing broadcasts pass the composed headline as newsletter_title.
+    if (template_type === 'newsletter') {
+      const title = variables.newsletter_title?.trim();
+      if (title) subject = title;
+    }
+
     // Send email via ZeptoMail API
     const zeptomailResponse = await fetch('https://api.zeptomail.com/v1.1/email', {
       method: 'POST',
