@@ -6,6 +6,7 @@
  *   $env:SUPABASE_ACCESS_TOKEN = "sbp_..."
  *   node scripts/deploy-edge-to-supabase.mjs send-email
  *   node scripts/deploy-edge-to-supabase.mjs process-email-queue
+ *   node scripts/deploy-edge-to-supabase.mjs contribution-monthly-convert
  */
 import fs from 'fs';
 import path from 'path';
@@ -53,6 +54,11 @@ const bundles = {
       { name: 'index.ts', content: read('process-email-queue/index.ts') },
       { name: '../_shared/auth.ts', content: fs.readFileSync(path.join(sharedRoot, 'auth.ts'), 'utf8') },
     ],
+  },
+  'contribution-monthly-convert': {
+    entrypoint_path: 'index.ts',
+    verify_jwt: false,
+    files: [{ name: 'index.ts', content: read('contribution-monthly-convert/index.ts') }],
   },
 };
 
