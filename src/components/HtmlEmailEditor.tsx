@@ -25,10 +25,10 @@ import {
   Smartphone,
 } from 'lucide-react';
 import {
-  buildAppStoreBadgeHtml,
+  buildAppStoreBadgeTipTapContent,
   buildEmailCtaButtonHtml,
-  buildPlayStoreBadgeHtml,
-  buildStoreBadgesRowHtml,
+  buildPlayStoreBadgeTipTapContent,
+  buildStoreBadgesRowTipTapContent,
   DEFAULT_APP_STORE_URL,
   DEFAULT_PLAY_STORE_URL,
 } from '../lib/emailComposerSnippets';
@@ -76,6 +76,45 @@ const EmailBodyImage = Image.extend({
     alwaysPreserveAspectRatio: true,
     directions: emailImageResizeDirections,
   },
+});
+
+/** Inline store badges with link marks — survives TipTap serialization as clickable anchors. */
+const StoreBadgeImage = Image.extend({
+  name: 'storeBadgeImage',
+  inline: true,
+  group: 'inline',
+  marks: 'link',
+  selectable: true,
+  draggable: true,
+  addAttributes() {
+    return {
+      ...this.parent?.(),
+      store: {
+        default: null,
+        parseHTML: (el) => el.getAttribute('data-store'),
+        renderHTML: (attrs) => (attrs.store ? { 'data-store': attrs.store } : {}),
+      },
+    };
+  },
+  renderHTML({ node, HTMLAttributes }) {
+    const w = node.attrs.width as number | null | undefined;
+    const rest = { ...HTMLAttributes } as Record<string, unknown>;
+    delete rest.width;
+    delete rest.height;
+    let style = 'display:block;border:0;max-width:100%;height:auto;';
+    if (w != null && w > 0) {
+      style += `width:${w}px;`;
+    }
+    const extra: Record<string, string | number> = { style, border: 0 };
+    if (w != null && w > 0) {
+      extra.width = w;
+    }
+    return ['img', mergeAttributes(this.options.HTMLAttributes, rest, extra)];
+  },
+}).configure({
+  inline: true,
+  allowBase64: false,
+  resize: { enabled: false },
 });
 
 type Props = {
@@ -128,13 +167,15 @@ export const HtmlEmailEditor = ({
       StarterKit,
       Underline,
       Link.configure({
-        openOnClick: false,
+        openOnClick: quickInserts,
+        enableClickSelection: quickInserts,
         HTMLAttributes: {
           rel: 'noopener noreferrer',
           target: '_blank',
         },
       }),
       EmailBodyImage,
+      StoreBadgeImage,
       TextAlign.configure({
         types: ['heading', 'paragraph'],
       }),
@@ -207,13 +248,13 @@ export const HtmlEmailEditor = ({
   const insertPlayStoreBadge = () => {
     const url = window.prompt('Google Play link', DEFAULT_PLAY_STORE_URL);
     if (url === null) return;
-    insertHtmlBlock(buildPlayStoreBadgeHtml(url));
+    editor?.chain().focus().insertContent(buildPlayStoreBadgeTipTapContent(url)).run();
   };
 
   const insertAppStoreBadge = () => {
     const url = window.prompt('App Store link', DEFAULT_APP_STORE_URL);
     if (url === null) return;
-    insertHtmlBlock(buildAppStoreBadgeHtml(url));
+    editor?.chain().focus().insertContent(buildAppStoreBadgeTipTapContent(url)).run();
   };
 
   const insertBothStoreBadges = () => {
@@ -221,7 +262,7 @@ export const HtmlEmailEditor = ({
     if (play === null) return;
     const apple = window.prompt('App Store link', DEFAULT_APP_STORE_URL);
     if (apple === null) return;
-    insertHtmlBlock(buildStoreBadgesRowHtml(play, apple));
+    editor?.chain().focus().insertContent(buildStoreBadgesRowTipTapContent(play, apple)).run();
   };
 
   const onImageSelected = async (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -466,7 +507,7 @@ export const HtmlEmailEditor = ({
       <div
         className={
           isCompose
-            ? 'min-h-[220px] flex-1 overflow-y-auto overflow-x-hidden bg-white [&_.ProseMirror]:min-h-[200px] [&_.ProseMirror]:px-4 [&_.ProseMirror]:py-3 [&_.ProseMirror]:text-[15px] [&_.ProseMirror]:leading-6 [&_.ProseMirror]:text-[#202124] [&_.ProseMirror]:outline-none'
+            ? 'min-h-[220px] flex-1 overflow-y-auto overflow-x-hidden bg-white [&_.ProseMirror]:min-h-[200px] [&_.ProseMirror]:px-4 [&_.ProseMirror]:py-3 [&_.ProseMirror]:text-[15px] [&_.ProseMirror]:leading-6 [&_.ProseMirror]:text-[#202124] [&_.ProseMirror]:outline-none [&_.ProseMirror_a]:cursor-pointer [&_.ProseMirror_a_img]:border-0'
             : 'overflow-x-hidden overflow-hidden rounded-lg border border-gray-300'
         }
       >

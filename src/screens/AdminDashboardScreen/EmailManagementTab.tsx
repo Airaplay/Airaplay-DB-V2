@@ -1381,7 +1381,7 @@ export const EmailManagementTab = (): JSX.Element => {
                       srcDoc={getPreviewContent(selectedTemplate).html}
                       className="w-full min-h-[500px] border-0"
                       title="Email Preview"
-                      sandbox="allow-same-origin"
+                      sandbox="allow-same-origin allow-popups allow-popups-to-escape-sandbox"
                     />
                   </div>
                 </div>
@@ -1746,7 +1746,7 @@ export const EmailManagementTab = (): JSX.Element => {
                   <iframe
                     title="Newsletter preview"
                     className="min-h-[min(60vh,480px)] w-full flex-1 rounded border border-[#dadce0] bg-white shadow-sm"
-                    sandbox="allow-same-origin"
+                    sandbox="allow-same-origin allow-popups allow-popups-to-escape-sandbox"
                     srcDoc={buildNewsletterDraftPreviewHtml()}
                   />
                 </div>
