@@ -243,7 +243,7 @@ function SettingsFormPanel({
         disabled={isSaving}
         className="px-6 py-3 bg-[#309605] text-white rounded-lg font-medium disabled:opacity-50"
       >
-        {isSaving ? 'Saving...' : 'Save settings'}
+        {isSaving ? 'Saving settings…' : 'Save settings'}
       </button>
     </>
   );
@@ -266,6 +266,7 @@ export const ReferralMilestoneProgramTab = (): JSX.Element => {
   const [isLoading, setIsLoading] = useState(true);
   const [isRefreshing, setIsRefreshing] = useState(false);
   const [isSavingSettings, setIsSavingSettings] = useState(false);
+  const [settingsMessage, setSettingsMessage] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [showSettings, setShowSettings] = useState(false);
   const [formData, setFormData] = useState<SettingsForm>({
@@ -351,11 +352,16 @@ export const ReferralMilestoneProgramTab = (): JSX.Element => {
 
   const handleRefreshAll = async () => {
     setIsRefreshing(true);
+    setSettingsMessage(null);
     try {
-      await supabase.rpc('admin_refresh_referral_milestone_all');
-      await loadAll();
-    } catch {
-      alert('Failed to refresh qualifications');
+      const { error: refreshError } = await supabase.rpc('admin_refresh_referral_milestone_all');
+      if (refreshError) throw refreshError;
+      await loadOverview();
+      if (selectedReferrerId) await loadDetail(selectedReferrerId);
+      setSettingsMessage('Referral qualifications re-evaluated.');
+    } catch (err) {
+      const message = err instanceof Error ? err.message : 'Failed to refresh qualifications';
+      alert(message);
     } finally {
       setIsRefreshing(false);
     }
@@ -363,8 +369,10 @@ export const ReferralMilestoneProgramTab = (): JSX.Element => {
 
   const handleSaveSettings = async () => {
     setIsSavingSettings(true);
+    setSettingsMessage(null);
     try {
-      await supabase.rpc('admin_update_referral_milestone_settings', {
+      const enablingNow = formData.is_enabled && !settings?.is_enabled;
+      const { error: saveError } = await supabase.rpc('admin_update_referral_milestone_settings', {
         p_is_enabled: formData.is_enabled,
         p_program_active: formData.program_active,
         p_required_qualified_referrals: formData.required_qualified_referrals,
@@ -374,14 +382,24 @@ export const ReferralMilestoneProgramTab = (): JSX.Element => {
         p_detect_abuse: formData.detect_abuse,
         p_detect_shared_device: formData.detect_shared_device,
         p_max_accounts_per_device: formData.max_accounts_per_device,
-        p_program_start_at: settings?.program_start_at ?? new Date().toISOString(),
+        p_program_start_at: enablingNow
+          ? new Date().toISOString()
+          : (settings?.program_start_at ?? new Date().toISOString()),
         p_auto_approve_payout: formData.auto_approve_payout,
       });
-      if (formData.is_enabled) await supabase.rpc('admin_refresh_referral_milestone_all');
-      await loadAll();
+      if (saveError) throw saveError;
+
+      await loadOverview();
+      setSettingsMessage(
+        formData.is_enabled
+          ? 'Settings saved. Use "Re-evaluate all" to process existing referrals.'
+          : 'Settings saved.',
+      );
       setShowSettings(false);
-    } catch {
-      alert('Failed to save settings');
+    } catch (err) {
+      const message = err instanceof Error ? err.message : 'Failed to save settings';
+      setSettingsMessage(message);
+      alert(message);
     } finally {
       setIsSavingSettings(false);
     }
@@ -447,6 +465,9 @@ export const ReferralMilestoneProgramTab = (): JSX.Element => {
       </div>
 
       {error && <div className="rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700">{error}</div>}
+      {settingsMessage && (
+        <div className="rounded-lg border border-green-200 bg-green-50 px-4 py-3 text-sm text-green-800">{settingsMessage}</div>
+      )}
 
       <div className="flex flex-wrap gap-2 justify-between items-center">
         <div className="flex gap-2">
