@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState, type Dispatch, type SetStateAction } from 'react';
+import { useCallback, useEffect, useState, type Dispatch, type SetStateAction } from 'react';
 import {
   AlertTriangle,
   ArrowLeft,
@@ -17,6 +17,7 @@ import { LoadingLogo } from '../../components/LoadingLogo';
 interface MilestoneSettings {
   is_enabled: boolean;
   program_active: boolean;
+  auto_approve_payout: boolean;
   required_qualified_referrals: number;
   min_active_days: number;
   reward_amount_ngn: number;
@@ -44,6 +45,10 @@ interface LeaderboardRow {
   target_count: number;
   progress_percent: number;
   payout_status: string;
+  milestone_reached: boolean;
+  credited_at: string | null;
+  live_balance_after: number | null;
+  current_live_balance_usd: number;
 }
 
 interface QualificationRow {
@@ -61,6 +66,7 @@ interface QualificationRow {
 interface SettingsForm {
   is_enabled: boolean;
   program_active: boolean;
+  auto_approve_payout: boolean;
   required_qualified_referrals: number;
   min_active_days: number;
   reward_amount_ngn: number;
@@ -69,6 +75,10 @@ interface SettingsForm {
   detect_shared_device: boolean;
   max_accounts_per_device: number;
 }
+
+type StatusFilter = 'all' | 'tracking' | 'ready_for_review' | 'paid' | 'rejected';
+type MilestoneFilter = 'all' | 'reached' | 'not_reached';
+type SortOption = 'progress_desc' | 'progress_asc' | 'updated_desc' | 'name_asc';
 
 const formatNgn = (amount: number): string =>
   new Intl.NumberFormat('en-NG', { style: 'currency', currency: 'NGN', maximumFractionDigits: 0 }).format(amount);
@@ -171,6 +181,16 @@ function SettingsFormPanel({
         />
         <span className="text-sm font-medium">Program active</span>
       </label>
+      <label className="flex items-center gap-2">
+        <input
+          type="checkbox"
+          checked={formData.auto_approve_payout}
+          onChange={(e) => setFormData((f) => ({ ...f, auto_approve_payout: e.target.checked }))}
+        />
+        <span className="text-sm font-medium">
+          Auto-approve payout (credit Live Balance when milestone is reached)
+        </span>
+      </label>
       <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
         {[
           { key: 'required_qualified_referrals' as const, label: 'Required qualified referrals' },
@@ -235,7 +255,10 @@ export const ReferralMilestoneProgramTab = (): JSX.Element => {
   const [rows, setRows] = useState<LeaderboardRow[]>([]);
   const [totalRows, setTotalRows] = useState(0);
   const [searchQuery, setSearchQuery] = useState('');
-  const [statusFilter, setStatusFilter] = useState<'all' | 'ready_for_review' | 'tracking' | 'paid'>('all');
+  const [statusFilter, setStatusFilter] = useState<StatusFilter>('all');
+  const [milestoneFilter, setMilestoneFilter] = useState<MilestoneFilter>('all');
+  const [sortBy, setSortBy] = useState<SortOption>('progress_desc');
+  const [isApproving, setIsApproving] = useState(false);
   const [selectedReferrerId, setSelectedReferrerId] = useState<string | null>(null);
   const [detailQualifications, setDetailQualifications] = useState<QualificationRow[]>([]);
   const [detailPayout, setDetailPayout] = useState<Record<string, unknown> | null>(null);
@@ -248,6 +271,7 @@ export const ReferralMilestoneProgramTab = (): JSX.Element => {
   const [formData, setFormData] = useState<SettingsForm>({
     is_enabled: false,
     program_active: true,
+    auto_approve_payout: false,
     required_qualified_referrals: 10,
     min_active_days: 3,
     reward_amount_ngn: 5000,
@@ -264,6 +288,11 @@ export const ReferralMilestoneProgramTab = (): JSX.Element => {
         p_limit: 100,
         p_offset: 0,
         p_search: searchQuery.trim() || null,
+        p_status: statusFilter === 'all' ? null : statusFilter,
+        p_milestone_reached:
+          milestoneFilter === 'all' ? null : milestoneFilter === 'reached',
+        p_min_qualified: null,
+        p_sort: sortBy,
       }),
     ]);
     if (statsRes.error) throw statsRes.error;
@@ -274,6 +303,7 @@ export const ReferralMilestoneProgramTab = (): JSX.Element => {
     setFormData({
       is_enabled: payload.settings.is_enabled,
       program_active: payload.settings.program_active,
+      auto_approve_payout: payload.settings.auto_approve_payout ?? false,
       required_qualified_referrals: payload.settings.required_qualified_referrals,
       min_active_days: payload.settings.min_active_days,
       reward_amount_ngn: payload.settings.reward_amount_ngn,
@@ -285,7 +315,7 @@ export const ReferralMilestoneProgramTab = (): JSX.Element => {
     const board = boardRes.data as { rows: LeaderboardRow[]; total: number };
     setRows(board.rows ?? []);
     setTotalRows(board.total ?? 0);
-  }, [searchQuery]);
+  }, [searchQuery, statusFilter, milestoneFilter, sortBy]);
 
   const loadDetail = useCallback(async (referrerId: string) => {
     const { data, error: rpcError } = await supabase.rpc('admin_get_referral_milestone_referrer_detail', {
@@ -319,11 +349,6 @@ export const ReferralMilestoneProgramTab = (): JSX.Element => {
     void loadAll();
   }, [loadAll]);
 
-  const filteredRows = useMemo(() => {
-    if (statusFilter === 'all') return rows;
-    return rows.filter((r) => r.payout_status === statusFilter);
-  }, [rows, statusFilter]);
-
   const handleRefreshAll = async () => {
     setIsRefreshing(true);
     try {
@@ -350,6 +375,7 @@ export const ReferralMilestoneProgramTab = (): JSX.Element => {
         p_detect_shared_device: formData.detect_shared_device,
         p_max_accounts_per_device: formData.max_accounts_per_device,
         p_program_start_at: settings?.program_start_at ?? new Date().toISOString(),
+        p_auto_approve_payout: formData.auto_approve_payout,
       });
       if (formData.is_enabled) await supabase.rpc('admin_refresh_referral_milestone_all');
       await loadAll();
@@ -361,16 +387,40 @@ export const ReferralMilestoneProgramTab = (): JSX.Element => {
     }
   };
 
-  const handlePayoutAction = async (referrerId: string, status: string) => {
+  const handleApprovePayout = async (referrerId: string) => {
+    if (!confirm('Approve and credit this reward to the user\'s Live Balance (withdrawable)?')) return;
+    setIsApproving(true);
+    try {
+      const { data, error: rpcError } = await supabase.rpc('admin_approve_referral_milestone_payout', {
+        p_referrer_id: referrerId,
+        p_admin_notes: 'Approved by admin — credited to Live Balance',
+      });
+      if (rpcError) throw rpcError;
+      const result = data as { ok?: boolean; error?: string; live_balance_after?: number };
+      if (result?.ok === false) {
+        alert(result.error ?? 'Could not credit payout');
+        return;
+      }
+      await loadAll();
+    } catch (err) {
+      console.error(err);
+      alert('Failed to approve payout');
+    } finally {
+      setIsApproving(false);
+    }
+  };
+
+  const handleRejectPayout = async (referrerId: string) => {
+    if (!confirm('Reject this milestone payout? No Live Balance will be credited.')) return;
     try {
       await supabase.rpc('admin_update_referral_milestone_payout_status', {
         p_referrer_id: referrerId,
-        p_payout_status: status,
-        p_admin_notes: status === 'paid' ? 'Marked paid by admin' : status === 'rejected' ? 'Rejected' : null,
+        p_payout_status: 'rejected',
+        p_admin_notes: 'Rejected by admin',
       });
       await loadAll();
     } catch {
-      alert('Failed to update payout status');
+      alert('Failed to reject payout');
     }
   };
 
@@ -392,7 +442,8 @@ export const ReferralMilestoneProgramTab = (): JSX.Element => {
     <div className="space-y-6">
       <div className="rounded-lg border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-900">
         <strong>Program 2 — Cash milestone.</strong> Invite {target} users active {minDays}+ days each →{' '}
-        {formatNgn(rewardNgn)} ({formatUsd(rewardUsd)}). Admin-only tracking; not shown in the consumer app.
+        {formatNgn(rewardNgn)} ({formatUsd(rewardUsd)}). On approve, reward is added to{' '}
+        <strong>Live Balance</strong> (withdrawable). Admin-only tracking.
       </div>
 
       {error && <div className="rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700">{error}</div>}
@@ -430,18 +481,30 @@ export const ReferralMilestoneProgramTab = (): JSX.Element => {
       {!selectedReferrerId ? (
         <Card>
           <CardContent className="p-6">
-            <div className="flex flex-col md:flex-row gap-4 mb-6">
-              <div className="relative flex-1">
+            <div className="flex flex-col md:flex-row flex-wrap gap-3 mb-6">
+              <div className="relative flex-1 min-w-[200px]">
                 <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-gray-400" />
                 <input type="text" placeholder="Search referrer..." value={searchQuery} onChange={(e) => setSearchQuery(e.target.value)} onKeyDown={(e) => e.key === 'Enter' && void loadOverview()} className="w-full pl-10 pr-4 py-2 border border-gray-300 rounded-lg" />
               </div>
-              <select value={statusFilter} onChange={(e) => setStatusFilter(e.target.value as typeof statusFilter)} className="px-4 py-2 border border-gray-300 rounded-lg">
-                <option value="all">All</option>
+              <select value={statusFilter} onChange={(e) => setStatusFilter(e.target.value as StatusFilter)} className="px-4 py-2 border border-gray-300 rounded-lg text-sm">
+                <option value="all">All statuses</option>
                 <option value="tracking">Tracking</option>
                 <option value="ready_for_review">Ready for review</option>
-                <option value="paid">Paid</option>
+                <option value="paid">Paid / credited</option>
+                <option value="rejected">Rejected</option>
               </select>
-              <button type="button" onClick={() => void loadOverview()} className="px-4 py-2 bg-gray-100 rounded-lg">Search</button>
+              <select value={milestoneFilter} onChange={(e) => setMilestoneFilter(e.target.value as MilestoneFilter)} className="px-4 py-2 border border-gray-300 rounded-lg text-sm">
+                <option value="all">All progress</option>
+                <option value="reached">Milestone reached</option>
+                <option value="not_reached">Not yet reached</option>
+              </select>
+              <select value={sortBy} onChange={(e) => setSortBy(e.target.value as SortOption)} className="px-4 py-2 border border-gray-300 rounded-lg text-sm">
+                <option value="progress_desc">Progress (high → low)</option>
+                <option value="progress_asc">Progress (low → high)</option>
+                <option value="updated_desc">Recently updated</option>
+                <option value="name_asc">Name (A–Z)</option>
+              </select>
+              <button type="button" onClick={() => void loadOverview()} className="px-4 py-2 bg-gray-100 rounded-lg text-sm font-medium">Apply filters</button>
             </div>
             <p className="text-sm text-gray-500 mb-4">{totalRows} referrer(s)</p>
             <div className="overflow-x-auto">
@@ -454,28 +517,42 @@ export const ReferralMilestoneProgramTab = (): JSX.Element => {
                     <th className="text-left py-3 px-4 text-sm font-medium text-gray-700">Pending</th>
                     <th className="text-left py-3 px-4 text-sm font-medium text-gray-700">Disqualified</th>
                     <th className="text-left py-3 px-4 text-sm font-medium text-gray-700">Status</th>
+                    <th className="text-left py-3 px-4 text-sm font-medium text-gray-700">Live Balance</th>
                     <th className="text-left py-3 px-4 text-sm font-medium text-gray-700">Actions</th>
                   </tr>
                 </thead>
                 <tbody>
-                  {filteredRows.map((row) => (
+                  {rows.map((row) => (
                     <tr key={row.referrer_id} className="border-b border-gray-100 hover:bg-gray-50">
                       <td className="py-3 px-4">
                         <div className="text-sm font-medium">{row.display_name || row.email || 'Unknown'}</div>
                         <div className="text-xs text-gray-500 font-mono">{row.referral_code || '—'}</div>
+                        {row.milestone_reached && !row.credited_at && (
+                          <span className="block text-xs text-amber-700 font-medium mt-0.5">Milestone reached</span>
+                        )}
                       </td>
                       <td className="py-3 px-4"><ProgressBar qualified={row.qualified_count} target={row.target_count} percent={row.progress_percent} /></td>
                       <td className="py-3 px-4 text-sm text-green-700 font-medium">{row.qualified_count}</td>
                       <td className="py-3 px-4 text-sm text-yellow-700">{row.pending_count}</td>
                       <td className="py-3 px-4 text-sm text-red-600">{row.disqualified_count}</td>
-                      <td className="py-3 px-4"><span className={`px-2 py-1 rounded-full text-xs font-medium ${payoutStatusClass(row.payout_status)}`}>{row.payout_status.replace(/_/g, ' ')}</span></td>
                       <td className="py-3 px-4">
-                        <button type="button" onClick={() => { setSelectedReferrerId(row.referrer_id); void loadDetail(row.referrer_id); }} className="px-3 py-1 bg-[#309605] text-white rounded-lg text-sm">View</button>
+                        <span className={`px-2 py-1 rounded-full text-xs font-medium ${payoutStatusClass(row.credited_at ? 'paid' : row.payout_status)}`}>
+                          {row.credited_at ? 'credited' : row.payout_status.replace(/_/g, ' ')}
+                        </span>
+                      </td>
+                      <td className="py-3 px-4 text-sm text-gray-800">{formatUsd(Number(row.current_live_balance_usd ?? 0))}</td>
+                      <td className="py-3 px-4">
+                        <div className="flex gap-1 flex-wrap">
+                          {row.milestone_reached && !row.credited_at && row.payout_status !== 'rejected' && (
+                            <button type="button" disabled={isApproving} onClick={() => void handleApprovePayout(row.referrer_id)} className="px-2 py-1 bg-green-600 text-white rounded-lg text-xs disabled:opacity-50">Approve</button>
+                          )}
+                          <button type="button" onClick={() => { setSelectedReferrerId(row.referrer_id); void loadDetail(row.referrer_id); }} className="px-2 py-1 bg-[#309605] text-white rounded-lg text-xs">View</button>
+                        </div>
                       </td>
                     </tr>
                   ))}
-                  {filteredRows.length === 0 && (
-                    <tr><td colSpan={7} className="py-8 text-center text-gray-500">No data yet. Enable program and re-evaluate.</td></tr>
+                  {rows.length === 0 && (
+                    <tr><td colSpan={8} className="py-8 text-center text-gray-500">No matches. Adjust filters or re-evaluate.</td></tr>
                   )}
                 </tbody>
               </table>
@@ -487,11 +564,12 @@ export const ReferralMilestoneProgramTab = (): JSX.Element => {
           <CardContent className="p-6">
             <div className="flex items-center justify-between mb-6">
               <button type="button" onClick={() => setSelectedReferrerId(null)} className="flex items-center gap-2 px-4 py-2 bg-gray-100 rounded-lg"><ArrowLeft className="w-4 h-4" /> Back</button>
-              {detailPayout?.payout_status === 'ready_for_review' && (
+              {Boolean(detailPayout?.milestone_reached) && !detailPayout?.credited_at && detailPayout?.payout_status !== 'rejected' && selectedReferrerId && (
                 <div className="flex gap-2">
-                  <button type="button" onClick={() => void handlePayoutAction(selectedReferrerId, 'approved')} className="px-3 py-2 bg-blue-600 text-white rounded-lg text-sm">Approve</button>
-                  <button type="button" onClick={() => void handlePayoutAction(selectedReferrerId, 'paid')} className="px-3 py-2 bg-green-600 text-white rounded-lg text-sm">Mark paid</button>
-                  <button type="button" onClick={() => void handlePayoutAction(selectedReferrerId, 'rejected')} className="px-3 py-2 bg-red-600 text-white rounded-lg text-sm">Reject</button>
+                  <button type="button" disabled={isApproving} onClick={() => void handleApprovePayout(selectedReferrerId)} className="px-3 py-2 bg-green-600 text-white rounded-lg text-sm disabled:opacity-50">
+                    Approve & credit Live Balance
+                  </button>
+                  <button type="button" onClick={() => void handleRejectPayout(selectedReferrerId)} className="px-3 py-2 bg-red-600 text-white rounded-lg text-sm">Reject</button>
                 </div>
               )}
             </div>
@@ -499,8 +577,35 @@ export const ReferralMilestoneProgramTab = (): JSX.Element => {
               <h3 className="text-xl font-bold mb-2">{(detailReferrer?.display_name as string) || (detailReferrer?.email as string)}</h3>
               <p className="text-sm font-mono text-gray-600 mb-4">{(detailReferrer?.referral_code as string) || '—'}</p>
               <p className="text-lg font-semibold text-[#309605]">
-                {Number(detailPayout?.qualified_count ?? 0)}/{Number(detailPayout?.target_count ?? target)} qualified → {formatNgn(rewardNgn)}
+                {Number(detailPayout?.qualified_count ?? 0)}/{Number(detailPayout?.target_count ?? target)} qualified → {formatNgn(rewardNgn)} ({formatUsd(rewardUsd)})
               </p>
+              <div className="mt-4 grid grid-cols-2 md:grid-cols-4 gap-3 text-sm">
+                <div>
+                  <p className="text-gray-600">Current Live Balance</p>
+                  <p className="font-semibold">{formatUsd(Number(detailPayout?.current_live_balance_usd ?? detailReferrer?.current_live_balance_usd ?? 0))}</p>
+                </div>
+                <div>
+                  <p className="text-gray-600">Payout status</p>
+                  <p className="font-semibold capitalize">{String(detailPayout?.payout_status ?? 'tracking').replace(/_/g, ' ')}</p>
+                </div>
+                {detailPayout?.credited_at ? (
+                  <>
+                    <div>
+                      <p className="text-gray-600">Credited</p>
+                      <p className="font-semibold text-green-700">{new Date(String(detailPayout.credited_at)).toLocaleString()}</p>
+                    </div>
+                    <div>
+                      <p className="text-gray-600">Balance after credit</p>
+                      <p className="font-semibold">{formatUsd(Number(detailPayout.live_balance_after ?? 0))}</p>
+                    </div>
+                  </>
+                ) : (
+                  <div>
+                    <p className="text-gray-600">Auto-approve</p>
+                    <p className="font-semibold">{detailPayout?.auto_approve_payout ? 'On' : 'Off'}</p>
+                  </div>
+                )}
+              </div>
             </div>
             <h4 className="text-lg font-semibold mb-4">Referred users</h4>
             <div className="overflow-x-auto">
