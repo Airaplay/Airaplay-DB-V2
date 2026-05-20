@@ -3,6 +3,7 @@ import { Users, TrendingUp, AlertTriangle, DollarSign, Gift, CheckCircle, XCircl
 import { supabase } from '../../lib/supabase';
 import { Card, CardContent } from '../../components/ui/card';
 import { LoadingLogo } from '../../components/LoadingLogo';
+import { ReferralMilestoneProgramTab } from './ReferralMilestoneProgramTab';
 
 interface ReferralAnalytics {
   total_referrals: number;
@@ -61,7 +62,7 @@ export const ReferralManagementSection = (): JSX.Element => {
   const [selectedReferrer, setSelectedReferrer] = useState<ReferrerSummary | null>(null);
   const [referrerDetails, setReferrerDetails] = useState<ReferralDetail[]>([]);
   const [isLoading, setIsLoading] = useState(true);
-  const [activeTab, setActiveTab] = useState<'overview' | 'settings' | 'activity'>('overview');
+  const [activeTab, setActiveTab] = useState<'overview' | 'settings' | 'activity' | 'milestone'>('overview');
   const [isUpdatingSettings, setIsUpdatingSettings] = useState(false);
   const [searchQuery, setSearchQuery] = useState('');
   const [volumeFilter, setVolumeFilter] = useState<'all' | 'high' | 'low'>('all');
@@ -376,7 +377,19 @@ export const ReferralManagementSection = (): JSX.Element => {
         >
           Activity
         </button>
+        <button
+          onClick={() => setActiveTab('milestone')}
+          className={`px-4 py-2 rounded-lg font-medium transition-colors ${
+            activeTab === 'milestone'
+              ? 'bg-[#309605] text-white'
+              : 'bg-gray-100 text-gray-700 hover:bg-gray-200'
+          }`}
+        >
+          ₦5K Milestone
+        </button>
       </div>
+
+      {activeTab === 'milestone' && <ReferralMilestoneProgramTab />}
 
       {activeTab === 'overview' && (
         <>

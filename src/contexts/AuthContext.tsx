@@ -3,6 +3,7 @@ import type { ReactNode } from 'react';
 import type { User, Session, AuthChangeEvent } from '@supabase/supabase-js';
 import { supabase, refreshSessionIfNeeded } from '../lib/supabase';
 import { performCompleteLogout } from '../lib/logoutService';
+import { getBestEffortUserAgent, getOrCreateDeviceId } from '../lib/deviceId';
 
 interface AuthState {
   user: User | null;
@@ -88,6 +89,50 @@ async function claimSignupBonusBestEffort(userId: string): Promise<void> {
     // must never affect login, refresh, or auth state.
   } finally {
     signupBonusClaimInFlightByUser.delete(userId);
+  }
+}
+
+type RegisterDeviceResponse = {
+  ok?: boolean;
+  status?: string;
+};
+
+const deviceRegisterInFlightByUser = new Set<string>();
+const deviceRegisterCompletedByUser = new Set<string>();
+
+function isRegisterDeviceResponse(value: unknown): value is RegisterDeviceResponse {
+  return typeof value === 'object' && value !== null;
+}
+
+/** Best-effort device fingerprint for referral milestone anti-farming (server-side only). */
+async function registerUserDeviceBestEffort(userId: string): Promise<void> {
+  if (
+    deviceRegisterCompletedByUser.has(userId) ||
+    deviceRegisterInFlightByUser.has(userId)
+  ) {
+    return;
+  }
+
+  const deviceId = getOrCreateDeviceId();
+  if (!deviceId) return;
+
+  deviceRegisterInFlightByUser.add(userId);
+
+  try {
+    const { data, error } = await supabase.rpc('register_user_device', {
+      p_device_id: deviceId,
+      p_user_agent: getBestEffortUserAgent(),
+    });
+
+    if (error) return;
+
+    if (isRegisterDeviceResponse(data) && data.ok === true) {
+      deviceRegisterCompletedByUser.add(userId);
+    }
+  } catch {
+    // Best-effort only: missing migration/RPC must not affect auth.
+  } finally {
+    deviceRegisterInFlightByUser.delete(userId);
   }
 }
 
@@ -238,10 +283,9 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         console.error('[AuthContext] Error fetching display name:', error);
       }
 
-      // Best-effort: the RPC is idempotent server-side and credits only
-      // non-withdrawable promo_balance. This helper also dedupes client-side
-      // and swallows any RPC/schema mismatch so auth UX cannot be affected.
+      // Best-effort side effects after auth is settled — must never block UI.
       void claimSignupBonusBestEffort(user.id);
+      void registerUserDeviceBestEffort(user.id);
     }
   }, [safeSetState, removeInitialLoader]);
 
